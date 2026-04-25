@@ -21,9 +21,7 @@ function normalizeMaxTokens(maxTokens: number): number {
 }
 
 function buildMessageKey(message: ChatMessage): string {
-  const attachments = (message.attachments || [])
-    .map((a) => `${a.mimeType}:${a.virBudget ?? 0}`)
-    .join("|");
+  const attachments = (message.attachments || []).map((a) => `${a.mimeType}`).join("|");
   return `${message.role}:${message.content}:${attachments}`;
 }
 
@@ -67,7 +65,7 @@ export async function getTokens(msgs: ChatMessage[], port?: number): Promise<num
     if (!message.attachments) continue;
     for (const attachment of message.attachments) {
       if (attachment.mimeType.startsWith("image/")) {
-        attachmentTokens += attachment.virBudget ?? 560;
+        attachmentTokens += 560;
       } else if (attachment.mimeType.startsWith("audio/")) {
         attachmentTokens += 256;
       }

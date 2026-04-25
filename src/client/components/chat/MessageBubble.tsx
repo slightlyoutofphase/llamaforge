@@ -67,6 +67,7 @@ export const MessageBubble = React.memo(
     );
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const renderedContent = message.content || message.rawContent || "";
 
     useEffect(() => {
       if (isEditing && textareaRef.current) {
@@ -182,7 +183,7 @@ export const MessageBubble = React.memo(
             }`}>
             <div className="prose prose-invert max-w-none prose-p:leading-relaxed prose-pre:bg-[#11111b] prose-pre:border prose-pre:border-[var(--color-border)] prose-pre:rounded-xl">
               <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
-                {message.content + (isStreaming ? " \u2588" : "")}
+                {renderedContent + (isStreaming ? " \u2588" : "")}
               </ReactMarkdown>
             </div>
           </div>
@@ -234,6 +235,7 @@ export const MessageBubble = React.memo(
   (prev, next) => {
     return (
       prev.message.content === next.message.content &&
+      prev.message.rawContent === next.message.rawContent &&
       prev.message.thinkingContent === next.message.thinkingContent &&
       prev.message.toolCallsJson === next.message.toolCallsJson &&
       prev.isStreaming === next.isStreaming &&

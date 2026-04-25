@@ -112,7 +112,7 @@ interface AppState {
   /** Clears unread activity for a chat. */
   clearUnreadChat: (chatId: string) => void;
   /** Sends a message to the active chat via the streamProxy. */
-  sendMessage: (content: string, files?: File[], virBudgets?: number[]) => void;
+  sendMessage: (content: string, files?: File[]) => void;
   /** Interrupts an ongoing generation. */
   stopGeneration: () => void;
   /** Loads a chat session and its message history from the backend. */
@@ -483,7 +483,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
   },
 
-  sendMessage: async (content: string, files?: File[], virBudgets?: number[]) => {
+  sendMessage: async (content: string, files?: File[]) => {
     const state = get();
     const chatId = state.currentChatId;
     if (!chatId) {
@@ -529,9 +529,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         formData.append("content", content);
         for (const f of files) {
           formData.append("file", f);
-        }
-        if (virBudgets) {
-          formData.append("virBudgets", JSON.stringify(virBudgets));
         }
 
         res = await fetch(`/api/chats/${chatId}/messages`, {

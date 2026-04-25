@@ -1,11 +1,12 @@
 /**
  * @packageDocumentation
- * Handles multimodal data processing including image base64 conversion and PDF text extraction.
+ * Handles multimodal data processing including attachment file storage, file URL construction, and PDF text extraction.
  */
 
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Attachment, GgufDisplayMetadata } from "@shared/types.js";
 import { getDb } from "./persistence/db";
 
@@ -42,7 +43,6 @@ export interface ProcessedAttachment extends Attachment {
  * @param fileName - Original filename.
  * @param mimeType - Document MIME type.
  * @param buffer - File contents.
- * @param virBudget - Optional Visual Information Retrieval budget for vision models.
  * @returns A promise resolving to the {@link ProcessedAttachment}.
  */
 export async function processUpload(
@@ -51,7 +51,6 @@ export async function processUpload(
   fileName: string,
   mimeType: string,
   buffer: ArrayBuffer,
-  virBudget?: number,
 ): Promise<ProcessedAttachment> {
   const appData = path.join(os.homedir(), ".llamaforge", "attachments", chatId, messageId);
   await fs.mkdir(appData, { recursive: true });
@@ -73,7 +72,6 @@ export async function processUpload(
     mimeType,
     filePath: relPath,
     fileName,
-    virBudget,
     createdAt: Date.now(),
   };
 
@@ -202,28 +200,23 @@ export async function buildContentParts(
           console.warn(`Invalid attachment path: ${a.filePath}`);
           continue;
         }
-        const buf = await fs.readFile(absPath);
-        const b64 = buf.toString("base64");
-
-        if (a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/")) {
-          if (a.mimeType.startsWith("image/") && metadata && !metadata.hasVisionEncoder) continue;
-          if (a.mimeType.startsWith("audio/") && metadata && !metadata.hasAudioEncoder) continue;
-
-          const mediaPart: any = {
-            type: "image_url",
-            image_url: { url: `data:${a.mimeType};base64,${b64}` },
-          };
-          if (
-            metadata?.architecture === "gemma4" &&
-            a.virBudget &&
-            a.mimeType.startsWith("image/")
-          ) {
-            mediaPart.resolution = a.virBudget;
-          }
-          parts.push(mediaPart);
+        try {
+          await fs.access(absPath);
+        } catch {
+          console.warn(`Attachment file missing: ${absPath}`);
+          continue;
         }
+
+        if (a.mimeType.startsWith("image/") && metadata && !metadata.hasVisionEncoder) continue;
+        if (a.mimeType.startsWith("audio/") && metadata && !metadata.hasAudioEncoder) continue;
+
+        const mediaPart: any = {
+          type: "image_url",
+          image_url: { url: pathToFileURL(absPath).toString() },
+        };
+        parts.push(mediaPart);
       } catch (e) {
-        console.warn(`Failed reading attachment file: ${a.filePath}`, e);
+        console.warn(`Failed resolving attachment file: ${a.filePath}`, e);
       }
     }
   }

@@ -16,10 +16,12 @@ mock.module("node:fs/promises", () => ({
     mkdir: async () => {},
     writeFile: async () => {},
     readFile: async (_path: string) => Buffer.from("abc"),
+    access: async () => {},
   },
   mkdir: async () => {},
   writeFile: async () => {},
   readFile: async (_path: string) => Buffer.from("abc"),
+  access: async () => {},
 }));
 
 describe("streamProxy", () => {
@@ -100,7 +102,7 @@ describe("streamProxy", () => {
     expect(userMsg).toBeDefined();
     expect(Array.isArray(userMsg.content)).toBe(true);
     expect(userMsg.content[0].type).toBe("image_url");
-    expect(userMsg.content[0].image_url.url).toBe("data:image/png;base64,YWJj");
+    expect(userMsg.content[0].image_url.url).toMatch(/^file:\/\/\/.+\.png$/);
     expect(userMsg.content[1].type).toBe("text");
     expect(userMsg.content[1].text).toContain("Look at this");
   });

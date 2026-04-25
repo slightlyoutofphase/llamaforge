@@ -126,6 +126,11 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
     args.push("--chat-template-file", config.chatTemplateFile);
   }
 
+  if (config.imageMaxTokens !== undefined) {
+    args.push("--image-min-tokens", "70");
+    args.push("--image-max-tokens", String(config.imageMaxTokens));
+  }
+
   return args;
 }
 

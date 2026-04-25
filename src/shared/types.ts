@@ -55,6 +55,8 @@ export interface ModelLoadConfig {
   chatTemplate?: string;
   /** Path to a file containing a chat template. */
   chatTemplateFile?: string;
+  /** Maximum number of image tokens for dynamic image resolution at model load time. */
+  imageMaxTokens?: number;
   /** Custom configuration for parsing thinking tags. */
   thinkingTagOverride?: ThinkingTagConfig;
   /** ID of the preset used to generate this config. */

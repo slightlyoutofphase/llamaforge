@@ -13,7 +13,7 @@ import { useDropzone } from "react-dropzone";
  */
 interface InputBarProps {
   /** Callback fired when the user submits a message and attachments. */
-  onSend: (content: string, files: File[], virBudgets: number[]) => void;
+  onSend: (content: string, files: File[]) => void;
   /** Whether the model is currently generating a response. */
   isGenerating: boolean;
   /** Whether a chat session is currently active and accepts messages. */
@@ -30,7 +30,6 @@ interface InputBarProps {
  */
 export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarProps) {
   const [files, setFiles] = useState<{ id: string; file: File }[]>([]);
-  const [virBudgets, setVirBudgets] = useState<Record<string, number>>({});
   const [inputContent, setInputContent] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -45,13 +44,6 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const newItems = acceptedFiles.map((f) => ({ id: crypto.randomUUID(), file: f }));
     setFiles((prev) => [...prev, ...newItems]);
-    const budgets: Record<string, number> = {};
-    for (const item of newItems) {
-      if (item.file.type.startsWith("image/")) {
-        budgets[item.id] = 280;
-      }
-    }
-    setVirBudgets((prev) => ({ ...prev, ...budgets }));
   }, []);
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
@@ -71,16 +63,13 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     if ((!inputContent.trim() && files.length === 0) || isGenerating) return;
 
     // We pass budgets as an array corresponding to the files array to ensure NO collisions
-    const budgetArray = files.map((f) => virBudgets[f.id] || 0);
     onSend(
       inputContent,
       files.map((f) => f.file),
-      budgetArray,
     );
 
     setInputContent("");
     setFiles([]);
-    setVirBudgets({});
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -108,7 +97,7 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
 
       {files.length > 0 && (
         <div className="flex flex-wrap gap-2 p-3 pb-0 max-h-32 overflow-y-auto">
-          {files.map(({ id, file }, i) => (
+          {files.map(({ id, file }) => (
             <div
               key={id}
               className="flex items-center gap-2 bg-[var(--color-bg)] border border-[var(--color-border)] px-2 py-1.5 rounded-lg text-sm group">
@@ -118,37 +107,10 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
                 <Paperclip size={14} />
               )}
               <span className="truncate max-w-[150px] font-medium">{file.name}</span>
-              {file.type.startsWith("image/") && (
-                <>
-                  <label htmlFor={`vir-budget-${i}`} className="sr-only">
-                    VIR Budget for {file.name}
-                  </label>
-                  <select
-                    id={`vir-budget-${i}`}
-                    value={virBudgets[id] || 280}
-                    onChange={(e) =>
-                      setVirBudgets((prev) => ({
-                        ...prev,
-                        [id]: parseInt(e.target.value, 10),
-                      }))
-                    }
-                    className="bg-transparent border-none text-xs text-[var(--color-text-muted)] outline-none cursor-pointer hover:text-[var(--color-text-primary)]"
-                    title="VIR Budget">
-                    <option value="280">VIR: 280</option>
-                    <option value="560">VIR: 560</option>
-                    <option value="1120">VIR: 1120</option>
-                  </select>
-                </>
-              )}
               <button
                 type="button"
                 onClick={() => {
                   setFiles((f) => f.filter((item) => item.id !== id));
-                  setVirBudgets((prev) => {
-                    const next = { ...prev };
-                    delete next[id];
-                    return next;
-                  });
                 }}
                 className="text-[var(--color-text-muted)] hover:bg-[var(--color-surface-elevated)] p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity">
                 <X size={14} />

@@ -660,7 +660,7 @@ export function InferencePresetEditor() {
           type="button"
           onClick={handleSave}
           disabled={localState.isDefault}
-          className="flex-1 flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md transition-all disabled:opacity-50">
+          className="flex-1 flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md active:scale-95 active:shadow-none transition-all disabled:opacity-50">
           <Save size={16} /> Save Changes
         </button>
       </div>

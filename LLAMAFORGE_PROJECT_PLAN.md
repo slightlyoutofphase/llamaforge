@@ -797,7 +797,7 @@ The proxy accumulates the streamed raw assistant output in `fullRawContent` and 
 For Gemma 4 models specifically:
 - **Architecture check:** Detected via `general.architecture === "gemma4"`.
 - **Enable Token:** For the legacy `/completion` path, if thinking is enabled and the selected model config exposes an `enableToken`, the proxy appends that token to the rendered prompt. For chat-completion mode, thinking is enabled instead by setting `chat_template_kwargs.enable_thinking = true` and `reasoning_format = "none"`.
-- **Variable Image Resolution (VIR):** Gemma 4 supports processing images at varying resolutions (70, 140, 280, 560, 1120 tokens). LlamaForge exposes a per-image `virBudget` selector, which is written into the multimodal payload as `resolution` for each image attachment when the model architecture is `gemma4`.
+- **Variable Image Resolution (VIR):** Gemma 4 supports processing images at varying resolutions (70, 140, 280, 560, 1120 tokens). VIR is selected in the model load preset and mapped to llama-server load-only flags; it is not supplied per attachment at inference time.
 
 ## 11. Context Window Overflow Policies
 
@@ -813,7 +813,7 @@ When a chat exceeds the model's context window (`ctx_size`), the Bun proxy appli
   - **Truncated:** Oldest messages after the system prompt are removed until the limit is met.
   - This behaves like a sliding window that forgets earlier conversation history.
 
-The token estimator uses `getTokens()`, which queries the local llama-server `/tokenize` endpoint when available and falls back to a heuristic of ~1 token per 3.5 characters. It also adds attachment token estimates from `virBudget` (or 560 by default for images) and 256 tokens for audio.
+The token estimator uses `getTokens()`, which queries the local llama-server `/tokenize` endpoint when available and falls back to a heuristic of ~1 token per 3.5 characters. It also adds attachment token estimates from the image attachment type heuristic (560 tokens for images, 256 tokens for audio); image resolution is controlled by load-time flags, not per-message budgets.
 
 If truncation still cannot bring the history under the budget, the proxy will finally truncate the last message content itself and prepend it with `[TRUNCATED]\n...\n`.
 
@@ -888,10 +888,10 @@ This module orchestrates the complete request-response cycle for a chat turn.
 ```
 User drops/selects file(s) in chat input
   → react-dropzone triggers file list
-  → Client sends a `FormData` payload containing `content`, file inputs named `file`, and optional `virBudgets`
+  → Client sends a `FormData` payload containing `content` and file inputs named `file`
   → Bun backend reads each uploaded `File` via `.arrayBuffer()` and saves binary to disk at {APP_DATA}/attachments/{chatId}/{msgId}/
   → Database stores relative path only
-  → Inference: `buildContentParts()` reads file bytes from disk on-demand and converts supported attachments into OpenAI-compatible `image_url` data-URI parts
+  → Inference: `buildContentParts()` resolves stored attachments to local file URLs and builds OpenAI-compatible `image_url` parts without persisting base64 blobs
 ```
 
 The Bun backend receives the uploaded files and stores them on disk under `{HOME}/.llamaforge/attachments/{chatId}/{messageId}/`. The database stores the relative path. This avoids bloating the SQLite database with binary data and minimizes memory usage during prompt construction.
@@ -900,8 +900,8 @@ The Bun backend receives the uploaded files and stores them on disk under `{HOME
 
 | Category | MIME types | Handling |
 |---|---|---|
-| Images | `image/jpeg`, `image/png`, `image/gif`, `image/webp` | Passed as base64 data-URI `image_url` parts; VIR budget applied for Gemma 4 |
-| Audio | `audio/wav`, `audio/mp3`, `audio/ogg`, `audio/flac`, `audio/webm` | Passed as base64 data-URI `image_url` parts (requires `clip.has_audio_encoder: true`) |
+| Images | `image/jpeg`, `image/png`, `image/gif`, `image/webp` | Passed as local file URL `image_url` parts referencing stored `.llamaforge` attachments; VIR is governed by the active model load preset via `--image-max-tokens` |
+| Audio | `audio/wav`, `audio/mp3`, `audio/ogg`, `audio/flac`, `audio/webm` | Passed as local file URL `image_url` parts referencing stored `.llamaforge` attachments (requires `clip.has_audio_encoder: true`) |
 | Plain text | `text/plain` | Content read and injected as text block in the user message |
 | Markdown | `text/markdown` | Same as plain text |
 | PDF | `application/pdf` | Extracted text using `pdfjs-dist` (pure-TypeScript PDF parser); injected as text block. Text-extraction path is fully documented in `src/server/multimodal.ts`. |
@@ -930,7 +930,7 @@ For image uploads, the OpenAI-compatible content array format is used:
   "content": [
     {
       "type": "image_url",
-      "image_url": { "url": "data:image/jpeg;base64,<base64data>" }
+      "image_url": { "url": "file:///home/user/.llamaforge/attachments/<chatId>/<messageId>/image.png" }
     },
     {
       "type": "text",
@@ -940,7 +940,7 @@ For image uploads, the OpenAI-compatible content array format is used:
 }
 ```
 
-For Gemma 4 VIR, the budget parameter is included per the llama-server image content spec. The exact additional field name is resolved at integration time against the active llama-server binary's API documentation and confirmed in integration tests.
+For Gemma 4 VIR, the image budget is configured as model load flags (`--image-min-tokens 70 --image-max-tokens <budget>`). No per-image resolution field is emitted in the request payload; the loaded model is responsible for applying the configured image token range.
 
 For text file uploads, the content is prepended to the user's text message in a clearly demarcated block:
 ```
@@ -1333,6 +1333,7 @@ Each preset type has a dedicated editor component in the right panel.
 - Accordion sections: Core (context, GPU layers), Batching, Memory (mlock, no-mmap), RoPE, KV Cache, Advanced (NUMA, main GPU, tensor split).
 - Binary path fields at top: llama-server binary path, mmproj path (auto-detected or manual).
 - Jinja template override: CodeMirror editor (auto mode based on detected template, markdown-like for Jinja), with "Reset to GGUF default" and "Reset to built-in default" buttons.
+- VIR budget: Select the model-wide image token budget for dynamic image resolution, which is mapped to `--image-min-tokens 70` and `--image-max-tokens <value>` at model load time.
 - Thinking tag override: Two text inputs for open/close tag strings, one text input for enable token, plus a "Detect from architecture" button.
 - Preset name, save, duplicate, delete actions.
 
@@ -1373,7 +1374,7 @@ Each preset type has a dedicated editor component in the right panel.
 │                                                                   │
 ├───────────────────────────────────────────────────────────────────┤
 │  [📎] [🖼️] [🎵]   [                   message input             ]  │
-│                                             [VIR: 280 ▾]  [Send] │
+│                                             [Send]             │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1697,7 +1698,7 @@ CREATE TABLE IF NOT EXISTS attachments (
   mime_type   TEXT NOT NULL,
   file_path   TEXT NOT NULL,  -- relative to APP_DATA/attachments/
   file_name   TEXT NOT NULL,
-  vir_budget  INTEGER,        -- for images with VIR (Gemma 4)
+  vir_budget  INTEGER,        -- legacy attachment column preserved for compatibility; active VIR is configured at model load time
   created_at  INTEGER NOT NULL
 );
 
@@ -1916,7 +1917,7 @@ export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const; // updated per release
 ### Phase 7 — Multimodal Upload & Tool Calling
 
 **Deliverables:**
-- `src/server/multimodal.ts` — file storage, base64 encoding, content-part construction, VIR budget injection, multimodal guard
+- `src/server/multimodal.ts` — file storage, local file URL `image_url` construction, content-part construction, multimodal guard
 - `src/server/tools.ts` — tool call detection, GBNF grammar generation from JSON Schema
 - Attachment upload endpoint integrated into `POST /api/chats/:id/messages`
 - `GET/POST /api/presets/inference` updated to include tool definitions
@@ -1924,7 +1925,7 @@ export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const; // updated per release
 **Tests (`tests/server/multimodal.test.ts`):**
 - File storage: verify image, audio, and text files are stored on disk and the relative path is recorded in DB.
 - Multimodal guard: verify a model with `hasVisionEncoder: false` rejects a message containing an image attachment.
-- VIR injection: verify a Gemma 4 model message with a 560-budget image has the correct budget field in the constructed content part.
+- VIR load configuration: verify a Gemma 4 load preset with a 560 budget results in llama-server launch flags `--image-min-tokens 70 --image-max-tokens 560`.
 - Model switch guard: verify a chat with image history blocks switching to a vision-incapable model.
 - `tools.test.ts`: given a JSON Schema for a weather function, verify the GBNF grammar string is a non-empty string and that the `/completion` request body includes it when structured output is enabled.
 
@@ -1976,7 +1977,7 @@ export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const; // updated per release
 - `src/client/components/chat/ThinkingBlock.tsx` — collapsible thinking trace
 - `src/client/components/chat/StreamingMessage.tsx` — real-time token append
 - `src/client/components/chat/MessageActions.tsx` — edit, branch, regen, continue buttons + inline edit textarea
-- `src/client/components/chat/InputBar.tsx` — text input, file attach (react-dropzone), VIR selector, send button
+- `src/client/components/chat/InputBar.tsx` — text input, file attach (react-dropzone), send button
 - `src/client/components/chat/ModelChip.tsx`, `InferenceChip.tsx`, `SystemChip.tsx`
 - `src/client/components/sidebar/ChatSidebar.tsx` — full list, search, inline actions, date groups
 
@@ -1986,7 +1987,7 @@ export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const; // updated per release
   - Expanding it reveals the thinking content.
   - The assistant message renders the post-thinking content as markdown.
   - The model chip displays the correct model name.
-- `InputBar` tests: verify that dropping an image file renders a thumbnail preview with the VIR budget selector. Verify that sending with no loaded model shows an error toast (not a crash).
+- `InputBar` tests: verify that dropping an image file renders a thumbnail preview. Verify that sending with no loaded model shows an error toast (not a crash).
 - `MessageActions` tests: verify Edit button shows textarea with correct content; confirm triggers `PUT /api/chats/:id/messages/:msgId`; cancel restores original content.
 - `ChatSidebar` tests: verify search input filters the chat list by name.
 

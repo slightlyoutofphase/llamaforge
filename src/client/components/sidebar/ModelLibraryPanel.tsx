@@ -184,11 +184,9 @@ export function ModelLibraryPanel() {
                               {model.metadata?.architecture || "Unknown Arch"}
                             </span>
                             <span>
-                              {(
-                                (model.metadata?.fileSizeBytes || 0) /
-                                (1024 * 1024 * 1024)
-                              ).toFixed(2)}{" "}
-                              GB
+                              {model.metadata?.fileSizeBytes
+                                ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+                                : "Unknown Size"}
                             </span>
                           </div>
                           {(model.mmProjPath || model.metadata?.hasVisionEncoder) && (

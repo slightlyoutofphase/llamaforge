@@ -203,23 +203,23 @@ export function ModelSelector() {
                         )}
                       </div>
 
-                      <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-[var(--color-text-secondary)] font-mono">
-                        <span className="truncate">{model.publisher}</span>
-                        <span className="w-1 h-1 rounded-full bg-[var(--color-border)]"></span>
-                        <span>{model.metadata?.architecture || "unknown"}</span>
-                        <span className="w-1 h-1 rounded-full bg-[var(--color-border)]"></span>
-                        <span>
-                          {model.metadata?.fileSizeBytes
-                            ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-                            : "Unknown Size"}
-                        </span>
-
-                        {(model.metadata?.hasVisionEncoder || model.mmProjPath) && (
-                          <>
-                            <span className="w-1 h-1 rounded-full bg-[var(--color-border)]"></span>
-                            <span className="text-blue-400">VISION ENABLED</span>
-                          </>
-                        )}
+                      <div className="mt-1.5 space-y-1 text-xs text-[var(--color-text-secondary)] font-mono">
+                        <div className="truncate">{model.publisher || "Unknown Publisher"}</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span>{model.metadata?.architecture || "Unknown Architecture"}</span>
+                          <span className="w-1 h-1 rounded-full bg-[var(--color-border)]"></span>
+                          <span>
+                            {model.metadata?.fileSizeBytes
+                              ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+                              : "Unknown Size"}
+                          </span>
+                          {(model.metadata?.hasVisionEncoder || model.mmProjPath) && (
+                            <>
+                              <span className="w-1 h-1 rounded-full bg-[var(--color-border)]"></span>
+                              <span className="text-blue-400">VISION ENABLED</span>
+                            </>
+                          )}
+                        </div>
                       </div>
 
                       <div

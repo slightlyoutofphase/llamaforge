@@ -274,15 +274,6 @@ export function createRouter(_settings: AppSettings) {
               );
             }
 
-            const virBudgetsStr = formData.get("virBudgets")?.toString();
-            let virBudgets = {};
-            if (virBudgetsStr) {
-              try {
-                virBudgets = JSON.parse(virBudgetsStr);
-              } catch {
-                return badRequest("virBudgets must be valid JSON.");
-              }
-            }
             const attachments = [];
 
             // Loop through all file inputs
@@ -301,7 +292,7 @@ export function createRouter(_settings: AppSettings) {
             }
 
             const { proxyCompletion } = await import("./streamProxy");
-            const messageId = await proxyCompletion({ chatId, content, attachments, virBudgets });
+            const messageId = await proxyCompletion({ chatId, content, attachments });
             return jsonResponse({ messageId });
           } catch (e: any) {
             // fallback if it's JSON

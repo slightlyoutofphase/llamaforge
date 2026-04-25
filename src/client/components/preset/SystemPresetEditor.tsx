@@ -193,7 +193,7 @@ export function SystemPresetEditor() {
         <button
           type="button"
           onClick={handleSave}
-          className="w-full flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md transition-all font-semibold text-sm">
+          className="w-full flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md active:scale-95 active:shadow-none transition-all font-semibold text-sm">
           <Save size={16} /> Save Changes
         </button>
       </div>

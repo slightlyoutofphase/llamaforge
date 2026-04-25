@@ -146,6 +146,7 @@ export function LoadPresetEditor() {
         mlock: false,
         noMmap: false,
         flashAttention: true,
+        imageMaxTokens: 280,
       },
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -322,6 +323,26 @@ export function LoadPresetEditor() {
               disabled={isReadonly}
               className="mt-1"
             />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor="imageMaxTokens" className="text-xs font-medium flex justify-between">
+              <span>VIR max tokens (--image-max-tokens)</span>
+            </label>
+            <select
+              id="imageMaxTokens"
+              value={config.imageMaxTokens ?? 280}
+              onChange={(e) => updateConfigField("imageMaxTokens", parseInt(e.target.value, 10))}
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm">
+              <option value={70}>70</option>
+              <option value={140}>140</option>
+              <option value={280}>280</option>
+              <option value={560}>560</option>
+              <option value={1120}>1120</option>
+            </select>
+            <p className="text-[11px] text-[var(--color-text-muted)]">
+              Applies at model load time as `--image-min-tokens 70 --image-max-tokens {"<value>"}`.
+            </p>
           </div>
           <div className="space-y-1">
             <label htmlFor="threads" className="text-xs font-medium flex justify-between">
@@ -576,7 +597,7 @@ export function LoadPresetEditor() {
           type="button"
           onClick={handleSave}
           disabled={isReadonly}
-          className="flex-1 flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md transition-all disabled:opacity-50">
+          className="flex-1 flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md active:scale-95 active:shadow-none transition-all disabled:opacity-50">
           <Save size={16} /> Save Changes
         </button>
       </div>

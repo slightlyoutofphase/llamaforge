@@ -1,4 +1,9 @@
 import { describe, expect, it, mock } from "bun:test";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const APP_ROOT = path.join(os.homedir(), ".llamaforge");
 
 // Mock fs/promises
 mock.module("node:fs/promises", () => ({
@@ -10,9 +15,11 @@ mock.module("node:fs/promises", () => ({
       if (path.includes("text.txt")) return Buffer.from("Hello text file");
       throw new Error(`File not found: ${path}`);
     },
+    access: async () => {},
     mkdir: async () => {},
     writeFile: async () => {},
   },
+  access: async () => {},
   readFile: async (path: string) => {
     if (path.includes("img.png")) return Buffer.from("abc");
     if (path.includes("audio.wav")) return Buffer.from("def");
@@ -101,7 +108,9 @@ describe("multimodal", () => {
     expect(Array.isArray(res)).toBe(true);
     const parts = res as any[];
     expect(parts[0].type).toBe("image_url");
-    expect(parts[0].image_url.url).toBe("data:image/png;base64,YWJj");
+    expect(parts[0].image_url.url).toBe(
+      pathToFileURL(path.join(APP_ROOT, "attachments/img.png")).toString(),
+    );
     expect(parts[1].type).toBe("text");
     expect(parts[1].text).toBe("Look at this");
   });
@@ -141,12 +150,14 @@ describe("multimodal", () => {
     expect(Array.isArray(res)).toBe(true);
     const parts = res as any[];
     expect(parts[0].type).toBe("image_url");
-    expect(parts[0].image_url.url).toBe("data:audio/wav;base64,ZGVm");
+    expect(parts[0].image_url.url).toBe(
+      pathToFileURL(path.join(APP_ROOT, "attachments/audio.wav")).toString(),
+    );
     expect(parts[1].type).toBe("text");
     expect(parts[1].text).toBe("Listen to this");
   });
 
-  it("adds resolution budget for gemma4 architecture images", async () => {
+  it("builds gemma4 image_url payloads without per-attachment budget fields", async () => {
     const attachments = [
       {
         id: "1",
@@ -155,13 +166,13 @@ describe("multimodal", () => {
         fileName: "pic.jpg",
         filePath: "attachments/pic.jpg",
         createdAt: 0,
-        virBudget: 512,
       } as any,
     ];
     const metadata = { architecture: "gemma4", hasVisionEncoder: true } as any;
 
     const res = await buildContentParts("test", attachments, metadata);
     const parts = res as any[];
-    expect(parts[0].resolution).toBe(512);
+    expect(parts[0].type).toBe("image_url");
+    expect(parts[0].resolution).toBeUndefined();
   });
 });

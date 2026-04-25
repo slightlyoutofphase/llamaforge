@@ -99,4 +99,29 @@ describe("MessageBubble Component", () => {
 
     expect(screen.getByText("I am thinking")).toBeTruthy();
   });
+
+  it("falls back to rawContent when assistant content is empty", () => {
+    const msg: ChatMessage = {
+      id: "a3",
+      chatId: "c1",
+      role: "assistant",
+      content: "",
+      rawContent: "Hello from raw content fallback",
+      position: 4,
+      createdAt: 4,
+    };
+
+    render(
+      <MessageBubble
+        message={msg}
+        onEdit={() => {}}
+        onBranch={() => {}}
+        onRegenerate={() => {}}
+        onContinue={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("Hello from raw content fallback")).toBeTruthy();
+  });
 });

@@ -63,20 +63,20 @@ describe("overflow logic", () => {
   });
 
   const { getTokens } = require("../../src/server/overflow");
-  it("computes attachment vir budgets accurately into token totals", async () => {
+  it("computes attachment token estimates with default image/audio budgets", async () => {
     const msgs = [
       {
-        ...mockMsg("user", "Hello"), // small text: 5 chars / 3.5 = ~2 tokens + 1 = 3 padding
-        attachments: [{ mimeType: "image/png", virBudget: 750 }, { mimeType: "audio/wav" }],
+        ...mockMsg("user", "Hello"),
+        attachments: [{ mimeType: "image/png" }, { mimeType: "audio/wav" }],
       },
     ];
 
     const tokens = await getTokens(msgs);
     // Base heuristic strings ~ 2.
     // Audio baseline = 256
-    // Image base via virBudget = 750
-    // Total should be around 1008
-    expect(tokens).toBeGreaterThan(1000);
-    expect(tokens).toBeLessThan(1020);
+    // Image baseline = 560
+    // Total should be around 818
+    expect(tokens).toBeGreaterThan(810);
+    expect(tokens).toBeLessThan(830);
   });
 });

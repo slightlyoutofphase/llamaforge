@@ -66,7 +66,6 @@ export interface ProxyCompletionParams {
   chatId: string;
   content: string;
   attachments: File[];
-  virBudgets?: number[];
   isContinue?: boolean;
   isRecursive?: boolean;
   isRegenerate?: boolean;
@@ -85,7 +84,6 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     chatId,
     content: newMessage,
     attachments,
-    virBudgets = [],
     isContinue = false,
     isRegenerate = false,
     isToolRecurse = false,
@@ -146,12 +144,10 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   }
 
   try {
-    for (let i = 0; i < attachments.length; i++) {
-      const file = attachments[i];
+    for (const file of attachments) {
       const arr = await file.arrayBuffer();
-      const budget = virBudgets[i] || 280;
       processedAttachments.push(
-        await processUpload(chatId, userMessageId, file.name, file.type, arr, budget),
+        await processUpload(chatId, userMessageId, file.name, file.type, arr),
       );
     }
   } catch (err) {

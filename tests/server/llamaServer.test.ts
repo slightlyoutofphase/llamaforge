@@ -68,4 +68,31 @@ describe("llamaServer", () => {
     expect(args).toContain("--chat-template");
     expect(args[args.indexOf("--chat-template") + 1]).toBe("chatml");
   });
+
+  it("adds image token load flags when configured", () => {
+    const config: ModelLoadConfig = {
+      modelPath: "/models/model.gguf",
+      contextSize: 4096,
+      gpuLayers: 0,
+      threads: 1,
+      batchSize: 1,
+      microBatchSize: 1,
+      ropeScaling: "none",
+      ropeFreqBase: 0,
+      ropeFreqScale: 0,
+      kvCacheTypeK: "f16",
+      kvCacheTypeV: "f16",
+      mlock: false,
+      noMmap: false,
+      flashAttention: false,
+      imageMaxTokens: 560,
+    };
+
+    const args = buildArgs(config, 8080);
+
+    expect(args).toContain("--image-min-tokens");
+    expect(args[args.indexOf("--image-min-tokens") + 1]).toBe("70");
+    expect(args).toContain("--image-max-tokens");
+    expect(args[args.indexOf("--image-max-tokens") + 1]).toBe("560");
+  });
 });
