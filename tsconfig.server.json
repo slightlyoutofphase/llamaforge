@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["ESNext"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "preserve",
+    "outDir": "dist/server",
+    "rootDir": "src",
+    "types": ["bun-types"]
+  },
+  "include": ["src/server", "src/shared"]
+}

@@ -1,0 +1,349 @@
+/**
+ * @packageDocumentation
+ * Llama server lifecycle management — spawn, unload, and switch model processes.
+ */
+
+import type { LlamaServerStatus, ModelLoadConfig } from "@shared/types.js";
+import fs from "node:fs/promises";
+import { type Subprocess, spawn } from "bun";
+import { findFreePort } from "./utils/network";
+import { broadcastLog, broadcastStatus } from "./wsHub";
+
+let proc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
+let activePort: number | null = null;
+let currentConfig: ModelLoadConfig | null = null;
+let currentStatus: LlamaServerStatus = "idle";
+let loadingLock = false;
+let bootLogs: string[] = [];
+
+/**
+ * Retrieves the raw Bun subprocess instance.
+ *
+ * @returns The current {@link Subprocess} or null if no model is loaded.
+ */
+export function getProc() {
+  return proc;
+}
+
+/**
+ * Updates the internal server status and broadcasts it to all connected clients.
+ *
+ * @param status - The new status to set.
+ */
+function setStatus(status: LlamaServerStatus): void {
+  currentStatus = status;
+  broadcastStatus(status);
+}
+
+/**
+ * Retrieves the current status, port, and configuration of the model server.
+ *
+ * @returns An object containing the current status string, active port, and current model configuration.
+ */
+export function getServerStatus() {
+  return { status: currentStatus, port: activePort, config: currentConfig };
+}
+
+/**
+ * Builds the CLI argument array for llama-server from a ModelLoadConfig.
+ * Every field in ModelLoadConfig maps 1:1 to a documented llama-server flag.
+ *
+ * @param config - The load configuration.
+ * @param port - The port to bind to.
+ * @returns Ordered array of CLI arguments.
+ * @example
+ * ```typescript
+ * const args = buildArgs({ modelPath: "/path/to/model", contextSize: 2048 }, 8080);
+ * ```
+ */
+export function buildArgs(config: ModelLoadConfig, port: number): readonly string[] {
+  const args: string[] = [
+    "--model",
+    config.modelPath,
+    "--port",
+    String(port),
+    "--host",
+    "127.0.0.1",
+    "--ctx-size",
+    String(config.contextSize),
+    ...(config.contextShift ? ["--context-shift"] : ["--no-context-shift"]),
+    "-ngl",
+    String(config.gpuLayers),
+    "--threads",
+    String(config.threads),
+    "--batch-size",
+    String(config.batchSize),
+    "--ubatch-size",
+    String(config.microBatchSize),
+    "--rope-scaling",
+    config.ropeScaling,
+    "--rope-freq-base",
+    String(config.ropeFreqBase),
+    "--rope-freq-scale",
+    String(config.ropeFreqScale),
+    "--cache-type-k",
+    config.kvCacheTypeK,
+    "--cache-type-v",
+    config.kvCacheTypeV,
+    "--parallel",
+    "1",
+    "--cont-batching",
+    "--jinja",
+  ];
+
+  if (config.flashAttention) {
+    args.push("--flash-attn", "on");
+  }
+
+  if (config.mmProjPath) {
+    args.push("--mmproj", config.mmProjPath);
+  }
+  if (config.mainGpu !== undefined) {
+    args.push("--main-gpu", String(config.mainGpu));
+  }
+  if (config.tensorSplit && config.tensorSplit.length > 0) {
+    args.push("--tensor-split", config.tensorSplit.join(","));
+  }
+  if (config.mlock) {
+    args.push("--mlock");
+  }
+  if (config.noMmap) {
+    args.push("--no-mmap");
+  }
+  if (config.numa !== undefined) {
+    args.push("--numa", config.numa);
+  }
+  if (config.logLevel !== undefined) {
+    args.push("--log-verbosity", String(config.logLevel));
+  }
+  if (config.seedOverride !== undefined) {
+    args.push("--seed", String(config.seedOverride));
+  }
+  if (config.chatTemplate) {
+    args.push("--chat-template", config.chatTemplate);
+  }
+  if (config.chatTemplateFile) {
+    args.push("--chat-template-file", config.chatTemplateFile);
+  }
+
+  return args;
+}
+
+/**
+ * Spawns llama-server with the given load configuration.
+ *
+ * @param config - Full model load configuration including all CLI flags.
+ * @param llamaServerBin - Absolute path to the llama-server binary.
+ * @param minPort - Minimum port range for searching free ports.
+ * @param maxPort - Maximum port range for searching free ports.
+ * @returns The port number on which the spawned server is listening.
+ * @throws {Error} If the server fails to become ready within the timeout period.
+ */
+async function validateBinary(absolutePath: string): Promise<void> {
+  try {
+    const stats = await fs.stat(absolutePath);
+    if (!stats.isFile()) {
+      throw new Error(`llama-server binary path is not a file: ${absolutePath}`);
+    }
+    if (process.platform !== "win32" && (stats.mode & 0o111) === 0) {
+      throw new Error(`llama-server binary is not executable: ${absolutePath}`);
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Cannot validate llama-server binary: ${message}`);
+  }
+}
+
+export async function loadModel(
+  config: ModelLoadConfig,
+  llamaServerBin: string,
+  minPort: number,
+  maxPort: number,
+): Promise<number> {
+  if (loadingLock) {
+    throw new Error("Model loading in progress. Please wait.");
+  }
+  loadingLock = true;
+  bootLogs = [];
+
+  try {
+    await validateBinary(llamaServerBin);
+
+    if (proc) {
+      await unloadModel();
+    }
+
+    setStatus("loading");
+    currentConfig = config;
+
+    const port = await findFreePort(minPort, maxPort);
+    const args = buildArgs(config, port);
+
+    proc = spawn({
+      cmd: [llamaServerBin, ...args],
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+
+    activePort = port;
+
+    consumeLogs(proc.stderr, "server");
+    consumeLogs(proc.stdout, "server");
+
+    const isReady = await waitForHealthCheck(port);
+    if (!isReady) {
+      const lastError = bootLogs.slice(-10).join("\n");
+      await unloadModel();
+      throw new Error(`llama-server failed to become ready. Last logs:\n${lastError}`);
+    }
+
+    setStatus("running");
+
+    const { saveSettings } = await import("./persistence/settingsRepo");
+    await saveSettings({ lastLoadConfig: config });
+
+    return port;
+  } finally {
+    loadingLock = false;
+  }
+}
+
+async function waitForHealthCheck(port: number): Promise<boolean> {
+  const maxAttempts = 480; // 120s at 250ms
+  for (let i = 0; i < maxAttempts; i++) {
+    if (proc && proc.exitCode !== null) {
+      return false; // Process died, no need to keep polling
+    }
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      if (res.ok) {
+        return true;
+      }
+    } catch {
+      // Ignore network errors while booting
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+
+async function consumeLogs(
+  stream: ReadableStream<Uint8Array> | null,
+  defaultLevel: "server" | "info" | "warn" | "error" | "debug",
+) {
+  if (!stream) return;
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  try {
+    while (true) {
+      let done = false;
+      let value: Uint8Array | undefined;
+      try {
+        const res = await reader.read();
+        done = res.done;
+        value = res.value;
+      } catch {
+        break;
+      }
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+
+        // Rolling buffer for boot error reporting
+        bootLogs.push(line);
+        if (bootLogs.length > 2000) bootLogs.shift();
+
+        if (line.startsWith("{") && line.endsWith("}")) {
+          try {
+            const parsed = JSON.parse(line);
+            const level = parsed.level?.toLowerCase() || defaultLevel;
+
+            if (["info", "warn", "error", "debug", "server"].includes(level)) {
+              broadcastLog(
+                level as "info" | "warn" | "error" | "debug" | "server",
+                parsed.msg || line,
+              );
+            } else {
+              broadcastLog(defaultLevel, parsed.msg || line);
+            }
+          } catch {
+            broadcastLog(defaultLevel, line);
+          }
+        } else {
+          broadcastLog(defaultLevel, line);
+        }
+      }
+    }
+  } catch {
+    // Ignore stream closed errors
+  }
+}
+
+/**
+ * Terminates the currently running llama-server process.
+ *
+ * @returns A promise that resolves when the process has been terminated.
+ */
+export async function unloadModel(): Promise<void> {
+  if (!proc) {
+    activePort = null;
+    currentConfig = null;
+    setStatus("idle");
+    return;
+  }
+
+  setStatus("loading");
+  const target = proc;
+
+  try {
+    try {
+      target.kill(15); // SIGTERM
+    } catch (_e) {
+      // Ignore error if process is already dead
+    }
+
+    // Wait up to 15s for graceful shutdown
+    for (let i = 0; i < 60; i++) {
+      if (target.exitCode !== null) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    if (target.exitCode === null) {
+      try {
+        target.kill(9); // SIGKILL
+      } catch (_e) {
+        // Ignore
+      }
+    }
+  } finally {
+    proc = null;
+    activePort = null;
+    currentConfig = null;
+    setStatus("idle");
+  }
+}
+
+/**
+ * Switches the model by unloading the current one and loading a new one.
+ *
+ * @param config - Full model load configuration for the new model.
+ * @param llamaServerBin - Absolute path to the llama-server binary.
+ * @param minPort - Minimum port range for searching free ports.
+ * @param maxPort - Maximum port range for searching free ports.
+ * @returns The port number on which the new server is listening.
+ * @throws {Error} If loading the new model fails.
+ */
+export async function switchModel(
+  config: ModelLoadConfig,
+  llamaServerBin: string,
+  minPort: number,
+  maxPort: number,
+): Promise<number> {
+  await unloadModel();
+  return loadModel(config, llamaServerBin, minPort, maxPort);
+}

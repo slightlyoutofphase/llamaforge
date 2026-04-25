@@ -1,0 +1,61 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@theme {
+  --color-bg: oklch(12% 0.02 260);
+  --color-surface: oklch(16% 0.02 260);
+  --color-surface-elevated: oklch(20% 0.025 260);
+  --color-border: oklch(28% 0.03 260);
+  --color-accent: oklch(65% 0.18 280);
+  --color-accent-dim: oklch(50% 0.14 280);
+  --color-text-primary: oklch(92% 0.01 260);
+  --color-text-secondary: oklch(65% 0.02 260);
+  --color-text-muted: oklch(45% 0.015 260);
+  --color-error: oklch(62% 0.22 28);
+  --color-success: oklch(68% 0.2 145);
+  --color-warning: oklch(80% 0.2 75);
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+/* Light Theme Overrides */
+:root.light {
+  --color-bg: oklch(98% 0.01 260);
+  --color-surface: oklch(100% 0 0);
+  --color-surface-elevated: oklch(96% 0.01 260);
+  --color-border: oklch(90% 0.01 260);
+  --color-accent: oklch(55% 0.2 260);
+  --color-accent-dim: oklch(45% 0.18 260);
+  --color-text-primary: oklch(15% 0.02 260);
+  --color-text-secondary: oklch(35% 0.02 260);
+  --color-text-muted: oklch(60% 0.01 260);
+}
+
+/* System dark mode support if 'system' is chosen */
+@media (prefers-color-scheme: light) {
+  :root:not(.dark) {
+    --color-bg: oklch(98% 0.01 260);
+    --color-surface: oklch(100% 0 0);
+    --color-surface-elevated: oklch(96% 0.01 260);
+    --color-border: oklch(90% 0.01 260);
+    --color-accent: oklch(55% 0.2 260);
+    --color-accent-dim: oklch(45% 0.18 260);
+    --color-text-primary: oklch(15% 0.02 260);
+    --color-text-secondary: oklch(35% 0.02 260);
+    --color-text-muted: oklch(60% 0.01 260);
+  }
+}
+
+@layer base {
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text-primary);
+  }
+}
