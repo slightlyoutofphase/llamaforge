@@ -1,30 +1,30 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.4.12/schema.json",
-  "files": {
-    "includes": ["**", "!**/node_modules", "!**/dist", "!**/*.css"]
-  },
-  "formatter": {
-    "enabled": false
-  },
-  "javascript": {
-    "jsxRuntime": "transparent"
-  },
-  "linter": {
-    "enabled": true,
-    "rules": {
-      "recommended": true,
-      "correctness": {
-        "noUnusedVariables": "error",
-        "noUnusedImports": "error",
-        "noUnusedFunctionParameters": "error",
-        "noUnreachable": "error",
-        "noUnusedLabels": "error"
-      },
-      "suspicious": {
-        "noArrayIndexKey": "off",
-        "noExplicitAny": "off",
-        "noFallthroughSwitchClause": "error"
-      }
-    }
-  }
+	"$schema": "https://biomejs.dev/schemas/2.4.13/schema.json",
+	"files": {
+		"includes": ["**", "!**/node_modules", "!**/dist", "!**/*.css"]
+	},
+	"formatter": {
+		"enabled": false
+	},
+	"javascript": {
+		"jsxRuntime": "transparent"
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"recommended": true,
+			"correctness": {
+				"noUnusedVariables": "error",
+				"noUnusedImports": "error",
+				"noUnusedFunctionParameters": "error",
+				"noUnreachable": "error",
+				"noUnusedLabels": "error"
+			},
+			"suspicious": {
+				"noArrayIndexKey": "off",
+				"noExplicitAny": "off",
+				"noFallthroughSwitchClause": "error"
+			}
+		}
+	}
 }
