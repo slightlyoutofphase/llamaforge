@@ -109,7 +109,7 @@ export default function App() {
         </Link>
         <Link
           to="/chat/$chatId"
-          params={{ chatId: "default" }}
+          params={{ chatId: "default-chat" }}
           className={`p-3 rounded-xl transition-all ${activeTab === "chat" ? "bg-[var(--color-surface-elevated)] text-[var(--color-accent)]" : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"}`}
           title="Chat Workspace">
           <MessageSquare size={22} />

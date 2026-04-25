@@ -2,7 +2,9 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { createChat } from "../../src/server/persistence/chatRepo";
 import { initDb } from "../../src/server/persistence/db";
 import { createInferencePreset } from "../../src/server/persistence/presetRepo";
-import { createRouter } from "../../src/server/router";
+import { __setHardwareProbe } from "../../src/server/router";
+
+let createRouter: typeof import("../../src/server/router").createRouter;
 
 describe("router", () => {
   const settings: any = {
@@ -14,6 +16,15 @@ describe("router", () => {
 
   beforeAll(async () => {
     await initDb(":memory:");
+    __setHardwareProbe({
+      getHardwareInfo: async () => ({
+        totalRamBytes: 8 * 1024 * 1024 * 1024,
+        cpuThreads: 4,
+        gpus: [],
+      }),
+    });
+    const routerModule = await import("../../src/server/router.ts");
+    createRouter = routerModule.createRouter;
   });
 
   it("GET /health returns 200 OK", async () => {

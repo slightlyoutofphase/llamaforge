@@ -13,6 +13,11 @@ import { populateMetadata, scanModels } from "./modelScanner";
 import { loadSettings } from "./persistence/settingsRepo";
 import { addConnection, removeConnection } from "./wsHub";
 
+export let getHardwareInfoImpl = getHardwareInfo;
+export function __setHardwareProbe(override: { getHardwareInfo: typeof getHardwareInfo }) {
+  getHardwareInfoImpl = override.getHardwareInfo;
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -59,7 +64,7 @@ function normalizeAttachmentPath(attachPath: string): string | null {
  * });
  * ```
  */
-export function createRouter(settings: AppSettings) {
+export function createRouter(_settings: AppSettings) {
   return {
     async fetch(req: Request, server: any): Promise<Response | undefined> {
       const url = new URL(req.url);
@@ -86,7 +91,8 @@ export function createRouter(settings: AppSettings) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/models") {
-        const rawModels = await scanModels(settings.modelsPath);
+        const currentSettings = await loadSettings();
+        const rawModels = await scanModels(currentSettings.modelsPath);
         const { getMetadataForPath } = await import("./persistence/chatRepo");
         const models = await Promise.all(
           rawModels.map(async (m) => ({
@@ -112,7 +118,8 @@ export function createRouter(settings: AppSettings) {
       }
 
       if (req.method === "POST" && url.pathname === "/api/models/rescan") {
-        const rawModels = await scanModels(settings.modelsPath);
+        const currentSettings = await loadSettings();
+        const rawModels = await scanModels(currentSettings.modelsPath);
         const { getMetadataForPath } = await import("./persistence/chatRepo");
         const models = await Promise.all(
           rawModels.map(async (m) => ({
@@ -201,7 +208,7 @@ export function createRouter(settings: AppSettings) {
       }
 
       if (req.method === "GET" && url.pathname === "/api/hardware") {
-        const hw = await getHardwareInfo();
+        const hw = await getHardwareInfoImpl();
         return new Response(JSON.stringify(hw), {
           headers: { "Content-Type": "application/json" },
         });

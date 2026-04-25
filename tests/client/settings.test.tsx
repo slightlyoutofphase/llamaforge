@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { SettingsPanel } from "../../src/client/SettingsPanel";
-
-const queryClient = new QueryClient();
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useAppStore } from "../../src/client/store";
 
 const mockSettings = {
   llamaServerPath: "/usr/bin/llama-server",
@@ -14,13 +11,26 @@ const mockSettings = {
 };
 
 describe("SettingsPanel", () => {
-  beforeEach(() => {
-    global.fetch = mock((url) => {
-      if (typeof url === "string" && url.includes("/api/settings")) {
-        return Promise.resolve(new Response(JSON.stringify(mockSettings)));
+  let SettingsPanel: typeof import("../../src/client/SettingsPanel").SettingsPanel;
+  let updateSettingsMutate: ReturnType<typeof mock>;
+
+  beforeEach(async () => {
+    updateSettingsMutate = mock().mockImplementation(async (_data, options) => {
+      if (options?.onSuccess) {
+        options.onSuccess();
       }
-      return Promise.resolve(new Response(JSON.stringify({})));
+      return undefined;
     });
+
+    await mock.module("../../src/client/queries", () => ({
+      useSettings: () => ({ data: mockSettings, isLoading: false }),
+      useUpdateSettings: () => ({ mutate: updateSettingsMutate, isPending: false }),
+    }));
+
+    useAppStore.setState({ fetchModels: mock().mockResolvedValue(undefined) });
+
+    const imported = await import("../../src/client/SettingsPanel");
+    SettingsPanel = imported.SettingsPanel;
   });
 
   afterEach(() => {
@@ -28,11 +38,9 @@ describe("SettingsPanel", () => {
   });
 
   it("renders settings fields with initial values", async () => {
-    render(
-      <QueryClientProvider client={queryClient}>
-        <SettingsPanel />
-      </QueryClientProvider>,
-    );
+    await act(async () => {
+      render(<SettingsPanel />);
+    });
 
     expect(await screen.findByDisplayValue("/usr/bin/llama-server")).toBeDefined();
     expect(screen.getByDisplayValue("/home/user/models")).toBeDefined();
@@ -43,19 +51,50 @@ describe("SettingsPanel", () => {
   });
 
   it("handles input changes and save button interaction", async () => {
-    render(
-      <QueryClientProvider client={queryClient}>
-        <SettingsPanel />
-      </QueryClientProvider>,
-    );
+    await act(async () => {
+      render(<SettingsPanel />);
+    });
 
     const llamaInput = await screen.findByDisplayValue("/usr/bin/llama-server");
-    fireEvent.change(llamaInput, { target: { value: "/new/path" } });
+    await act(async () => {
+      fireEvent.change(llamaInput, { target: { value: "/new/path" } });
+    });
     expect((llamaInput as HTMLInputElement).value).toBe("/new/path");
 
     const saveBtn = screen.getByText("Save Settings");
     expect(saveBtn).toBeDefined();
-    fireEvent.click(saveBtn);
-    // Ideally verify mutation call, but mock.module and bun:test mock interactions can be tricky with complex hooks
+
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    expect(updateSettingsMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ llamaServerPath: "/new/path" }),
+      expect.anything(),
+    );
+  });
+
+  it("refreshes the model list after saving settings", async () => {
+    const fetchModelsSpy = mock().mockResolvedValue(undefined);
+    useAppStore.setState({ fetchModels: fetchModelsSpy });
+
+    await act(async () => {
+      render(<SettingsPanel />);
+    });
+
+    const modelsInput = await screen.findByDisplayValue("/home/user/models");
+    await act(async () => {
+      fireEvent.change(modelsInput, { target: { value: "/new/models" } });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save Settings"));
+    });
+
+    expect(updateSettingsMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ modelsPath: "/new/models" }),
+      expect.anything(),
+    );
+    expect(fetchModelsSpy).toHaveBeenCalled();
   });
 });

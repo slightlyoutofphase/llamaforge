@@ -32,7 +32,7 @@ export function SettingsPanel() {
   const handleSave = () => {
     updateMut.mutate(localState, {
       onSuccess: () => {
-        useAppStore.getState().fetchModels(); // Removed because it's non-standard to trigger UI store fetches. Instead we rely on react query to invalidate chats over time if needed, although models fetch uses useAppStore. // Removed because it's non-standard to trigger UI store fetches. Instead we rely on react query to invalidate chats over time if needed, although models fetch uses useAppStore.
+        useAppStore.getState().fetchModels();
       },
     });
   };

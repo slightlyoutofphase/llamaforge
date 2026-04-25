@@ -84,17 +84,24 @@ export function ChatView() {
   const activeSysPreset = sysPresets?.find((p) => p.id === currentChatMetadata?.systemPresetId);
 
   useEffect(() => {
-    if (!chatId && !currentChatId) {
+    const targetChatId = chatId === "default" ? "default-chat" : chatId;
+    if (!targetChatId && !currentChatId) {
       loadChat("default-chat");
       return;
     }
-    if (chatId && chatId !== currentChatId) {
-      loadChat(chatId);
+    if (targetChatId && targetChatId !== currentChatId) {
+      loadChat(targetChatId);
     }
   }, [chatId, currentChatId, loadChat]);
 
   useEffect(() => {
-    if (currentChatId && currentChatId !== "default-chat" && chatId !== currentChatId) {
+    if (
+      (chatId === "default-chat" || chatId === "default") &&
+      currentChatId &&
+      currentChatId !== "default-chat" &&
+      currentChatId !== "default" &&
+      currentChatId !== chatId
+    ) {
       navigate({ to: "/chat/$chatId", params: { chatId: currentChatId }, replace: true });
     }
   }, [currentChatId, chatId, navigate]);

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { useCreateChat, useLoadPresets } from "../../queries";
+import { useNavigate } from "@tanstack/react-router";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { MultimodalGuardModal } from "./MultimodalGuardModal";
@@ -32,6 +33,7 @@ export function ModelLibraryPanel() {
   const { setRightPanelView } = useUiStore();
   const { data: loadPresets } = useLoadPresets();
   const createChatMut = useCreateChat();
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [guardModal, setGuardModal] = useState<{
@@ -84,10 +86,16 @@ export function ModelLibraryPanel() {
     });
   };
 
-  const handleStartNewChat = () => {
-    createChatMut.mutate({ name: "New Chat (Model Switch)" });
-    setGuardModal(null);
-    setRightPanelView(null);
+  const handleStartNewChat = async () => {
+    try {
+      const chat = await createChatMut.mutateAsync({ name: "New Chat (Model Switch)" });
+      navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
+    } catch (error) {
+      console.error("New chat creation failed:", error);
+    } finally {
+      setGuardModal(null);
+      setRightPanelView(null);
+    }
   };
 
   return (

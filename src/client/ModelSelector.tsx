@@ -7,6 +7,7 @@ import type { ModelEntry, ModelLoadConfig } from "@shared/types.js";
 import { clsx } from "clsx";
 import { ChevronDown, Cpu, Database, Loader2, Play, Square } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { MultimodalGuardModal } from "./components/sidebar/MultimodalGuardModal";
 import { useCreateChat, useLoadPresets } from "./queries";
 import { useAppStore } from "./store";
@@ -22,6 +23,7 @@ export function ModelSelector() {
     useAppStore();
   const { data: loadPresets } = useLoadPresets();
   const createChatMut = useCreateChat();
+  const navigate = useNavigate();
 
   const [selectedPresets, setSelectedPresets] = useState<Record<string, string>>(() => {
     try {
@@ -108,12 +110,18 @@ export function ModelSelector() {
     loadModel(config);
   };
 
-  const handleStartNewChat = () => {
-    createChatMut.mutate({ name: "New Chat (Model Switch)" });
-    if (guardModal) {
-      loadModel(guardModal.configToLoad);
+  const handleStartNewChat = async () => {
+    try {
+      const chat = await createChatMut.mutateAsync({ name: "New Chat (Model Switch)" });
+      navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
+      if (guardModal) {
+        loadModel(guardModal.configToLoad);
+      }
+    } catch (error) {
+      console.error("New chat creation failed:", error);
+    } finally {
+      setGuardModal(null);
     }
-    setGuardModal(null);
   };
 
   return (

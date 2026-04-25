@@ -323,7 +323,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       try {
         if (frame.type === "server_status") {
+          const prevStatus = get().serverStatus;
+          const prevLoadedModel = get().loadedModel;
           set({ serverStatus: frame.status });
+          if (
+            frame.status !== prevStatus ||
+            (frame.status === "running" && prevLoadedModel === null)
+          ) {
+            void get().fetchServerStatus();
+          }
         } else if (frame.type === "log") {
           set((state) => ({ logs: [...state.logs.slice(-100), `[${frame.level}] ${frame.body}`] }));
         } else if (frame.type === "token") {
@@ -705,9 +713,15 @@ export const useAppStore = create<AppState>((set, get) => ({
         const data = await res.json();
         set((state) => {
           const modelPath = data.config?.modelPath;
-          const loadedModel = modelPath
-            ? state.models.find((m) => m.primaryPath === modelPath) || null
-            : null;
+          let loadedModel = null;
+          if (modelPath) {
+            loadedModel = state.models.find((m) => m.primaryPath === modelPath) || {
+              publisher: "unknown",
+              modelName: modelPath.split(/[/\\]/).pop() || modelPath,
+              primaryPath: modelPath,
+              metadata: undefined,
+            };
+          }
           return { serverStatus: data.status, loadedModel, errorMessage: null };
         });
       } else {
@@ -766,7 +780,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           ? String(body.error)
           : `Failed to load model: ${res.status}`;
         const action =
-          res.status === 503 && body.error === "NOT_CONFIGURED"
+          res.status === 503 && body?.code === "NOT_CONFIGURED"
             ? () =>
                 import("./uiStore").then((m) =>
                   m.useUiStore.getState().setRightPanelView("settings"),
@@ -776,6 +790,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         get().setError(errorMessage, action ? "Settings" : null, action);
       } else {
         set({ errorMessage: null, errorActionLabel: null, errorAction: null });
+        await get().fetchServerStatus();
       }
     } catch (e: unknown) {
       set({
