@@ -46,7 +46,9 @@ export function SettingsPanel() {
   }
 
   return (
-    <div className="flex flex-col h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] w-80 shadow-xl overflow-hidden shrink-0">
+    <div
+      data-testid="settings-panel"
+      className="flex flex-col h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] w-80 shadow-xl overflow-hidden shrink-0">
       <div className="flex items-center justify-between p-4 border-b border-[var(--color-border)]">
         <h2 className="font-semibold text-lg flex items-center gap-2">Settings</h2>
         <button

@@ -125,7 +125,7 @@ export function ModelSelector() {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 bg-[var(--color-bg)] relative">
+    <div className="flex-1 min-w-0 overflow-y-auto p-6 bg-[var(--color-bg)] relative">
       <div className="max-w-5xl mx-auto space-y-6">
         {/* Loading Overlay */}
         {serverStatus === "loading" && (
@@ -176,7 +176,7 @@ export function ModelSelector() {
                 <div
                   key={model.primaryPath}
                   className={clsx(
-                    "flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-2xl border transition-all overflow-hidden",
+                    "flex flex-col sm:flex-row justify-between gap-4 p-5 rounded-2xl border transition-all overflow-hidden",
                     isLoaded
                       ? "bg-[var(--color-surface-elevated)] border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/50"
                       : "bg-[var(--color-surface)] border-[var(--color-border)] hover:border-gray-500",
@@ -192,8 +192,8 @@ export function ModelSelector() {
                       <Cpu size={24} />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <h3 className="font-bold text-lg text-[var(--color-text-primary)] truncate min-w-0">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 min-w-0">
+                        <h3 className="font-bold text-lg text-[var(--color-text-primary)] break-words min-w-0">
                           {model.modelName}
                         </h3>
                         {isLoaded && (
@@ -203,16 +203,14 @@ export function ModelSelector() {
                         )}
                       </div>
 
-                      <div className="mt-1.5 space-y-1 text-xs text-[var(--color-text-secondary)] font-mono min-w-0">
-                        <div className="truncate max-w-full">
-                          {model.publisher || "Unknown Publisher"}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2 min-w-0 text-[var(--color-text-secondary)]">
-                          <span className="truncate max-w-full">
+                      <div className="mt-2 space-y-1 text-xs text-[var(--color-text-secondary)] font-mono min-w-0 break-words">
+                        <div className="break-words">{model.publisher || "Unknown Publisher"}</div>
+                        <div className="flex flex-wrap items-center gap-2 min-w-0 text-[var(--color-text-secondary)] break-words">
+                          <span className="min-w-0 break-words">
                             {model.metadata?.architecture || "Unknown Architecture"}
                           </span>
                           <span className="w-1 h-1 rounded-full bg-[var(--color-border)] flex-shrink-0"></span>
-                          <span className="truncate max-w-full">
+                          <span className="min-w-0 break-words">
                             {model.metadata?.fileSizeBytes
                               ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
                               : "Unknown Size"}
@@ -220,7 +218,7 @@ export function ModelSelector() {
                           {(model.metadata?.hasVisionEncoder || model.mmProjPath) && (
                             <>
                               <span className="w-1 h-1 rounded-full bg-[var(--color-border)] flex-shrink-0"></span>
-                              <span className="text-blue-400 truncate max-w-full">
+                              <span className="text-blue-400 min-w-0 break-words">
                                 VISION ENABLED
                               </span>
                             </>
@@ -229,15 +227,15 @@ export function ModelSelector() {
                       </div>
 
                       <div
-                        className="mt-2 text-[10px] text-[var(--color-text-muted)] truncate max-w-full"
+                        className="mt-2 text-[10px] text-[var(--color-text-muted)] break-all whitespace-pre-wrap"
                         title={model.primaryPath}>
                         {model.primaryPath}
                       </div>
                     </div>
                   </div>
 
-                  <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-3 shrink-0 w-full sm:w-auto">
-                    <div className="relative min-w-[10rem] w-full sm:w-auto">
+                  <div className="mt-4 sm:mt-0 flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0 w-full sm:w-auto">
+                    <div className="relative w-full sm:w-[18rem] min-w-0">
                       <select
                         disabled={serverStatus !== "idle" || isLoaded}
                         value={
@@ -252,9 +250,9 @@ export function ModelSelector() {
                             [model.primaryPath]: e.target.value,
                           }))
                         }
-                        className="appearance-none bg-[var(--color-bg)] border border-[var(--color-border)] text-xs font-medium px-4 py-2 pr-8 rounded-xl disabled:opacity-50 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] outline-none cursor-pointer">
+                        className="w-full appearance-none bg-[var(--color-bg)] border border-[var(--color-border)] text-xs font-medium px-4 py-2 pr-8 rounded-xl disabled:opacity-50 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] outline-none cursor-pointer">
                         {loadPresets?.map((p) => (
-                          <option key={p.id} value={p.id}>
+                          <option key={p.id} value={p.id} title={p.name}>
                             {p.name} {p.isDefault && "(Default)"}
                           </option>
                         ))}
@@ -270,7 +268,7 @@ export function ModelSelector() {
                       onClick={() => handleLoadGuard(model)}
                       disabled={serverStatus !== "idle" || isLoaded}
                       className={clsx(
-                        "inline-flex items-center justify-center px-6 py-2 rounded-xl font-bold text-sm transition-all",
+                        "inline-flex items-center justify-center w-full sm:w-auto px-6 py-2 rounded-xl font-bold text-sm transition-all",
                         isLoaded
                           ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)] cursor-default"
                           : "bg-[var(--color-accent)] text-white hover:shadow-lg hover:shadow-[var(--color-accent)]/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed",

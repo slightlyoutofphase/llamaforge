@@ -35,15 +35,16 @@ export function HardwareOptimizationModal({
 }: HardwareOptimizationModalProps) {
   const { hardware: hardwareInfo } = useAppStore();
   const optimizeMut = useOptimizeHardware();
+  const { mutate } = optimizeMut;
   const [optimizedConfig, setOptimizedConfig] = useState<Partial<ModelLoadConfig> | null>(null);
 
   useEffect(() => {
     if (modelPath) {
-      optimizeMut.mutate(modelPath, {
+      mutate(modelPath, {
         onSuccess: (data) => setOptimizedConfig(data),
       });
     }
-  }, [modelPath, optimizeMut]);
+  }, [modelPath, mutate]);
 
   const getSuggestions = (config: Partial<ModelLoadConfig>) => {
     const suggestions: string[] = [];

@@ -175,27 +175,27 @@ export function ModelLibraryPanel() {
                         <Cpu size={20} />
                       </div>
                       <div>
-                        <h3 className="font-semibold text-[var(--color-text-primary)] leading-tight">
+                        <h3 className="font-semibold text-[var(--color-text-primary)] leading-tight break-words">
                           {model.modelName}
                         </h3>
                         <div className="flex items-center gap-2 mt-1 flex-wrap min-w-0">
-                          <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)] font-mono min-w-0">
-                            <span className="bg-[var(--color-surface-elevated)] px-1.5 py-0.5 rounded border border-[var(--color-border)] truncate max-w-full">
+                          <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)] font-mono min-w-0 break-words">
+                            <span className="bg-[var(--color-surface-elevated)] px-1.5 py-0.5 rounded border border-[var(--color-border)] max-w-full break-words">
                               {model.metadata?.architecture || "Unknown Arch"}
                             </span>
-                            <span className="truncate max-w-full">
+                            <span className="max-w-full break-words">
                               {model.metadata?.fileSizeBytes
                                 ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
                                 : "Unknown Size"}
                             </span>
                           </div>
                           {(model.mmProjPath || model.metadata?.hasVisionEncoder) && (
-                            <span className="bg-blue-500/10 text-blue-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-blue-500/20 uppercase tracking-wider truncate max-w-full">
+                            <span className="bg-blue-500/10 text-blue-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-blue-500/20 uppercase tracking-wider max-w-full break-words">
                               Vision
                             </span>
                           )}
                           {model.metadata?.hasAudioEncoder && (
-                            <span className="bg-purple-500/10 text-purple-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-purple-500/20 uppercase tracking-wider">
+                            <span className="bg-purple-500/10 text-purple-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-purple-500/20 uppercase tracking-wider max-w-full break-words">
                               Audio
                             </span>
                           )}
@@ -210,7 +210,7 @@ export function ModelLibraryPanel() {
                   </div>
 
                   <div
-                    className="text-[10px] text-[var(--color-text-muted)] font-mono truncate"
+                    className="text-[10px] text-[var(--color-text-muted)] font-mono break-all whitespace-pre-wrap"
                     title={model.primaryPath}>
                     {model.primaryPath}
                   </div>

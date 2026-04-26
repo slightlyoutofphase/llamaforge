@@ -132,6 +132,7 @@ export default function App() {
 
         <button
           type="button"
+          title="Settings"
           onClick={() => setRightPanelView(rightPanelView === "settings" ? null : "settings")}
           className={`p-3 rounded-xl transition-all ${rightPanelView === "settings" ? "bg-[var(--color-surface-elevated)] text-[var(--color-accent)]" : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"}`}>
           <Settings size={22} />
@@ -141,7 +142,7 @@ export default function App() {
       {activeTab === "chat" && <ChatSidebar />}
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col relative h-full">
+      <div className="flex-1 min-w-0 flex flex-col relative h-full">
         <header className="h-14 border-b border-[var(--color-border)] flex items-center px-4 bg-[var(--color-surface)] justify-between shrink-0">
           <div className="flex items-center gap-4">
             <h1 className="font-semibold">
@@ -169,7 +170,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="flex-1 overflow-hidden relative flex flex-col">
+        <main className="flex-1 min-w-0 overflow-hidden relative flex flex-col">
           {errorMessage ? (
             <div className="shrink-0 relative z-20 p-4 bg-[var(--color-error)] text-white flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md">
               <div className="flex-1 min-w-0">
@@ -197,7 +198,9 @@ export default function App() {
             </div>
           ) : null}
 
-          <Outlet />
+          <div className="min-w-0 flex-1">
+            <Outlet />
+          </div>
           <ConsoleLog />
 
           <div className="fixed right-4 bottom-4 z-50 flex flex-col gap-3">
