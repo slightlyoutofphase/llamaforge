@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the client debug console and associated UI flows.
+ */
+
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import * as React from "react";

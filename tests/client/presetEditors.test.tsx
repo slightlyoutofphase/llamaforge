@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for preset editor components and their form interactions.
+ */
+
 import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";

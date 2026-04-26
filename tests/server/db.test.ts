@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for database initialization and schema layout.
+ */
+
 import { beforeEach, describe, expect, it } from "bun:test";
 import { getDb, initDb } from "../../src/server/persistence/db";
 

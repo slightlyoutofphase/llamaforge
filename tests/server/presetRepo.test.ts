@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for preset repository persistence and CRUD operations.
+ */
+
 import { beforeEach, describe, expect, it } from "bun:test";
 import { initDb } from "../../src/server/persistence/db";
 import {

@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for prompt cache statistics collection and retrieval.
+ */
+
 import { describe, expect, it } from "bun:test";
 import { getPromptCacheStats, updatePromptCacheStats } from "../../src/server/promptCache";
 

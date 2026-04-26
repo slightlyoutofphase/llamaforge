@@ -13,8 +13,13 @@ const EXCLUDED_DIRS = new Set(["node_modules", "dist", "build", ".git", ".next",
 const DEFAULT_SCAN_MAX_DEPTH = 20;
 const DEFAULT_SCAN_MAX_ENTRIES = 10000;
 
+/**
+ * Options controlling recursive model scan execution.
+ */
 export interface ScanOptions {
+  /** Maximum directory recursion depth for the model scan. */
   maxDepth?: number;
+  /** Maximum number of files to inspect while scanning for models. */
   maxEntries?: number;
 }
 

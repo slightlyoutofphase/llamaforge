@@ -13,7 +13,20 @@ import { populateMetadata, scanModels } from "./modelScanner";
 import { loadSettings } from "./persistence/settingsRepo";
 import { addConnection, removeConnection } from "./wsHub";
 
+/**
+ * Current hardware probe implementation used by backend routing.
+ *
+ * This value may be replaced during testing to avoid calling the real
+ * hardware probe and to exercise predictable responses.
+ */
 export let getHardwareInfoImpl = getHardwareInfo;
+
+/**
+ * Overrides the runtime hardware probe implementation for test injection.
+ *
+ * @param override - Object containing a replacement `getHardwareInfo` implementation.
+ * @internal
+ */
 export function __setHardwareProbe(override: { getHardwareInfo: typeof getHardwareInfo }) {
   getHardwareInfoImpl = override.getHardwareInfo;
 }

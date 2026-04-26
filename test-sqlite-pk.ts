@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Simple SQLite primary key behavior demonstration for Bun's sqlite binding.
+ */
+
 import { Database } from "bun:sqlite";
 
 const db = new Database(":memory:");

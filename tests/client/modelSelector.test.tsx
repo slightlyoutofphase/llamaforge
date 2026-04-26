@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the model selector and saved preset navigation.
+ */
+
 import { describe, expect, it, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, cleanup } from "@testing-library/react";

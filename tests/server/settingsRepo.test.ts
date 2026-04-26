@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for application settings persistence and defaults behavior.
+ */
+
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { initDb, resetDb } from "../../src/server/persistence/db";
 import { loadSettings, saveSettings } from "../../src/server/persistence/settingsRepo";

@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for shared client store behavior and state transitions.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { act, cleanup } from "@testing-library/react";
 

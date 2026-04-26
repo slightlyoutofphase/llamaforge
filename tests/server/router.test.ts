@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the router builder and settings-driven route behavior.
+ */
+
 import { beforeAll, describe, expect, it } from "bun:test";
 import { createChat } from "../../src/server/persistence/chatRepo";
 import { initDb } from "../../src/server/persistence/db";

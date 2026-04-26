@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for streaming proxy completion and cancellation behavior.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { createChat } from "../../src/server/persistence/chatRepo";
 import { initDb, resetDb } from "../../src/server/persistence/db";

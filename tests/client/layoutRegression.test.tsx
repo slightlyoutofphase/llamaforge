@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Layout regression tests for the client application, including navigation state.
+ */
+
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";

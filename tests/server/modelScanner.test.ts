@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for GGUF model scanning and filesystem discovery.
+ */
+
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";

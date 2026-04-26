@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for hardware probing and system capability detection.
+ */
+
 import { describe, expect, it } from "bun:test";
 import { getHardwareInfo } from "../../src/server/hardwareProbe";
 

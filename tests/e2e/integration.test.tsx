@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Integration tests covering full client-side user flows.
+ */
+
 import { beforeAll, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";

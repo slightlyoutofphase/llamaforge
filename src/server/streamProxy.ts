@@ -63,12 +63,19 @@ export function abortGeneration(idOrChatId: string) {
  * Defines the parameters for proxying completion requests against the backend server.
  */
 export interface ProxyCompletionParams {
+  /** Chat session identifier for the completion request. */
   chatId: string;
+  /** User content to send to the backend as the new message. */
   content: string;
+  /** Files attached to the completion request. */
   attachments: File[];
+  /** Whether this request should continue the last assistant response. */
   isContinue?: boolean;
+  /** Whether this request should recursively re-run the same prompt context. */
   isRecursive?: boolean;
+  /** Whether this request should regenerate the current assistant message. */
   isRegenerate?: boolean;
+  /** Whether this request is triggered from an internal tool call recursion. */
   isToolRecurse?: boolean;
 }
 

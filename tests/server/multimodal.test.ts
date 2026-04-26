@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for multimodal attachment processing and upload handling.
+ */
+
 import { describe, expect, it, mock } from "bun:test";
 import os from "node:os";
 import path from "node:path";

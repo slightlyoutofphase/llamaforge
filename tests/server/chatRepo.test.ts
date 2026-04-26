@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the chat repository persistence layer.
+ */
+
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
   addMessage,

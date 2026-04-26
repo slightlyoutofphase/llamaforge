@@ -8,7 +8,9 @@ import type { LlamaTimings } from "@shared/types.js";
  * Interface describing cumulative prompt evaluation statistics for a session.
  */
 export interface PromptCacheStats {
+  /** Total number of tokens evaluated by the model for the session. */
   totalEvaluated: number;
+  /** Total number of tokens served from cache during the session. */
   totalCached: number;
 }
 

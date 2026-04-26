@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the chat template engine and thinking tag parsing.
+ */
+
 import { describe, expect, it } from "bun:test";
 import {
   detectThinkingConfig,

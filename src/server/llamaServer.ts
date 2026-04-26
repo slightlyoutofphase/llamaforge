@@ -159,6 +159,17 @@ async function validateBinary(absolutePath: string): Promise<void> {
   }
 }
 
+/**
+ * Loads a model by spawning `llama-server` and waiting for the service to become healthy.
+ *
+ * @param config - Full model load configuration including CLI flags and options.
+ * @param llamaServerBin - Absolute path to the `llama-server` executable.
+ * @param minPort - Minimum port to consider when selecting a free server port.
+ * @param maxPort - Maximum port to consider when selecting a free server port.
+ * @returns The port number where the newly spawned server is listening.
+ * @throws {Error} If the server binary cannot be validated, if the model fails to load,
+ *         or if the server does not become ready within the configured timeout.
+ */
 export async function loadModel(
   config: ModelLoadConfig,
   llamaServerBin: string,

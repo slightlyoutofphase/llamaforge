@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for automatic chat naming behavior.
+ */
+
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { triggerAutoname } from "../../src/server/autoname";
 import { initDb, resetDb } from "../../src/server/persistence/db";

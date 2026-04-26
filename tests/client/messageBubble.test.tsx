@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the message bubble component and attachment presentation.
+ */
+
 import { describe, expect, it } from "bun:test";
 import { render, screen, fireEvent } from "@testing-library/react";
 import { MessageBubble } from "../../src/client/components/chat/MessageBubble";

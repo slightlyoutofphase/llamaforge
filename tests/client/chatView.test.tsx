@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the chat view and input bar component rendering.
+ */
+
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { InputBar } from "../../src/client/components/chat/InputBar";

@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the settings panel and application configuration flows.
+ */
+
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";

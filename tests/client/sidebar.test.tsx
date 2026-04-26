@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for sidebar component behavior and navigation.
+ */
+
 import { describe, expect, it, mock, beforeEach, afterEach } from "bun:test";
 import { fireEvent, render, screen, cleanup } from "@testing-library/react";
 import { ChatSidebar } from "../../src/client/components/sidebar/ChatSidebar";

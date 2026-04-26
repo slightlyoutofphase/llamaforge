@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for query hooks and server data handling in the client.
+ */
+
 import { describe, expect, it, mock, beforeEach, afterEach } from "bun:test";
 import { render, waitFor, cleanup } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";

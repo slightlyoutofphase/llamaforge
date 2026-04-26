@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for llama-server command line argument construction and lifecycle.
+ */
+
 import { describe, expect, it } from "bun:test";
 import { buildArgs } from "../../src/server/llamaServer";
 import type { ModelLoadConfig } from "../../src/shared/types";

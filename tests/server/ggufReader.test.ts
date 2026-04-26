@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for GGUF metadata parsing and edge case handling.
+ */
+
 import { describe, expect, it, mock } from "bun:test";
 
 // Mock @huggingface/gguf

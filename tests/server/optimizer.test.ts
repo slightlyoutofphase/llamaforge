@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for the optimizer logic that suggests load configuration values.
+ */
+
 import { describe, expect, it } from "bun:test";
 import type { GgufDisplayMetadata, HardwareInfo } from "@shared/types";
 import { optimizeLoadConfig } from "../../src/server/optimizer";

@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for token overflow detection and truncation behavior.
+ */
+
 import { describe, expect, it } from "bun:test";
 import type { ChatMessage } from "@shared/types";
 import { truncateMessages } from "../../src/server/overflow";

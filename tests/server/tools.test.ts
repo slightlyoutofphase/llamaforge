@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for tool schema generation and response parsing utilities.
+ */
+
 import { describe, expect, it } from "bun:test";
 import { generateGrammarFromSchema } from "../../src/server/tools";
 

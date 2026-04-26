@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for model scanner metadata population and cache integration.
+ */
+
 import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";

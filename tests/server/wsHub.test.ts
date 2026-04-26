@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for websocket hub broadcast and connection lifecycle.
+ */
+
 import { describe, expect, it, mock } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import {

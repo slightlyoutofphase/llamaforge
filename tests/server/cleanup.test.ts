@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Tests for cleanup operations on orphaned attachments.
+ */
+
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";

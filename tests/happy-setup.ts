@@ -1,3 +1,8 @@
+/**
+ * @packageDocumentation
+ * Setup helpers for Bun test and Happy DOM compatibility during client tests.
+ */
+
 import { mock } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import * as ReactReal from "react";
