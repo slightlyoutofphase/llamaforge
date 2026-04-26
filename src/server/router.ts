@@ -95,10 +95,10 @@ export function createRouter(_settings: AppSettings) {
         const rawModels = await scanModels(currentSettings.modelsPath);
         const { getMetadataForPath } = await import("./persistence/chatRepo");
         const models = await Promise.all(
-          rawModels.map(async (m) => ({
-            ...m,
-            metadata: await getMetadataForPath(m.primaryPath),
-          })),
+          rawModels.map(async (m) => {
+            const cachedMetadata = await getMetadataForPath(m.primaryPath);
+            return cachedMetadata ? { ...m, metadata: cachedMetadata } : await populateMetadata(m);
+          }),
         );
 
         void (async () => {
@@ -122,10 +122,10 @@ export function createRouter(_settings: AppSettings) {
         const rawModels = await scanModels(currentSettings.modelsPath);
         const { getMetadataForPath } = await import("./persistence/chatRepo");
         const models = await Promise.all(
-          rawModels.map(async (m) => ({
-            ...m,
-            metadata: await getMetadataForPath(m.primaryPath),
-          })),
+          rawModels.map(async (m) => {
+            const cachedMetadata = await getMetadataForPath(m.primaryPath);
+            return cachedMetadata ? { ...m, metadata: cachedMetadata } : await populateMetadata(m);
+          }),
         );
 
         void (async () => {

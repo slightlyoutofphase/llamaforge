@@ -65,9 +65,10 @@ export function LoadPresetEditor() {
   const [showOptimization, setShowOptimization] = useState(false);
 
   useEffect(() => {
-    if (activePreset) {
-      setLocalState({ ...activePreset, config: { ...activePreset.config } });
-    }
+    if (!activePreset) return;
+    setLocalState((prev) =>
+      prev?.id === activePreset.id ? prev : { ...activePreset, config: { ...activePreset.config } },
+    );
   }, [activePreset]);
 
   if (!localState?.config)

@@ -35,6 +35,7 @@ describe("SettingsPanel", () => {
 
   afterEach(() => {
     cleanup();
+    mock.restore();
   });
 
   it("renders settings fields with initial values", async () => {

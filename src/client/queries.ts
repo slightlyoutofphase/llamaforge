@@ -27,9 +27,10 @@ export const queryKeys = {
  * @returns A query object containing the list of {@link ChatSession} summaries.
  */
 export function useChats(q?: string) {
+  const query = q?.trim() ? q : undefined;
   return useQuery({
-    queryKey: queryKeys.chats(q),
-    queryFn: () => api.fetchChats(q),
+    queryKey: queryKeys.chats(query),
+    queryFn: () => api.fetchChats(query),
   });
 }
 
@@ -40,9 +41,10 @@ export function useChats(q?: string) {
  * @returns The React Query infinite query result.
  */
 export function useInfiniteChats(q?: string) {
+  const query = q?.trim() ? q : undefined;
   return useInfiniteQuery({
-    queryKey: queryKeys.chats(q),
-    queryFn: ({ pageParam = 0 }) => api.fetchChats(q, 150, pageParam),
+    queryKey: queryKeys.chats(query),
+    queryFn: ({ pageParam = 0 }) => api.fetchChats(query, 150, pageParam),
     initialPageParam: 0,
     getNextPageParam: (lastPage, allPages) => {
       // If the last page is empty, we are definitively at the end
@@ -78,7 +80,7 @@ export function useCreateChat() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.createChat,
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.chats() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["chats"] }),
   });
 }
 
@@ -94,7 +96,7 @@ export function useUpdateChat() {
       api.updateChat(id, updates),
     onSuccess: (_, { id }) => {
       qc.invalidateQueries({ queryKey: queryKeys.chat(id) });
-      qc.invalidateQueries({ queryKey: queryKeys.chats() });
+      qc.invalidateQueries({ queryKey: ["chats"] });
     },
   });
 }
@@ -149,7 +151,7 @@ export function useDeleteChat() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.deleteChat,
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.chats() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["chats"] }),
   });
 }
 
@@ -163,7 +165,7 @@ export function useBranchChat() {
   return useMutation({
     mutationFn: ({ id, messageId }: { id: string; messageId: string }) =>
       api.branchChat(id, messageId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.chats() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["chats"] }),
   });
 }
 

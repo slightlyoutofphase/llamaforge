@@ -1,11 +1,12 @@
-import { afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { InferencePresetEditor } from "../../src/client/components/preset/InferencePresetEditor";
-import { LoadPresetEditor } from "../../src/client/components/preset/LoadPresetEditor";
 
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
+
+let InferencePresetEditor: typeof import("../../src/client/components/preset/InferencePresetEditor").InferencePresetEditor;
+let LoadPresetEditor: typeof import("../../src/client/components/preset/LoadPresetEditor").LoadPresetEditor;
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -52,7 +53,12 @@ const mockLoadPreset = {
 };
 
 describe("Preset Editors Integration", () => {
-  beforeAll(() => {
+  let originalFetch: typeof global.fetch;
+
+  beforeAll(async () => {
+    mock.restore();
+    originalFetch = global.fetch;
+
     // Mock fetch for all API calls in these components
     global.fetch = mock((url, _options) => {
       if (typeof url === "string") {
@@ -84,11 +90,22 @@ describe("Preset Editors Integration", () => {
         },
       ],
     });
+
+    const inferenceModule =
+      await import("../../src/client/components/preset/InferencePresetEditor");
+    InferencePresetEditor = inferenceModule.InferencePresetEditor;
+    const loadModule = await import("../../src/client/components/preset/LoadPresetEditor");
+    LoadPresetEditor = loadModule.LoadPresetEditor;
   });
 
   afterEach(() => {
     cleanup();
     queryClient.clear();
+  });
+
+  afterAll(() => {
+    mock.restore();
+    global.fetch = originalFetch;
   });
 
   it("InferencePresetEditor: renders sampling parameters and handles changes", async () => {

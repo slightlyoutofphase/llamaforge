@@ -1499,27 +1499,25 @@ The inference preset for autonaming is hardcoded: temperature 0.3, top-k 10, max
 ## 23. Chat History Sidebar
 
 ```
-┌─ Chats ──────────────────────────┐
-│ [+ New Chat]   [⟳] [Import]      │
-│ [🔍 Search...]                   │
-├──────────────────────────────────┤
-│ ● Today                          │
-│   Mountain Image Chat      [⋯]   │
-│   🌿 Branch: Mountain (2)  [⋯]   │
-│ ● Yesterday                      │
-│   TypeScript Help          [⋯]   │
-│   Rust vs Go               [⋯]   │
-│ ● April 10                       │
-│   ...                            │
-└──────────────────────────────────┘
+┌─ Chats ───────────────────────────────────┐
+│ [+ New Chat]   [Sort by date ▼] [Export Chat] [Import] │
+│ [🔍 Search...]                            │
+├───────────────────────────────────────────┤
+│   Mountain Image Chat      [⋯]            │
+│   🌿 Branch: Mountain (2)  [⋯]            │
+│   TypeScript Help          [⋯]            │
+│   Rust vs Go               [⋯]            │
+│   ...                                   │
+└───────────────────────────────────────────┘
 ```
 
 ### Features
 
 - **Search:** Real-time name search via `GET /api/chats?q=...`.
-- **Group by date:** Chats are grouped into Today, Yesterday, and previous calendar dates.
+- **Sort order:** A sidebar sort control allows switching between sort by chat date and sort by chat name.
 - **New Chat:** Prominent `New Chat` button creates a new session and navigates to it immediately.
 - **Import:** `Import` button opens a file picker for `.json` exports and POSTs to `/api/chats/import`.
+- **Global export:** `Export Chat` button exports the currently active chat as JSON.
 - **Inline actions:** On hover, each chat row reveals buttons for Rename, Export, and Delete.
 - **Rename:** Inline text input replaces the chat name on row hover.
 - **Export:** Exports the chat as JSON only.

@@ -176,7 +176,7 @@ export function ModelSelector() {
                 <div
                   key={model.primaryPath}
                   className={clsx(
-                    "flex flex-col sm:flex-row items-start sm:items-center justify-between p-5 rounded-2xl border transition-all",
+                    "flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-5 rounded-2xl border transition-all overflow-hidden",
                     isLoaded
                       ? "bg-[var(--color-surface-elevated)] border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/50"
                       : "bg-[var(--color-surface)] border-[var(--color-border)] hover:border-gray-500",
@@ -184,7 +184,7 @@ export function ModelSelector() {
                   <div className="flex items-start gap-4 flex-1 min-w-0">
                     <div
                       className={clsx(
-                        "p-3 rounded-xl",
+                        "p-3 rounded-xl flex-shrink-0",
                         isLoaded
                           ? "bg-[var(--color-accent)] text-white"
                           : "bg-[var(--color-surface-elevated)] text-[var(--color-text-muted)]",
@@ -192,8 +192,8 @@ export function ModelSelector() {
                       <Cpu size={24} />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3">
-                        <h3 className="font-bold text-lg text-[var(--color-text-primary)] truncate">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <h3 className="font-bold text-lg text-[var(--color-text-primary)] truncate min-w-0">
                           {model.modelName}
                         </h3>
                         {isLoaded && (
@@ -203,35 +203,41 @@ export function ModelSelector() {
                         )}
                       </div>
 
-                      <div className="mt-1.5 space-y-1 text-xs text-[var(--color-text-secondary)] font-mono">
-                        <div className="truncate">{model.publisher || "Unknown Publisher"}</div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span>{model.metadata?.architecture || "Unknown Architecture"}</span>
-                          <span className="w-1 h-1 rounded-full bg-[var(--color-border)]"></span>
-                          <span>
+                      <div className="mt-1.5 space-y-1 text-xs text-[var(--color-text-secondary)] font-mono min-w-0">
+                        <div className="truncate max-w-full">
+                          {model.publisher || "Unknown Publisher"}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 min-w-0 text-[var(--color-text-secondary)]">
+                          <span className="truncate max-w-full">
+                            {model.metadata?.architecture || "Unknown Architecture"}
+                          </span>
+                          <span className="w-1 h-1 rounded-full bg-[var(--color-border)] flex-shrink-0"></span>
+                          <span className="truncate max-w-full">
                             {model.metadata?.fileSizeBytes
                               ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
                               : "Unknown Size"}
                           </span>
                           {(model.metadata?.hasVisionEncoder || model.mmProjPath) && (
                             <>
-                              <span className="w-1 h-1 rounded-full bg-[var(--color-border)]"></span>
-                              <span className="text-blue-400">VISION ENABLED</span>
+                              <span className="w-1 h-1 rounded-full bg-[var(--color-border)] flex-shrink-0"></span>
+                              <span className="text-blue-400 truncate max-w-full">
+                                VISION ENABLED
+                              </span>
                             </>
                           )}
                         </div>
                       </div>
 
                       <div
-                        className="mt-2 text-[10px] text-[var(--color-text-muted)] truncate max-w-lg"
+                        className="mt-2 text-[10px] text-[var(--color-text-muted)] truncate max-w-full"
                         title={model.primaryPath}>
                         {model.primaryPath}
                       </div>
                     </div>
                   </div>
 
-                  <div className="mt-4 sm:mt-0 flex items-center gap-3 shrink-0">
-                    <div className="relative">
+                  <div className="mt-4 sm:mt-0 flex flex-wrap items-center gap-3 shrink-0 w-full sm:w-auto">
+                    <div className="relative min-w-[10rem] w-full sm:w-auto">
                       <select
                         disabled={serverStatus !== "idle" || isLoaded}
                         value={

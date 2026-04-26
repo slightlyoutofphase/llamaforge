@@ -126,4 +126,158 @@ describe("ChatSidebar Component", () => {
 
     expect(useAppStore.getState().unreadChatIds).not.toContain("chat-2");
   });
+
+  it("shows empty sidebar state when there are no chats", () => {
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: { pages: [] },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), isPending: false }),
+      useUpdateChat: () => ({ mutate: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText("Your transmission log is empty.")).toBeTruthy();
+  });
+
+  it("filters chat history by search query", () => {
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [
+            [
+              { id: "chat-1", name: "General Chat", createdAt: 1000 },
+              { id: "chat-2", name: "Shopping List", createdAt: 2000 },
+            ],
+          ],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), isPending: false }),
+      useUpdateChat: () => ({ mutate: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Search activity..."), {
+      target: { value: "shop" },
+    });
+
+    expect(screen.queryByText("General Chat")).toBeNull();
+    expect(screen.getByText("Shopping List")).toBeTruthy();
+  });
+
+  it("renders sort control and export current chat button", () => {
+    useAppStore.setState({ currentChatId: "chat-1" });
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [[{ id: "chat-1", name: "Current Chat", createdAt: 1000 }]],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), isPending: false }),
+      useUpdateChat: () => ({ mutate: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByLabelText("Sort chats")).toBeTruthy();
+    const exportButton = screen.getByRole("button", { name: /Export Chat/i });
+    expect(exportButton).toBeTruthy();
+    expect((exportButton as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("sorts chats by name when the sort order changes", () => {
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [
+            [
+              { id: "chat-1", name: "Alpha Chat", createdAt: 1000 },
+              { id: "chat-2", name: "Beta Chat", createdAt: 2000 },
+            ],
+          ],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), isPending: false }),
+      useUpdateChat: () => ({ mutate: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    const sortSelect = screen.getByLabelText("Sort chats") as HTMLSelectElement;
+    expect(sortSelect.value).toBe("date");
+
+    const chatLinksBefore = screen.getAllByRole("link");
+    expect(chatLinksBefore[0].textContent).toContain("Beta Chat");
+    expect(chatLinksBefore[1].textContent).toContain("Alpha Chat");
+
+    fireEvent.change(sortSelect, { target: { value: "name" } });
+
+    const chatLinksAfter = screen.getAllByRole("link");
+    expect(chatLinksAfter[0].textContent).toContain("Alpha Chat");
+    expect(chatLinksAfter[1].textContent).toContain("Beta Chat");
+  });
+
+  it("renders branch history indicator for branch chats", () => {
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [
+            [
+              { id: "chat-1", name: "Main Chat", createdAt: 1000 },
+              { id: "chat-2", name: "Branch Chat", createdAt: 2000, isBranch: true },
+            ],
+          ],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), isPending: false }),
+      useUpdateChat: () => ({ mutate: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText("Main Chat")).toBeTruthy();
+    expect(screen.getByText("🌿 Branch Chat")).toBeTruthy();
+  });
 });

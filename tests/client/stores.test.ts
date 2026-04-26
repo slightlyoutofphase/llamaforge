@@ -1,10 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { act, cleanup } from "@testing-library/react";
-import { useAppStore } from "../../src/client/store";
-import { useUiStore } from "../../src/client/uiStore";
+
+let useAppStore: typeof import("../../src/client/store").useAppStore;
+let useUiStore: typeof import("../../src/client/uiStore").useUiStore;
 
 describe("stores logic", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    const storeModule = await import(`../../src/client/store.ts?cachebust=${Date.now()}`);
+    useAppStore = storeModule.useAppStore;
+    const uiModule = await import(`../../src/client/uiStore.ts?cachebust=${Date.now()}`);
+    useUiStore = uiModule.useUiStore;
+
     act(() => {
       useAppStore.setState({ serverStatus: "idle", isConnected: false });
     });

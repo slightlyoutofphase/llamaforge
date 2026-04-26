@@ -34,9 +34,8 @@ export function InferencePresetEditor() {
   const [localState, setLocalState] = useState<Partial<InferencePreset> | null>(null);
 
   useEffect(() => {
-    if (activePreset) {
-      setLocalState(activePreset);
-    }
+    if (!activePreset) return;
+    setLocalState((prev) => (prev?.id === activePreset.id ? prev : activePreset));
   }, [activePreset]);
 
   if (!localState) return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;

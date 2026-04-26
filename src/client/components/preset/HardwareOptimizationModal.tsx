@@ -43,7 +43,7 @@ export function HardwareOptimizationModal({
         onSuccess: (data) => setOptimizedConfig(data),
       });
     }
-  }, [modelPath, optimizeMut.mutate]);
+  }, [modelPath, optimizeMut]);
 
   const getSuggestions = (config: Partial<ModelLoadConfig>) => {
     const suggestions: string[] = [];
