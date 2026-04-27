@@ -33,9 +33,14 @@ export async function cleanupOrphanedAttachments() {
 
     const referencedSet = new Set(referencedFiles);
 
+    // M7 fix: skip cleanup for chats with active generations to prevent race conditions
+    const { getActiveGenerationChatIds } = await import("../streamProxy");
+    const activeChatIds = getActiveGenerationChatIds();
     await Promise.all(
       chatDirs.map(async (chatDir) => {
         if (!chatDir.isDirectory()) return;
+        // M7 fix: skip chats with active generations
+        if (activeChatIds.has(chatDir.name)) return;
         const chatDirPath = path.join(rootDir, chatDir.name);
 
         const messageDirs = await fs.readdir(chatDirPath, { withFileTypes: true }).catch(() => []);

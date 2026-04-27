@@ -29,7 +29,12 @@ const DEFAULT_SETTINGS: AppSettings = {
  *
  * @returns A promise resolving to the {@link AppSettings} object. Returns defaults if no settings are persisted.
  */
+// S4 fix: in-memory settings cache to avoid DB read on every API call
+let _cachedSettings: AppSettings | null = null;
+
 export async function loadSettings(): Promise<AppSettings> {
+  if (_cachedSettings) return { ..._cachedSettings };
+
   const db = getDb();
   const stmt = db.prepare<{ settings_json: string }, []>(
     "SELECT settings_json FROM settings WHERE id = 1",
@@ -37,13 +42,16 @@ export async function loadSettings(): Promise<AppSettings> {
   const row = stmt.get();
 
   if (!row) {
+    _cachedSettings = { ...DEFAULT_SETTINGS };
     return { ...DEFAULT_SETTINGS };
   }
 
   try {
     const parsed = JSON.parse(row.settings_json);
-    return { ...DEFAULT_SETTINGS, ...parsed };
+    _cachedSettings = { ...DEFAULT_SETTINGS, ...parsed };
+    return { ..._cachedSettings };
   } catch (_err) {
+    _cachedSettings = { ...DEFAULT_SETTINGS };
     return { ...DEFAULT_SETTINGS };
   }
 }
@@ -65,13 +73,22 @@ export async function saveSettings(updates: Partial<AppSettings>): Promise<void>
   assertPlainObject(updates);
 
   const run = async () => {
-    await settingsLock;
+    // S3 fix (settingsLock): catch and reset the lock to prevent cascading failures
+    try {
+      await settingsLock;
+    } catch {
+      // Previous lock rejected — ignore the stale error and proceed
+    }
+    // S4 fix: invalidate cache before loading so we read fresh data
+    _cachedSettings = null;
     const current = await loadSettings();
     const merged = { ...current, ...updates };
 
     const db = getDb();
     const stmt = db.prepare("INSERT OR REPLACE INTO settings (id, settings_json) VALUES (1, ?)");
     stmt.run(JSON.stringify(merged));
+    // Update cache with the merged result
+    _cachedSettings = merged;
   };
 
   settingsLock = run();

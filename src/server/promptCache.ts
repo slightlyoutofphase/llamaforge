@@ -14,7 +14,9 @@ export interface PromptCacheStats {
   totalCached: number;
 }
 
-const stats: Record<string, PromptCacheStats> = {};
+// M11 fix: use a bounded Map instead of an unbounded Record to prevent slow memory leaks
+const MAX_STATS_ENTRIES = 500;
+const stats = new Map<string, PromptCacheStats>();
 
 /**
  * Updates the prompt cache statistics for a chat session based on inference timings.
@@ -23,11 +25,23 @@ const stats: Record<string, PromptCacheStats> = {};
  * @param timings - The performance timings returned by the model server.
  */
 export function updatePromptCacheStats(chatId: string, timings: LlamaTimings): void {
-  if (!stats[chatId]) {
-    stats[chatId] = { totalEvaluated: 0, totalCached: 0 };
+  const existing = stats.get(chatId) ?? { totalEvaluated: 0, totalCached: 0 };
+  existing.totalEvaluated += timings.tokens_evaluated;
+  existing.totalCached += timings.tokens_cached;
+  // Delete + set to move to end of insertion order (most-recently-used)
+  stats.delete(chatId);
+  stats.set(chatId, existing);
+
+  // M11 fix: evict oldest 25% when exceeding bounds
+  if (stats.size > MAX_STATS_ENTRIES) {
+    const evictCount = Math.floor(stats.size * 0.25);
+    let removed = 0;
+    for (const key of stats.keys()) {
+      if (removed >= evictCount) break;
+      stats.delete(key);
+      removed++;
+    }
   }
-  stats[chatId].totalEvaluated += timings.tokens_evaluated;
-  stats[chatId].totalCached += timings.tokens_cached;
 }
 
 /**
@@ -37,5 +51,15 @@ export function updatePromptCacheStats(chatId: string, timings: LlamaTimings): v
  * @returns The gathered {@link PromptCacheStats} or undefined if no stats exist.
  */
 export function getPromptCacheStats(chatId: string): PromptCacheStats | undefined {
-  return stats[chatId];
+  return stats.get(chatId);
+}
+
+/**
+ * Removes prompt cache statistics for a specific chat session.
+ * Called when a chat is deleted to avoid tracking stats for non-existent chats.
+ *
+ * @param chatId - The unique ID of the chat session to evict stats for.
+ */
+export function evictPromptCacheStats(chatId: string): void {
+  stats.delete(chatId);
 }

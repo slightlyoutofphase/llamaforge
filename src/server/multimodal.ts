@@ -12,6 +12,12 @@ import { getDb } from "./persistence/db";
 
 const APP_ROOT = path.join(os.homedir(), ".llamaforge");
 
+// S8 fix: in-memory cache for extracted PDF text to avoid re-parsing on every generation
+const _pdfTextCache = new Map<string, string>();
+const _PDF_CACHE_MAX_SIZE = 50;
+// M8 fix: max PDF file size for text extraction (50MB) to prevent OOM on low-memory machines
+const MAX_PDF_EXTRACTION_BYTES = 50 * 1024 * 1024;
+
 function resolveStoredAttachmentPath(relativePath: string): string | null {
   if (!relativePath || typeof relativePath !== "string") return null;
   if (path.isAbsolute(relativePath)) return null;
@@ -77,19 +83,27 @@ export async function processUpload(
 
   // Convert/extract based on mime type
   if (mimeType === "application/pdf") {
-    try {
-      const pdfjs = await import("pdfjs-dist");
-      const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise;
-      let fullText = "";
-      for (let i = 1; i <= doc.numPages; i++) {
-        const page = await doc.getPage(i);
-        const content = await page.getTextContent();
-        fullText += `${content.items.map((item: any) => item.str).join(" ")}\n`;
+    // M8 fix: skip extraction for very large PDFs to prevent OOM
+    if (buffer.byteLength > MAX_PDF_EXTRACTION_BYTES) {
+      console.warn(
+        `[multimodal] PDF exceeds ${MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)}MB limit for text extraction, skipping: ${fileName} (${(buffer.byteLength / (1024 * 1024)).toFixed(1)}MB)`,
+      );
+      attachment.extractedText = `[PDF text extraction skipped: file size (${(buffer.byteLength / (1024 * 1024)).toFixed(1)}MB) exceeds the ${MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)}MB extraction limit]`;
+    } else {
+      try {
+        const pdfjs = await import("pdfjs-dist");
+        const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise;
+        let fullText = "";
+        for (let i = 1; i <= doc.numPages; i++) {
+          const page = await doc.getPage(i);
+          const content = await page.getTextContent();
+          fullText += `${content.items.map((item: any) => item.str).join(" ")}\n`;
+        }
+        attachment.extractedText = fullText;
+      } catch (e) {
+        console.warn("PDF extraction failed", e);
+        attachment.extractedText = `[Error extracting PDF text: ${e instanceof Error ? e.message : String(e)}]`;
       }
-      attachment.extractedText = fullText;
-    } catch (e) {
-      console.warn("PDF extraction failed", e);
-      attachment.extractedText = `[Error extracting PDF text: ${e instanceof Error ? e.message : String(e)}]`;
     }
   } else if (!mimeType.startsWith("image/") && !mimeType.startsWith("audio/")) {
     // text, markdown, csv, json, xml, code...
@@ -156,6 +170,20 @@ export async function buildContentParts(
     if (attachment.mimeType === "application/pdf") {
       const absPath = resolveStoredAttachmentPath(attachment.filePath);
       if (!absPath) return undefined;
+      // S8 fix: check in-memory cache before re-parsing
+      const cached = _pdfTextCache.get(absPath);
+      if (cached !== undefined) return cached;
+      // M8 fix: check file size before extraction to prevent OOM
+      try {
+        const fsStat = await fs.stat(absPath);
+        if (fsStat.size > MAX_PDF_EXTRACTION_BYTES) {
+          const sizeMsg = `[PDF text extraction skipped: file size (${(fsStat.size / (1024 * 1024)).toFixed(1)}MB) exceeds the ${MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)}MB extraction limit]`;
+          _pdfTextCache.set(absPath, sizeMsg);
+          return sizeMsg;
+        }
+      } catch {
+        // stat failed — let the downstream read attempt fail
+      }
       try {
         const pdfjs = await import("pdfjs-dist");
         const buffer = await fs.readFile(absPath);
@@ -165,6 +193,12 @@ export async function buildContentParts(
           const page = await doc.getPage(i);
           const content = await page.getTextContent();
           fullText += `${content.items.map((item: any) => item.str).join(" ")}\n`;
+        }
+        // S8 fix: store in cache with LRU eviction
+        _pdfTextCache.set(absPath, fullText);
+        if (_pdfTextCache.size > _PDF_CACHE_MAX_SIZE) {
+          const firstKey = _pdfTextCache.keys().next().value;
+          if (firstKey) _pdfTextCache.delete(firstKey);
         }
         return fullText;
       } catch (e) {

@@ -14,7 +14,7 @@ import {
 } from "./chatTemplateEngine";
 import { getServerStatus } from "./llamaServer";
 import { processUpload } from "./multimodal";
-import { addMessage, getChat, updateChat } from "./persistence/chatRepo";
+import { addMessage, getChat, getNextPosition, updateChat } from "./persistence/chatRepo";
 import { getInferencePresets, getSystemPresets } from "./persistence/presetRepo";
 import { loadSettings } from "./persistence/settingsRepo";
 import { updatePromptCacheStats } from "./promptCache";
@@ -57,6 +57,18 @@ export function abortGeneration(idOrChatId: string) {
       activeGenerations.delete(id);
     }
   }
+}
+
+/**
+ * Returns the set of chat IDs that currently have active generations in progress.
+ * Used by cleanup.ts to avoid deleting attachment files that may be actively read.
+ */
+export function getActiveGenerationChatIds(): Set<string> {
+  const chatIds = new Set<string>();
+  for (const session of activeGenerations.values()) {
+    chatIds.add(session.chatId);
+  }
+  return chatIds;
 }
 
 /**
@@ -143,7 +155,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       role: "user",
       content: newMessage,
       rawContent: newMessage,
-      position: (chat.messages?.length || 0) + (sysPreset ? 1 : 0),
+      position: getNextPosition(chatId),
       createdAt: Date.now(),
     };
     await addMessage(userMsg);
@@ -227,14 +239,24 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   }
 
   // --- Overflow Policy Truncation ---
-  const overflowPolicy = infPreset?.contextOverflowPolicy || "TruncateMiddle";
+  // C7 fix: guard against infPreset being undefined (edge case after data wipe)
+  const safeInfPreset = infPreset ?? {
+    maxTokens: -1,
+    contextOverflowPolicy: "TruncateMiddle" as const,
+    temperature: 0.8,
+    topK: 40,
+    topP: 0.95,
+    minP: 0.05,
+    stopStrings: [] as string[],
+  };
+  const overflowPolicy = safeInfPreset?.contextOverflowPolicy || "TruncateMiddle";
   const { truncateMessages, getTokens } = await import("./overflow");
   const ctxSize = server.config?.contextSize || 4096;
   rawMessages = await truncateMessages(
     rawMessages,
     overflowPolicy,
     ctxSize,
-    infPreset.maxTokens,
+    safeInfPreset.maxTokens,
     server.port,
   );
   const promptTokensCount = await getTokens(rawMessages, server.port);
@@ -416,7 +438,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       "",
       "",
       null,
-      rawMessages.length,
+      getNextPosition(chatId),
       Date.now(),
       null,
       null,
@@ -557,19 +579,21 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               });
 
               const { waitForToolApproval, executeTool } = await import("./tools");
-              await addMessage({
-                id: assistantMessageId,
-                chatId,
-                role: "assistant",
-                content: prevContent,
-                rawContent: fullRawContent,
-                thinkingContent: prevThinking,
-                position: rawMessages.length,
-                createdAt: Date.now(),
-                toolCallsJson: JSON.stringify(toolCalls),
-              });
+              // C1 fix: The assistant row was already INSERTed at line ~407.
+              // Use UPDATE instead of a second INSERT to avoid PRIMARY KEY violation.
+              const dbToolUpdate = await import("./persistence/db").then((m) => m.getDb());
+              dbToolUpdate
+                .prepare(
+                  "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, tool_calls_json = ? WHERE id = ?",
+                )
+                .run(
+                  prevContent,
+                  fullRawContent,
+                  prevThinking || null,
+                  JSON.stringify(toolCalls),
+                  assistantMessageId,
+                );
 
-              let i = 0;
               for (const tc of toolCalls) {
                 const { approved, editedArguments } = await waitForToolApproval(chatId, tc.id);
                 if (!approved) {
@@ -599,13 +623,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                   role: "tool",
                   content: toolResult,
                   rawContent: toolResult,
-                  position: rawMessages.length + 1 + i,
+                  position: getNextPosition(chatId),
                   createdAt: Date.now(),
                   toolCallId: tc.id,
                 };
                 await addMessage(toolMsg);
                 broadcast({ type: "message", chatId, message: toolMsg });
-                i++;
               }
 
               if (!shouldStop) {
@@ -718,7 +741,8 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                 fullThinking: prevThinking,
               });
 
-              await updateChat(chatId, {});
+              // C8 fix: explicitly pass updatedAt instead of relying on implicit empty-object behavior
+              await updateChat(chatId, { updatedAt: Date.now() });
               const dbFinal = await import("./persistence/db").then((m) => m.getDb());
               dbFinal
                 .prepare(
@@ -758,6 +782,24 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
             assistantMessageId,
             generationId,
           });
+          // C6 fix: delete the empty assistant row if generation failed
+          // to prevent orphaned blank messages in chat history.
+          if (!isContinue) {
+            try {
+              const dbCleanup = await import("./persistence/db").then((m) => m.getDb());
+              const row = dbCleanup
+                .query<{ content: string }, [string]>("SELECT content FROM messages WHERE id = ?")
+                .get(assistantMessageId);
+              if (row && row.content.length === 0) {
+                dbCleanup.prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
+              }
+            } catch (cleanupErr) {
+              console.error(
+                "[streamProxy] Failed to clean up orphaned assistant message",
+                cleanupErr,
+              );
+            }
+          }
           broadcast({
             type: "error",
             chatId,
@@ -784,6 +826,21 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         assistantMessageId,
         generationId,
       });
+      // C6 fix: delete the empty assistant row if the fetch itself failed
+      // (e.g., model server unreachable, connection refused)
+      if (!isContinue) {
+        try {
+          const dbCleanup = await import("./persistence/db").then((m) => m.getDb());
+          const row = dbCleanup
+            .query<{ content: string }, [string]>("SELECT content FROM messages WHERE id = ?")
+            .get(assistantMessageId);
+          if (row && row.content.length === 0) {
+            dbCleanup.prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
+          }
+        } catch (cleanupErr) {
+          console.error("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
+        }
+      }
       broadcast({
         type: "error",
         chatId,

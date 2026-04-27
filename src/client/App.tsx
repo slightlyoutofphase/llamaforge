@@ -48,11 +48,15 @@ export default function App() {
   const location = useLocation();
   const activeTab = location.pathname.startsWith("/chat") ? "chat" : "models";
 
+  // S11 fix: Zustand store methods are stable references; run initialization once on mount only
+  /* eslint-disable react-hooks/exhaustive-deps */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Zustand methods are stable singletons
   useEffect(() => {
     connectWs();
     fetchHardware();
     fetchModels().then(() => fetchServerStatus());
-  }, [connectWs, fetchHardware, fetchModels, fetchServerStatus]);
+  }, []);
+  /* eslint-enable react-hooks/exhaustive-deps */
 
   useEffect(() => {
     const theme = settings?.theme || "system";

@@ -21,12 +21,14 @@ function normalizeMaxTokens(maxTokens: number): number {
 }
 
 function buildMessageKey(message: ChatMessage): string {
+  // M1 fix: include message ID to prevent key collisions across different message sets
   const attachments = (message.attachments || []).map((a) => `${a.mimeType}`).join("|");
-  return `${message.role}:${message.content}:${attachments}`;
+  return `${message.id ?? "_"}:${message.role}:${message.content}:${attachments}`;
 }
 
 function buildMessagesKey(messages: ChatMessage[], port?: number): string {
-  return `${messages.map((m) => buildMessageKey(m)).join("||")}|port:${port ?? 0}`;
+  // M1 fix: include array length as an additional discriminator
+  return `n=${messages.length}|${messages.map((m) => buildMessageKey(m)).join("||")}|port:${port ?? 0}`;
 }
 
 async function fetchTokenCount(text: string, port?: number): Promise<number> {
@@ -74,8 +76,15 @@ export async function getTokens(msgs: ChatMessage[], port?: number): Promise<num
 
   const total = contentTokens + attachmentTokens;
   tokenCountCache.set(cacheKey, total);
+  // S7 fix: evict oldest 25% instead of clearing everything to prevent thrashing
   if (tokenCountCache.size > 500) {
-    tokenCountCache.clear();
+    const evictCount = Math.floor(tokenCountCache.size * 0.25);
+    let removed = 0;
+    for (const key of tokenCountCache.keys()) {
+      if (removed >= evictCount) break;
+      tokenCountCache.delete(key);
+      removed++;
+    }
   }
   return total;
 }

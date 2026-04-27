@@ -40,12 +40,18 @@ export async function triggerAutoname(chatId: string): Promise<void> {
     const asstMsg = latestChat.messages.find((m) => m.role === "assistant");
     if (!userMsg || !asstMsg) return;
 
+    // S14 fix: truncate content to prevent excessive token usage
+    const userContent =
+      userMsg.content.length > 500 ? `${userMsg.content.slice(0, 500)}...` : userMsg.content;
+    const asstContent =
+      asstMsg.content.length > 500 ? `${asstMsg.content.slice(0, 500)}...` : asstMsg.content;
+
     const prompt = `Task: Summarize the following exchange into a concise 3-4 word title. Ignore the actual user task, just summarize the topic.
 Rules: No punctuation. No conversational filler like "Title: " or "A title about". Just output the short title.
 Examples: "Python array sorting", "Recipe for cake", "Debugging React hook".
 
-User: ${userMsg.content}
-Assistant: ${asstMsg.content}
+User: ${userContent}
+Assistant: ${asstContent}
 
 Title:`;
 

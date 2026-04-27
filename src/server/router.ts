@@ -11,7 +11,7 @@ import { getHardwareInfo } from "./hardwareProbe";
 import { getServerStatus, loadModel, unloadModel } from "./llamaServer";
 import { populateMetadata, scanModels } from "./modelScanner";
 import { loadSettings } from "./persistence/settingsRepo";
-import { addConnection, removeConnection } from "./wsHub";
+import { addConnection, recordPong, removeConnection } from "./wsHub";
 
 /**
  * Current hardware probe implementation used by backend routing.
@@ -49,6 +49,10 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 const MAX_MESSAGE_CONTENT_LENGTH = 25000;
 const MAX_MESSAGE_ATTACHMENTS = 5;
 const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+
+// S5 fix: debounce background metadata population (once per 60 seconds max)
+const _METADATA_DEBOUNCE_MS = 60_000;
+let _lastMetadataPopulationTime = 0;
 
 function normalizeAttachmentPath(attachPath: string): string | null {
   if (!attachPath || typeof attachPath !== "string") return null;
@@ -114,15 +118,20 @@ export function createRouter(_settings: AppSettings) {
           }),
         );
 
-        void (async () => {
-          try {
-            const enriched = await Promise.all(rawModels.map((m) => populateMetadata(m)));
-            const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
-            await ensureModelDefaultPresets(enriched);
-          } catch (e) {
-            console.error("Background model metadata population failed:", e);
-          }
-        })();
+        // S5 fix: debounce background metadata population to avoid I/O spikes on every call
+        const now = Date.now();
+        if (now - _lastMetadataPopulationTime > _METADATA_DEBOUNCE_MS) {
+          _lastMetadataPopulationTime = now;
+          void (async () => {
+            try {
+              const enriched = await Promise.all(rawModels.map((m) => populateMetadata(m)));
+              const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
+              await ensureModelDefaultPresets(enriched);
+            } catch (e) {
+              console.error("Background model metadata population failed:", e);
+            }
+          })();
+        }
 
         return new Response(JSON.stringify(models), {
           status: 200,
@@ -275,21 +284,20 @@ export function createRouter(_settings: AppSettings) {
         const parts = url.pathname.split("/");
         if (parts.length === 5) {
           const chatId = parts[3] as string;
+
+          // Buffer the body once to avoid double-consume (C5 fix).
+          // Clone the request so we can try formData first, then fall back to JSON.
+          const cloned = req.clone();
+
+          let content = "";
+          const attachments: File[] = [];
+          let parsed = false;
+
+          // Try formData first (multipart/form-data from the file-upload path)
           try {
             const formData = await req.formData();
-            const content = formData.get("content")?.toString() || "";
-            if (typeof content !== "string" || content.length === 0) {
-              return badRequest("chat message content is required.");
-            }
-            if (content.length > MAX_MESSAGE_CONTENT_LENGTH) {
-              return badRequest(
-                `Chat messages cannot exceed ${MAX_MESSAGE_CONTENT_LENGTH} characters.`,
-              );
-            }
+            content = formData.get("content")?.toString() || "";
 
-            const attachments = [];
-
-            // Loop through all file inputs
             for (const [key, value] of formData.entries()) {
               if (key === "file" && value instanceof File) {
                 if (attachments.length >= MAX_MESSAGE_ATTACHMENTS) {
@@ -303,35 +311,40 @@ export function createRouter(_settings: AppSettings) {
                 attachments.push(value);
               }
             }
+            parsed = true;
+          } catch (_formErr) {
+            // Not formData — try JSON from the cloned request
+            try {
+              const body: any = await cloned.json();
+              if (isPlainObject(body) && typeof body.content === "string") {
+                content = body.content;
+                parsed = true;
+              }
+            } catch (_jsonErr) {
+              // Neither parse strategy worked
+            }
+          }
 
+          if (!parsed) {
+            return badRequest("Invalid chat message request — expected formData or JSON.");
+          }
+
+          // C4 fix: allow empty content when attachments are present
+          if (content.length === 0 && attachments.length === 0) {
+            return badRequest("chat message content is required when no attachments are provided.");
+          }
+          if (content.length > MAX_MESSAGE_CONTENT_LENGTH) {
+            return badRequest(
+              `Chat messages cannot exceed ${MAX_MESSAGE_CONTENT_LENGTH} characters.`,
+            );
+          }
+
+          try {
             const { proxyCompletion } = await import("./streamProxy");
             const messageId = await proxyCompletion({ chatId, content, attachments });
             return jsonResponse({ messageId });
           } catch (e: any) {
-            // fallback if it's JSON
-            try {
-              const body: any = await req.json();
-              if (!isPlainObject(body) || typeof body.content !== "string") {
-                return badRequest("chat message content is required.");
-              }
-              if (body.content.length > MAX_MESSAGE_CONTENT_LENGTH) {
-                return badRequest(
-                  `Chat messages cannot exceed ${MAX_MESSAGE_CONTENT_LENGTH} characters.`,
-                );
-              }
-              const { proxyCompletion } = await import("./streamProxy");
-              const messageId = await proxyCompletion({
-                chatId,
-                content: body.content,
-                attachments: [],
-              });
-              return jsonResponse({ messageId });
-            } catch (e2: any) {
-              return jsonResponse(
-                { error: e2?.message || e?.message || "Invalid chat message request." },
-                400,
-              );
-            }
+            return jsonResponse({ error: e?.message || "Chat message send failed." }, 500);
           }
         }
       }
@@ -367,7 +380,18 @@ export function createRouter(_settings: AppSettings) {
         const id = parts[3] as string;
         if (parts.length === 4) {
           if (req.method === "GET") {
-            const chat = await chatRepo.getChat(id);
+            // M10 fix: support message pagination via query params to avoid
+            // loading 10,000+ messages in a single response.
+            // Default to last 500 messages; client can pass ?messageLimit=0 for all.
+            const msgLimitParam = url.searchParams.get("messageLimit");
+            const msgOffsetParam = url.searchParams.get("messageOffset");
+            const messageLimit = msgLimitParam !== null ? parseInt(msgLimitParam, 10) : 500;
+            const messageOffset = msgOffsetParam !== null ? parseInt(msgOffsetParam, 10) : 0;
+            const chat = await chatRepo.getChat(
+              id,
+              messageLimit > 0 ? messageLimit : undefined,
+              messageOffset > 0 ? messageOffset : undefined,
+            );
             if (!chat) return new Response("Not Found", { status: 404 });
             return new Response(JSON.stringify(chat), {
               headers: { "Content-Type": "application/json" },
@@ -704,6 +728,10 @@ export function createRouter(_settings: AppSettings) {
       },
       open(ws: ServerWebSocket<unknown>) {
         addConnection(ws);
+      },
+      pong(ws: ServerWebSocket<unknown>) {
+        // M4 fix: record pong time for heartbeat staleness detection
+        recordPong(ws);
       },
       close(ws: ServerWebSocket<unknown>) {
         removeConnection(ws);

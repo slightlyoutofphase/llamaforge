@@ -14,7 +14,34 @@ let activePort: number | null = null;
 let currentConfig: ModelLoadConfig | null = null;
 let currentStatus: LlamaServerStatus = "idle";
 let loadingLock = false;
-let bootLogs: string[] = [];
+// M2 fix: ring buffer for boot logs to prevent O(n) shift operations during long loads
+const BOOT_LOG_CAPACITY = 1000;
+let bootLogBuffer: string[] = [];
+let bootLogWriteIndex = 0;
+
+function pushBootLog(line: string): void {
+  if (bootLogBuffer.length < BOOT_LOG_CAPACITY) {
+    bootLogBuffer.push(line);
+  } else {
+    bootLogBuffer[bootLogWriteIndex] = line;
+  }
+  bootLogWriteIndex = (bootLogWriteIndex + 1) % BOOT_LOG_CAPACITY;
+}
+
+function getBootLogs(): string[] {
+  if (bootLogBuffer.length < BOOT_LOG_CAPACITY) {
+    return bootLogBuffer.slice();
+  }
+  // Ring buffer is full: read from writeIndex (oldest) to end, then start to writeIndex
+  return [...bootLogBuffer.slice(bootLogWriteIndex), ...bootLogBuffer.slice(0, bootLogWriteIndex)];
+}
+
+function clearBootLogs(): void {
+  bootLogBuffer = [];
+  bootLogWriteIndex = 0;
+}
+// S9 fix: track active stream readers for cancellation on unload
+const activeReaders: Set<ReadableStreamDefaultReader<Uint8Array>> = new Set();
 
 /**
  * Retrieves the raw Bun subprocess instance.
@@ -180,7 +207,7 @@ export async function loadModel(
     throw new Error("Model loading in progress. Please wait.");
   }
   loadingLock = true;
-  bootLogs = [];
+  clearBootLogs();
 
   try {
     await validateBinary(llamaServerBin);
@@ -209,7 +236,7 @@ export async function loadModel(
 
     const isReady = await waitForHealthCheck(port);
     if (!isReady) {
-      const lastError = bootLogs.slice(-10).join("\n");
+      const lastError = getBootLogs().slice(-10).join("\n");
       await unloadModel();
       throw new Error(`llama-server failed to become ready. Last logs:\n${lastError}`);
     }
@@ -250,6 +277,8 @@ async function consumeLogs(
 ) {
   if (!stream) return;
   const reader = stream.getReader();
+  // S9 fix: track the reader for cancellation
+  activeReaders.add(reader);
   const decoder = new TextDecoder();
   let buffer = "";
 
@@ -272,8 +301,7 @@ async function consumeLogs(
         if (!line.trim()) continue;
 
         // Rolling buffer for boot error reporting
-        bootLogs.push(line);
-        if (bootLogs.length > 2000) bootLogs.shift();
+        pushBootLog(line);
 
         if (line.startsWith("{") && line.endsWith("}")) {
           try {
@@ -298,6 +326,9 @@ async function consumeLogs(
     }
   } catch {
     // Ignore stream closed errors
+  } finally {
+    // S9 fix: remove reader from tracking set
+    activeReaders.delete(reader);
   }
 }
 
@@ -316,6 +347,16 @@ export async function unloadModel(): Promise<void> {
 
   setStatus("loading");
   const target = proc;
+
+  // S9 fix: cancel all active log readers before killing the process
+  for (const reader of activeReaders) {
+    try {
+      reader.cancel();
+    } catch (_e) {
+      // Ignore — reader may already be closed
+    }
+  }
+  activeReaders.clear();
 
   try {
     try {

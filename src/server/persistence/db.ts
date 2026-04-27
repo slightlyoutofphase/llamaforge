@@ -10,6 +10,7 @@ import { join } from "node:path";
 
 let _db: Database | null = null;
 let _dbPath: string | null = null;
+let _vacuumInterval: ReturnType<typeof setInterval> | null = null;
 
 function resolveDbPath(path?: string): string {
   if (path === ":memory:") {
@@ -29,6 +30,11 @@ function resolveDbPath(path?: string): string {
  * Closes and clears the current singleton database instance.
  */
 export function resetDb(): void {
+  // S3 fix: clear the incremental vacuum interval to prevent leaks
+  if (_vacuumInterval !== null) {
+    clearInterval(_vacuumInterval);
+    _vacuumInterval = null;
+  }
   if (_db) {
     _db.close();
     _db = null;
@@ -55,16 +61,43 @@ export function getDb(path?: string): Database {
     resetDb();
   }
 
-  _db = new Database(resolvedPath);
+  // M5 fix: graceful handling of DB corruption — attempt recovery instead of dying
+  try {
+    _db = new Database(resolvedPath);
+  } catch (err) {
+    if (resolvedPath === ":memory:") {
+      throw err; // Can't recover in-memory DBs
+    }
+    console.error(
+      `[db] Failed to open database at ${resolvedPath}. ` +
+        `The file may be corrupted. Attempting recovery by creating a fresh database.`,
+      err,
+    );
+    // Rename the corrupt file so the user can inspect it later
+    const corruptPath = `${resolvedPath}.corrupt.${Date.now()}`;
+    try {
+      fs.renameSync(resolvedPath, corruptPath);
+      console.warn(`[db] Corrupt database renamed to: ${corruptPath}`);
+    } catch (renameErr) {
+      console.error(`[db] Could not rename corrupt database file:`, renameErr);
+      throw new Error(
+        `Database file is corrupted and cannot be recovered automatically. ` +
+          `Original error: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    _db = new Database(resolvedPath);
+  }
   _dbPath = resolvedPath;
   // Enable WAL mode for better concurrency and foreign keys
   _db.exec("PRAGMA journal_mode = WAL;");
   _db.exec("PRAGMA foreign_keys = ON;");
+  _db.exec("PRAGMA busy_timeout = 5000;");
   _db.exec("PRAGMA auto_vacuum = INCREMENTAL;");
   _db.exec("PRAGMA incremental_vacuum;");
 
   // Every 10 minutes, vacuum 200 unused pages to reclaim space
-  setInterval(
+  // S3 fix: store interval ID so resetDb() can clear it
+  _vacuumInterval = setInterval(
     () => {
       if (_db) {
         try {

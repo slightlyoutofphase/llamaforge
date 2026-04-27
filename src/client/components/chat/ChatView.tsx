@@ -5,7 +5,7 @@
  */
 
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { Check, ChevronDown, Cpu, FileText, Settings2 } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Cpu, FileText, Settings2, Terminal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   useBranchChat,
@@ -20,6 +20,46 @@ import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { InputBar } from "./InputBar";
 import { MessageBubble } from "./MessageBubble";
+
+/**
+ * S12 fix: Lightweight inline display for tool execution results.
+ * Renders as a collapsible card attached to the parent assistant message,
+ * so tool outputs are visible without appearing as standalone message bubbles.
+ */
+function ToolResultInline({ message }: { message: import("@shared/types.js").ChatMessage }) {
+  const [showResult, setShowResult] = useState(false);
+  const contentPreview =
+    message.content.length > 120 ? `${message.content.slice(0, 120)}...` : message.content;
+
+  return (
+    <div className="ml-1 mt-1 mb-4 border border-[var(--color-border)] rounded-xl bg-[var(--color-surface-elevated)]/50 overflow-hidden text-xs">
+      <button
+        type="button"
+        onClick={() => setShowResult(!showResult)}
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-[var(--color-bg)] transition-colors">
+        <div className="flex items-center gap-2 text-[var(--color-text-muted)]">
+          <Terminal size={12} className="text-[var(--color-accent)]" />
+          <span className="font-mono font-semibold">
+            Tool Result{message.toolCallId ? ` · ${message.toolCallId.slice(0, 8)}` : ""}
+          </span>
+          {!showResult && (
+            <span className="text-[var(--color-text-muted)] truncate max-w-[300px]">
+              — {contentPreview}
+            </span>
+          )}
+        </div>
+        {showResult ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+      </button>
+      {showResult && (
+        <div className="px-3 pb-3 pt-1 border-t border-[var(--color-border)]">
+          <pre className="font-mono text-[var(--color-text-secondary)] bg-[var(--color-bg)] p-3 rounded-lg whitespace-pre-wrap break-all max-h-64 overflow-y-auto border border-[var(--color-border)]">
+            {message.content}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * Main chat view container.
@@ -43,6 +83,8 @@ export function ChatView() {
     setError,
     errorMessage,
     isConnected,
+    totalMessages,
+    loadMoreMessages,
   } = useAppStore();
   const { setRightPanelView } = useUiStore();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -50,6 +92,31 @@ export function ChatView() {
   const [isAutoScroll, setIsAutoScroll] = useState(true);
   const [showInfSwitch, setShowInfSwitch] = useState(false);
   const [showSysSwitch, setShowSysSwitch] = useState(false);
+  // S10 fix: refs for outside-click dismiss
+  const infDropdownRef = useRef<HTMLDivElement>(null);
+  const sysDropdownRef = useRef<HTMLDivElement>(null);
+
+  // S10 fix: close dropdowns when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        showInfSwitch &&
+        infDropdownRef.current &&
+        !infDropdownRef.current.contains(e.target as Node)
+      ) {
+        setShowInfSwitch(false);
+      }
+      if (
+        showSysSwitch &&
+        sysDropdownRef.current &&
+        !sysDropdownRef.current.contains(e.target as Node)
+      ) {
+        setShowSysSwitch(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showInfSwitch, showSysSwitch]);
 
   const { data: infPresets } = useInferencePresets();
   const { data: sysPresets } = useSystemPresets();
@@ -423,7 +490,7 @@ export function ChatView() {
           <ChevronDown size={14} className="opacity-50" />
         </button>
 
-        <div className="relative">
+        <div className="relative" ref={infDropdownRef}>
           <button
             type="button"
             className="flex items-center space-x-1.5 px-3 py-1 text-xs font-semibold rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-surface-elevated)] transition-colors text-[var(--color-text-secondary)]"
@@ -462,7 +529,7 @@ export function ChatView() {
           )}
         </div>
 
-        <div className="relative">
+        <div className="relative" ref={sysDropdownRef}>
           <button
             type="button"
             className="flex items-center space-x-1.5 px-3 py-1 text-xs font-semibold rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-surface-elevated)] transition-colors text-[var(--color-text-secondary)]"
@@ -522,20 +589,59 @@ export function ChatView() {
           </div>
         ) : (
           <div className="max-w-4xl mx-auto flex flex-col justify-end min-h-full">
+            {/* M10 fix: show a "Load More" button when there are older messages not yet loaded */}
+            {totalMessages > messages.length && (
+              <div className="flex justify-center py-4">
+                <button
+                  type="button"
+                  onClick={loadMoreMessages}
+                  className="px-4 py-2 text-xs font-semibold rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-white hover:border-[var(--color-accent)] transition-colors">
+                  Load {Math.min(500, totalMessages - messages.length)} older messages
+                  <span className="ml-2 text-[var(--color-text-muted)]">
+                    ({messages.length} / {totalMessages})
+                  </span>
+                </button>
+              </div>
+            )}
+            {/* S12 fix: render tool messages as inline result cards instead of filtering them out */}
             {messages
               .filter((msg) => msg.role !== "tool")
-              .map((msg, i, arr) => (
-                <MessageBubble
-                  key={msg.id || i}
-                  message={msg}
-                  isStreaming={isGenerating && i === arr.length - 1 && msg.role === "assistant"}
-                  onEdit={handleEdit}
-                  onBranch={handleBranch}
-                  onRegenerate={handleRegenerate}
-                  onContinue={handleContinue}
-                  onDelete={handleDelete}
-                />
-              ))}
+              .map((msg, i, arr) => {
+                // Collect any tool result messages that immediately follow this assistant message
+                const toolResults =
+                  msg.role === "assistant" && msg.toolCallsJson
+                    ? messages.filter(
+                        (m) =>
+                          m.role === "tool" &&
+                          msg.toolCallsJson &&
+                          (() => {
+                            try {
+                              return JSON.parse(msg.toolCallsJson).some(
+                                (tc: { id: string }) => tc.id === m.toolCallId,
+                              );
+                            } catch {
+                              return false;
+                            }
+                          })(),
+                      )
+                    : [];
+                return (
+                  <div key={msg.id || i}>
+                    <MessageBubble
+                      message={msg}
+                      isStreaming={isGenerating && i === arr.length - 1 && msg.role === "assistant"}
+                      onEdit={handleEdit}
+                      onBranch={handleBranch}
+                      onRegenerate={handleRegenerate}
+                      onContinue={handleContinue}
+                      onDelete={handleDelete}
+                    />
+                    {toolResults.map((toolMsg) => (
+                      <ToolResultInline key={toolMsg.id} message={toolMsg} />
+                    ))}
+                  </div>
+                );
+              })}
             {isGenerating && messages[messages.length - 1]?.role === "user" && (
               <div className="flex px-5 py-4 animate-pulse">
                 <div className="flex gap-1 text-[var(--color-accent)] opacity-70">

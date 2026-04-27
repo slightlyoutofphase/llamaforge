@@ -11,6 +11,21 @@ import { getDb } from "./db";
 
 const APP_ROOT = path.join(os.homedir(), ".llamaforge");
 
+/**
+ * S6 fix: Computes the next message position for a chat using MAX(position) + 1.
+ * Prevents position gaps and collisions after deletions or branching.
+ */
+export function getNextPosition(chatId: string): number {
+  const db = getDb();
+  const row = db
+    .query<
+      { max_pos: number | null },
+      [string]
+    >("SELECT MAX(position) as max_pos FROM messages WHERE chat_id = ?")
+    .get(chatId);
+  return (row?.max_pos ?? -1) + 1;
+}
+
 function resolveAttachmentPath(relativePath: string): string | null {
   if (!relativePath || typeof relativePath !== "string") return null;
   if (path.isAbsolute(relativePath)) return null;
@@ -161,7 +176,11 @@ export async function getChats(
  * @param id - The unique UUID of the chat session.
  * @returns A promise that resolves to the {@link ChatSession} or null if not found.
  */
-export async function getChat(id: string): Promise<ChatSession | null> {
+export async function getChat(
+  id: string,
+  messageLimit?: number,
+  messageOffset?: number,
+): Promise<ChatSession | null> {
   const db = getDb();
   const stmt = db.query<ChatSession, [string]>(
     "SELECT id, name, created_at as createdAt, updated_at as updatedAt, parent_id as parentId, is_branch as isBranch, model_path as modelPath, system_preset_id as systemPresetId, inference_preset_id as inferencePresetId FROM chats WHERE id = ?",
@@ -175,12 +194,33 @@ export async function getChat(id: string): Promise<ChatSession | null> {
     isBranch: Boolean(chatRow.isBranch),
   } as ChatSession;
 
-  const msgStmt = db.query<ChatMessage, [string]>(
-    "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson FROM messages WHERE chat_id = ? ORDER BY position ASC",
-  );
-  chat.messages = msgStmt.all(id);
+  // M10 fix: support optional pagination to avoid loading 10,000+ messages in a single response.
+  // When messageLimit is provided, load only the last N messages (for the HTTP API).
+  // When omitted, load all messages (for internal callers like streamProxy).
+  if (messageLimit !== undefined && messageLimit > 0) {
+    const offset = messageOffset ?? 0;
+    // Count total first so the client knows if there are more
+    const countRow = db
+      .query<{ cnt: number }, [string]>("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?")
+      .get(id);
+    const totalMessages = countRow?.cnt ?? 0;
+    (chat as any).totalMessages = totalMessages;
+
+    // Load paginated slice (most recent messages first, then reverse for display order)
+    const msgStmt = db.query<ChatMessage, [string, number, number]>(
+      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson FROM messages WHERE chat_id = ? ORDER BY position DESC LIMIT ? OFFSET ?",
+    );
+    chat.messages = msgStmt.all(id, messageLimit, offset).reverse();
+  } else {
+    const msgStmt = db.query<ChatMessage, [string]>(
+      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson FROM messages WHERE chat_id = ? ORDER BY position ASC",
+    );
+    chat.messages = msgStmt.all(id);
+  }
 
   if (chat.messages.length > 0) {
+    const messageIds = chat.messages.map((m) => m.id);
+    const placeholders = messageIds.map(() => "?").join(",");
     const attStmt = db.query<
       {
         id: string;
@@ -191,11 +231,11 @@ export async function getChat(id: string): Promise<ChatSession | null> {
         virBudget: number | null;
         createdAt: number;
       },
-      [string]
+      string[]
     >(
-      "SELECT id, message_id as messageId, mime_type as mimeType, file_path as filePath, file_name as fileName, vir_budget as virBudget, created_at as createdAt FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?)",
+      `SELECT id, message_id as messageId, mime_type as mimeType, file_path as filePath, file_name as fileName, vir_budget as virBudget, created_at as createdAt FROM attachments WHERE message_id IN (${placeholders})`,
     );
-    const allAttachments = attStmt.all(id);
+    const allAttachments = attStmt.all(...messageIds);
     const attMap = new Map<string, any[]>();
     for (const att of allAttachments) {
       const arr = attMap.get(att.messageId) || [];
@@ -208,6 +248,21 @@ export async function getChat(id: string): Promise<ChatSession | null> {
   }
 
   return chat;
+}
+
+/**
+ * M10 fix: Returns the total message count for a chat without loading them all.
+ * Used by the frontend to display "load more" UI.
+ *
+ * @param chatId - The unique UUID of the chat session.
+ * @returns The total number of messages in the chat.
+ */
+export function getChatMessageCount(chatId: string): number {
+  const db = getDb();
+  const row = db
+    .query<{ cnt: number }, [string]>("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?")
+    .get(chatId);
+  return row?.cnt ?? 0;
 }
 
 /**
@@ -269,18 +324,39 @@ export async function deleteChat(id: string): Promise<void> {
 
   db.prepare("DELETE FROM chats WHERE id = ?").run(id);
 
+  // M11 fix: evict prompt cache stats for the deleted chat
+  try {
+    const { evictPromptCacheStats } = await import("../promptCache");
+    evictPromptCacheStats(id);
+  } catch {
+    // Non-critical — stats eviction failure shouldn't block chat deletion
+  }
+
   for (const row of attachRows) {
     try {
       const fullPath = resolveAttachmentPath(row.file_path);
       if (fullPath) await fs.unlink(fullPath);
-    } catch {}
+    } catch (e) {
+      // S13 fix: log file deletion failures for debugging
+      console.warn("[chatRepo] Failed to delete attachment file during chat cleanup", {
+        chatId: id,
+        filePath: row.file_path,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
   }
 
   // Also clean out the chat directory cleanly
   try {
     const chatDir = path.join(os.homedir(), ".llamaforge", "attachments", id);
     await fs.rm(chatDir, { recursive: true, force: true });
-  } catch {}
+  } catch (e) {
+    // S13 fix: log directory cleanup failures
+    console.warn("[chatRepo] Failed to remove chat attachments directory", {
+      chatId: id,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
 }
 
 /**
@@ -712,7 +788,18 @@ export async function importChat(jsonContent: string): Promise<string> {
     "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
 
-  const fileWrites: { filePath: string; base64Data: string }[] = [];
+  // M3 fix: track attachment metadata alongside file writes so we can skip
+  // DB records for attachments whose files fail to write to disk.
+  const fileWrites: {
+    filePath: string;
+    base64Data: string;
+    attId: string;
+    newMsgId: string;
+    mimeType: string;
+    relPath: string;
+    fileName: string;
+    virBudget: number | null;
+  }[] = [];
 
   const runTransaction = db.transaction(() => {
     insertChat.run(
@@ -752,19 +839,19 @@ export async function importChat(jsonContent: string): Promise<string> {
             const appData = path.join(APP_ROOT, "attachments", newChatId, newMsgId);
 
             const filePath = path.join(appData, safeName);
-            fileWrites.push({ filePath, base64Data: att.base64Data });
-
             const relPath = path.relative(APP_ROOT, filePath).split(path.sep).join("/");
 
-            insertAttachment.run(
+            // M3 fix: defer attachment record insertion until file write succeeds
+            fileWrites.push({
+              filePath,
+              base64Data: att.base64Data,
               attId,
               newMsgId,
-              att.mimeType,
+              mimeType: att.mimeType,
               relPath,
-              att.fileName,
-              att.virBudget || null,
-              now,
-            );
+              fileName: att.fileName,
+              virBudget: att.virBudget || null,
+            });
           }
         }
       }
@@ -773,12 +860,29 @@ export async function importChat(jsonContent: string): Promise<string> {
 
   runTransaction();
 
-  // Execute file writes outside transaction context
+  // M3 fix: Execute file writes outside transaction, then insert attachment records
+  // only for files that were successfully written. Log failures instead of swallowing.
   for (const fw of fileWrites) {
     try {
       await fs.mkdir(path.dirname(fw.filePath), { recursive: true });
       await fs.writeFile(fw.filePath, Buffer.from(fw.base64Data, "base64"));
-    } catch (_e) {}
+      // File written successfully — now insert the DB record
+      insertAttachment.run(
+        fw.attId,
+        fw.newMsgId,
+        fw.mimeType,
+        fw.relPath,
+        fw.fileName,
+        fw.virBudget,
+        now,
+      );
+    } catch (err) {
+      console.warn("[chatRepo] Failed to write imported attachment file, skipping DB record", {
+        filePath: fw.filePath,
+        fileName: fw.fileName,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   return newChatId;

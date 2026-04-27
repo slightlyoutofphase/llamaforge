@@ -166,6 +166,12 @@ export function renderPrompt(
       ...extraVars,
     });
   } catch (_e) {
+    // M9 fix: log a visible warning so the user knows the template rendering failed
+    // and that output quality may be degraded due to the basic fallback format
+    console.warn(
+      `[chatTemplateEngine] Jinja template rendering failed, using basic fallback. ` +
+        `Model output quality may be degraded. Error: ${_e instanceof Error ? _e.message : String(_e)}`,
+    );
     // Fallback manual looping if template fails to parse
     let fallback = "";
     for (const msg of messages) {

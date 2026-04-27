@@ -8,6 +8,44 @@ import type { LlamaServerStatus, WsFrame } from "@shared/types.js";
 import type { ServerWebSocket } from "bun";
 
 const connections = new Set<ServerWebSocket<unknown>>();
+const lastPongTimes = new WeakMap<ServerWebSocket<unknown>, number>();
+
+// M4 fix: periodic WebSocket heartbeat to detect stale/half-open connections
+const PING_INTERVAL_MS = 30_000;
+const STALE_THRESHOLD_MS = 65_000;
+let pingInterval: ReturnType<typeof setInterval> | null = null;
+
+function startHeartbeat(): void {
+  if (pingInterval) return;
+  pingInterval = setInterval(() => {
+    const now = Date.now();
+    for (const ws of Array.from(connections)) {
+      const lastPong = lastPongTimes.get(ws) ?? now;
+      if (now - lastPong > STALE_THRESHOLD_MS) {
+        console.warn("[wsHub] Closing stale WebSocket (no pong received)");
+        connections.delete(ws);
+        try {
+          ws.close(1001, "Heartbeat timeout");
+        } catch (_e) {
+          // Connection already dead
+        }
+        continue;
+      }
+      try {
+        ws.ping();
+      } catch (_e) {
+        connections.delete(ws);
+      }
+    }
+  }, PING_INTERVAL_MS);
+}
+
+function stopHeartbeatIfEmpty(): void {
+  if (connections.size === 0 && pingInterval) {
+    clearInterval(pingInterval);
+    pingInterval = null;
+  }
+}
 
 /**
  * Adds a new WebSocket connection to the broadcast registry.
@@ -16,6 +54,8 @@ const connections = new Set<ServerWebSocket<unknown>>();
  */
 export function addConnection(ws: ServerWebSocket<unknown>): void {
   connections.add(ws);
+  lastPongTimes.set(ws, Date.now());
+  startHeartbeat();
 }
 
 /**
@@ -25,6 +65,16 @@ export function addConnection(ws: ServerWebSocket<unknown>): void {
  */
 export function removeConnection(ws: ServerWebSocket<unknown>): void {
   connections.delete(ws);
+  stopHeartbeatIfEmpty();
+}
+
+/**
+ * Records a pong response from a WebSocket client, updating its last-seen time.
+ *
+ * @param ws - The {@link ServerWebSocket} that responded to a ping.
+ */
+export function recordPong(ws: ServerWebSocket<unknown>): void {
+  lastPongTimes.set(ws, Date.now());
 }
 
 /**

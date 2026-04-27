@@ -67,7 +67,7 @@ async function main() {
   // In dev, Vite is on 3000 and proxies to us on 11435.
   // In prod, WE are on 3000 and serve static files.
   const port = isProd ? 3000 : (settings.serverPort ?? 11435);
-  const hostname = "0.0.0.0";
+  const hostname = "127.0.0.1";
 
   console.log(`Starting LlamaForge Server on ${hostname}:${port} (Prod: ${isProd})`);
 

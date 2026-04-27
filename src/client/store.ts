@@ -74,6 +74,8 @@ interface AppState {
   currentGenerationId: string | null;
   /** Cache hit/miss statistics for the active chat. */
   promptCacheStats: { totalEvaluated: number; totalCached: number } | null;
+  /** Total number of messages in the active chat (may differ from messages.length when paginated). */
+  totalMessages: number;
   /** IDs of chats that have received updates while hidden. */
   unreadChatIds: string[];
   /** Whether the client should attempt reconnects after WebSocket closes. */
@@ -129,6 +131,8 @@ interface AppState {
   fetchPromptCacheStats: (chatId: string) => Promise<void>;
   /** Spawns the llama-server process with the given configuration. */
   loadModel: (config: ModelLoadConfig) => Promise<void>;
+  /** Loads older messages for the current chat (M10 pagination). */
+  loadMoreMessages: () => Promise<void>;
   /** Terminates the active llama-server process. */
   unloadModel: () => Promise<void>;
   /** Sends a tool call resolution (approval/rejection) back to the server. */
@@ -145,6 +149,8 @@ let currentReconnectDelay = 2000;
 const MAX_RECONNECT_DELAY = 30000;
 let reconnectTimer: number | null = null;
 const pendingChatFrames = new Map<string, WsFrame[]>();
+// M6 fix: guard against duplicate sends from rapid clicks
+let sendInProgress = false;
 
 function frameHasChatId(frame: WsFrame): frame is WsFrame & { chatId: string } {
   const chatIdValue = (frame as { chatId?: string }).chatId;
@@ -158,11 +164,18 @@ function bufferChatFrame(frame: WsFrame) {
   pendingChatFrames.set(frame.chatId, queued);
 }
 
-function applyPendingChatFrames(chatId: string, messages: ChatMessage[]) {
+function applyPendingChatFrames(
+  chatId: string,
+  messages: ChatMessage[],
+): { messages: ChatMessage[]; stillGenerating: boolean } {
   const pending = pendingChatFrames.get(chatId);
-  if (!pending?.length) return messages;
+  if (!pending?.length) return { messages, stillGenerating: false };
 
   const nextMessages = [...messages];
+  // Q2 fix: track whether the buffered frames include a stop frame.
+  // If no stop frame was received, the generation is still in-flight.
+  let sawTokens = false;
+  let sawStop = false;
 
   for (const frame of pending) {
     if (frame.type === "message") {
@@ -171,6 +184,7 @@ function applyPendingChatFrames(chatId: string, messages: ChatMessage[]) {
       }
     }
     if (frame.type === "token") {
+      sawTokens = true;
       const idx = nextMessages.findIndex((m) => m.id === frame.messageId);
       if (idx >= 0) {
         const message = { ...nextMessages[idx] } as ChatMessage;
@@ -183,6 +197,7 @@ function applyPendingChatFrames(chatId: string, messages: ChatMessage[]) {
       }
     }
     if (frame.type === "stop") {
+      sawStop = true;
       const idx = nextMessages.findIndex((m) => m.id === frame.messageId);
       if (idx >= 0) {
         const message = { ...nextMessages[idx] } as ChatMessage;
@@ -203,7 +218,7 @@ function applyPendingChatFrames(chatId: string, messages: ChatMessage[]) {
   }
 
   pendingChatFrames.delete(chatId);
-  return nextMessages;
+  return { messages: nextMessages, stillGenerating: sawTokens && !sawStop };
 }
 
 /**
@@ -224,6 +239,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentGenerationId: null,
   generationStats: null,
   promptCacheStats: null,
+  totalMessages: 0,
   unreadChatIds: [],
   shouldReconnect: true,
   errorMessage: null,
@@ -443,7 +459,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         } else if (frame.type === "message") {
           set((state) => {
             if (state.currentChatId === frame.chatId) {
-              return { messages: [...state.messages, frame.message] };
+              // S1 fix: Replace any optimistic temp-* message with the server-confirmed one
+              const reconciled = state.messages.filter(
+                (m) => !(m.id.startsWith("temp-") && m.role === frame.message.role),
+              );
+              if (!reconciled.some((m) => m.id === frame.message.id)) {
+                reconciled.push(frame.message);
+              }
+              return { messages: reconciled };
             }
             bufferChatFrame(frame);
             return {
@@ -456,19 +479,20 @@ export const useAppStore = create<AppState>((set, get) => ({
             };
           });
         } else if (frame.type === "autoname_result") {
+          // S2 fix: Update local chat metadata if this is the current chat
           set((state) => {
-            if (state.currentChatId === frame.chatId) {
-              // we don't have a chat object in state, but we can assume parent title was updated
-              // the side bar will re-fetch or we reload?
-              return state;
+            if (state.currentChatId === frame.chatId && state.currentChatMetadata) {
+              return {
+                currentChatMetadata: {
+                  ...state.currentChatMetadata,
+                  name: frame.name,
+                },
+              };
             }
             return state;
           });
-          // Invalidate queries to refresh sidebar
-          // Since we are in a store, we'd need access to QueryClient from outside or just trigger a re-fetch of chats
-          get()
-            .fetchModels()
-            .then(() => get().fetchServerStatus()); // unrelated but safe
+          // S2 fix: Dispatch a custom event so React Query providers can invalidate the chats query
+          window.dispatchEvent(new CustomEvent("llamaforge:chats-invalidate"));
         } else if (frame.type === "error") {
           console.error("WS Error frame:", frame.message);
           set({
@@ -494,11 +518,18 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ errorMessage: "Message content exceeds maximum length of 25,000 characters." });
       return;
     }
+    // M6 fix: prevent duplicate sends from rapid double-clicks
+    if (sendInProgress) {
+      return;
+    }
+    sendInProgress = true;
     if (files?.length && files.length > 5) {
+      sendInProgress = false;
       set({ errorMessage: "A maximum of 5 attachments is supported per message." });
       return;
     }
     if (files?.some((f) => f.size > 10 * 1024 * 1024)) {
+      sendInProgress = false;
       set({ errorMessage: "Attachments must be 10MB or smaller." });
       return;
     }
@@ -554,6 +585,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         isGenerating: false,
         errorMessage: err instanceof Error ? err.message : "Message send failed.",
       }));
+    } finally {
+      // M6 fix: always clear the send guard
+      sendInProgress = false;
     }
   },
 
@@ -599,10 +633,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       const res = await fetch(`/api/chats/${chatId}`);
       if (res.ok) {
         const chat = await res.json();
-        const messages = applyPendingChatFrames(chatId, chat.messages || []);
+        // Q2 fix: destructure both messages and stillGenerating flag so that
+        // switching back to a chat with an active generation restores the stop button.
+        const { messages, stillGenerating } = applyPendingChatFrames(chatId, chat.messages || []);
         set((state) => ({
           currentChatId: chatId,
           messages,
+          totalMessages: chat.totalMessages ?? messages.length,
+          isGenerating: stillGenerating,
           currentChatMetadata: {
             name: chat.name,
             systemPresetId: chat.systemPresetId,
@@ -649,7 +687,42 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   unloadChat: () =>
-    set({ currentChatId: null, currentChatMetadata: null, messages: [], generationStats: null }),
+    set({
+      currentChatId: null,
+      currentChatMetadata: null,
+      messages: [],
+      generationStats: null,
+      totalMessages: 0,
+    }),
+
+  loadMoreMessages: async () => {
+    const state = get();
+    if (!state.currentChatId) return;
+    // M10 fix: load the next page of older messages, prepending them to the array.
+    const currentCount = state.messages.length;
+    if (currentCount >= state.totalMessages) return;
+    const offset = currentCount;
+    try {
+      const res = await fetch(
+        `/api/chats/${state.currentChatId}?messageLimit=500&messageOffset=${offset}`,
+      );
+      if (!res.ok) return;
+      const chat = await res.json();
+      const olderMessages = (chat.messages || []) as ChatMessage[];
+      if (olderMessages.length === 0) return;
+      set((s) => {
+        // Prepend older messages, deduplicating by ID
+        const existingIds = new Set(s.messages.map((m) => m.id));
+        const unique = olderMessages.filter((m) => !existingIds.has(m.id));
+        return {
+          messages: [...unique, ...s.messages],
+          totalMessages: chat.totalMessages ?? s.totalMessages,
+        };
+      });
+    } catch (e) {
+      console.error("Failed to load more messages", e);
+    }
+  },
 
   fetchHardware: async () => {
     try {

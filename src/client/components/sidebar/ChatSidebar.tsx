@@ -15,8 +15,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 import type React from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useCreateChat, useDeleteChat, useInfiniteChats, useUpdateChat } from "../../queries";
 import { useAppStore } from "../../store";
 
@@ -46,6 +47,16 @@ export function ChatSidebar() {
   const createMut = useCreateChat();
   const deleteMut = useDeleteChat();
   const updateMut = useUpdateChat();
+  const qc = useQueryClient();
+
+  // S2 fix: listen for autoname events from the Zustand store and refresh sidebar
+  useEffect(() => {
+    const handler = () => {
+      qc.invalidateQueries({ queryKey: ["chats"] });
+    };
+    window.addEventListener("llamaforge:chats-invalidate", handler);
+    return () => window.removeEventListener("llamaforge:chats-invalidate", handler);
+  }, [qc]);
 
   const handleCreateChat = async () => {
     if (createMut.isPending) return;
