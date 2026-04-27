@@ -42,6 +42,7 @@ export function ChatView() {
     loadedModel,
     setError,
     errorMessage,
+    isConnected,
   } = useAppStore();
   const { setRightPanelView } = useUiStore();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -388,7 +389,7 @@ export function ChatView() {
     );
   }
 
-  const active = serverStatus === "running";
+  const active = serverStatus === "running" && isConnected;
 
   return (
     <div className="flex-1 flex flex-col bg-[var(--color-bg)] overflow-hidden">

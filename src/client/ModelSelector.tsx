@@ -42,6 +42,7 @@ export function ModelSelector() {
     messages: any[];
     configToLoad: ModelLoadConfig;
   } | null>(null);
+  const [isCreatingChat, setIsCreatingChat] = useState(false);
 
   const handleLoadGuard = (model: ModelEntry) => {
     if (serverStatus !== "idle" || isGenerating) return;
@@ -111,22 +112,27 @@ export function ModelSelector() {
   };
 
   const handleStartNewChat = async () => {
+    if (isCreatingChat) return;
+    setIsCreatingChat(true);
     try {
       const chat = await createChatMut.mutateAsync({ name: "New Chat (Model Switch)" });
-      navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
+      if (chat?.id) {
+        navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
+      }
       if (guardModal) {
         loadModel(guardModal.configToLoad);
       }
     } catch (error) {
       console.error("New chat creation failed:", error);
     } finally {
+      setIsCreatingChat(false);
       setGuardModal(null);
     }
   };
 
   return (
     <div className="flex-1 min-w-0 overflow-y-auto p-6 bg-[var(--color-bg)] relative">
-      <div className="max-w-5xl mx-auto space-y-6">
+      <div className="w-full max-w-full mx-auto space-y-6">
         {/* Loading Overlay */}
         {serverStatus === "loading" && (
           <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in">
@@ -162,7 +168,7 @@ export function ModelSelector() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {models.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-24 text-[var(--color-text-muted)] bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl border-dashed">
               <Database size={48} className="opacity-30 mb-4" />
@@ -176,12 +182,12 @@ export function ModelSelector() {
                 <div
                   key={model.primaryPath}
                   className={clsx(
-                    "flex flex-col sm:flex-row justify-between gap-4 p-5 rounded-2xl border transition-all overflow-hidden",
+                    "flex flex-col gap-4 p-5 rounded-2xl border transition-all overflow-hidden w-full min-w-0",
                     isLoaded
                       ? "bg-[var(--color-surface-elevated)] border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/50"
                       : "bg-[var(--color-surface)] border-[var(--color-border)] hover:border-gray-500",
                   )}>
-                  <div className="flex items-start gap-4 flex-1 min-w-0">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 min-w-0 w-full">
                     <div
                       className={clsx(
                         "p-3 rounded-xl flex-shrink-0",
@@ -192,8 +198,8 @@ export function ModelSelector() {
                       <Cpu size={24} />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 min-w-0">
-                        <h3 className="font-bold text-lg text-[var(--color-text-primary)] break-words min-w-0">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 min-w-0 w-full">
+                        <h3 className="font-bold text-lg text-[var(--color-text-primary)] truncate min-w-0 max-w-full">
                           {model.modelName}
                         </h3>
                         {isLoaded && (
@@ -203,27 +209,23 @@ export function ModelSelector() {
                         )}
                       </div>
 
-                      <div className="mt-2 space-y-1 text-xs text-[var(--color-text-secondary)] font-mono min-w-0 break-words">
-                        <div className="break-words">{model.publisher || "Unknown Publisher"}</div>
-                        <div className="flex flex-wrap items-center gap-2 min-w-0 text-[var(--color-text-secondary)] break-words">
-                          <span className="min-w-0 break-words">
-                            {model.metadata?.architecture || "Unknown Architecture"}
-                          </span>
-                          <span className="w-1 h-1 rounded-full bg-[var(--color-border)] flex-shrink-0"></span>
-                          <span className="min-w-0 break-words">
-                            {model.metadata?.fileSizeBytes
-                              ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-                              : "Unknown Size"}
-                          </span>
-                          {(model.metadata?.hasVisionEncoder || model.mmProjPath) && (
-                            <>
-                              <span className="w-1 h-1 rounded-full bg-[var(--color-border)] flex-shrink-0"></span>
-                              <span className="text-blue-400 min-w-0 break-words">
-                                VISION ENABLED
-                              </span>
-                            </>
-                          )}
-                        </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-secondary)] font-mono min-w-0">
+                        <span className="truncate max-w-full">
+                          {model.publisher || "Unknown Publisher"}
+                        </span>
+                        <span className="text-[var(--color-border)]">•</span>
+                        <span className="truncate max-w-full">
+                          {model.metadata?.architecture || "Unknown Architecture"}
+                        </span>
+                        <span className="text-[var(--color-border)]">•</span>
+                        <span className="truncate max-w-full">
+                          {model.metadata?.fileSizeBytes
+                            ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+                            : "Unknown Size"}
+                        </span>
+                        {(model.metadata?.hasVisionEncoder || model.mmProjPath) && (
+                          <span className="text-blue-400 truncate max-w-full">VISION ENABLED</span>
+                        )}
                       </div>
 
                       <div
@@ -234,8 +236,8 @@ export function ModelSelector() {
                     </div>
                   </div>
 
-                  <div className="mt-4 sm:mt-0 flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shrink-0 w-full sm:w-auto">
-                    <div className="relative w-full sm:w-[18rem] min-w-0">
+                  <div className="flex flex-col sm:flex-row sm:justify-between gap-3 items-stretch sm:items-center w-full min-w-0">
+                    <div className="relative w-full sm:max-w-[22rem] min-w-0">
                       <select
                         disabled={serverStatus !== "idle" || isLoaded}
                         value={
@@ -294,6 +296,7 @@ export function ModelSelector() {
         <MultimodalGuardModal
           onClose={() => setGuardModal(null)}
           onNewChat={handleStartNewChat}
+          isNewChatDisabled={isCreatingChat}
           reason={guardModal.reason}
           incompatibleMessages={guardModal.messages}
         />

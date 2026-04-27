@@ -48,8 +48,14 @@ export function ChatSidebar() {
   const updateMut = useUpdateChat();
 
   const handleCreateChat = async () => {
-    const newChat = await createMut.mutateAsync({ name: "New Chat" });
-    navigate({ to: "/chat/$chatId", params: { chatId: newChat.id } });
+    if (createMut.isPending) return;
+    try {
+      const newChat = await createMut.mutateAsync({ name: "New Chat" });
+      if (!newChat?.id) throw new Error("Failed to create new chat.");
+      navigate({ to: "/chat/$chatId", params: { chatId: newChat.id } });
+    } catch (err: unknown) {
+      console.error("Create chat failed", err);
+    }
   };
 
   const handleStartRename = (id: string, name: string, e: React.MouseEvent) => {
@@ -134,7 +140,12 @@ export function ChatSidebar() {
           <button
             type="button"
             onClick={handleCreateChat}
-            className="flex-1 min-w-[140px] flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white hover:opacity-90 rounded-xl py-2.5 text-sm font-semibold shadow-sm transition-all active:scale-95">
+            disabled={createMut.isPending}
+            className={`flex-1 min-w-[140px] flex items-center justify-center gap-2 rounded-xl py-2.5 text-sm font-semibold shadow-sm transition-all active:scale-95 ${
+              createMut.isPending
+                ? "bg-[var(--color-border)] text-[var(--color-text-muted)] cursor-not-allowed"
+                : "bg-[var(--color-accent)] text-white hover:opacity-90"
+            }`}>
             <Plus size={18} />
             <span>New Chat</span>
           </button>
@@ -199,90 +210,101 @@ export function ChatSidebar() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
-        {sortedChats.map((c) => (
-          <Link
-            key={c.id}
-            to="/chat/$chatId"
-            params={{ chatId: c.id }}
-            onClick={() => clearUnreadChat(c.id)}
-            activeProps={{
-              "data-status": "active",
-            }}
-            className="group flex flex-col px-3 py-2.5 rounded-xl transition-all hover:bg-[var(--color-surface-elevated)] data-[status=active]:bg-[var(--color-accent)]/10 data-[status=active]:text-[var(--color-accent)]">
-            <div className="flex items-center justify-between gap-2 overflow-hidden">
-              <div className="flex flex-col min-w-0 flex-1">
-                {editingId === c.id ? (
-                  <div className="flex items-center gap-1">
-                    <input
-                      type="text"
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      className="bg-[var(--color-bg)] border border-[var(--color-accent)] rounded px-1 py-0.5 text-sm w-full outline-none"
-                      onClick={(e) => e.stopPropagation()}
-                      onKeyDown={(e) => e.key === "Enter" && handleSaveRename(c.id, e as any)}
-                    />
+        {sortedChats.map((c) => {
+          const row = (
+            <div
+              key={c.id}
+              className="group flex flex-col px-3 py-2.5 rounded-xl transition-all hover:bg-[var(--color-surface-elevated)] data-[status=active]:bg-[var(--color-accent)]/10 data-[status=active]:text-[var(--color-accent)]">
+              <div className="flex items-center justify-between gap-2 overflow-hidden">
+                <div className="flex flex-col min-w-0 flex-1">
+                  {editingId === c.id ? (
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="text"
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        className="bg-[var(--color-bg)] border border-[var(--color-accent)] rounded px-1 py-0.5 text-sm w-full outline-none"
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => e.key === "Enter" && handleSaveRename(c.id, e as any)}
+                      />
+                      <button
+                        type="button"
+                        onClick={(e) => handleSaveRename(c.id, e)}
+                        className="p-1 hover:text-[var(--color-success)]">
+                        <Check size={12} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setEditingId(null);
+                        }}
+                        className="p-1 hover:text-[var(--color-error)]">
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <span className="truncate font-medium text-sm leading-tight group-data-[status=active]:font-bold">
+                        {c.isBranch && "🌿 "}
+                        {c.name}
+                      </span>
+                      <span className="text-[10px] text-[var(--color-text-muted)] mt-0.5 flex items-center gap-2">
+                        {new Date(c.createdAt).toLocaleString()}
+                        {unreadChatIds.includes(c.id) && (
+                          <span className="inline-flex items-center rounded-full bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg)]">
+                            New
+                          </span>
+                        )}
+                      </span>
+                    </>
+                  )}
+                </div>
+                {!editingId && (
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       type="button"
-                      onClick={(e) => handleSaveRename(c.id, e)}
-                      className="p-1 hover:text-[var(--color-success)]">
-                      <Check size={12} />
+                      onClick={(e) => handleStartRename(c.id, c.name, e)}
+                      className="p-1.5 hover:bg-[var(--color-surface)] rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+                      title="Rename">
+                      <Edit2 size={14} />
                     </button>
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setEditingId(null);
-                      }}
-                      className="p-1 hover:text-[var(--color-error)]">
-                      <X size={12} />
+                      onClick={(e) => handleExport(c.id, e)}
+                      className="p-1.5 hover:bg-[var(--color-surface)] rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
+                      title="Export">
+                      <Download size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(e) => handleDelete(c.id, e)}
+                      className="p-1.5 hover:bg-red-500/10 rounded-lg text-[var(--color-text-muted)] hover:text-red-400"
+                      title="Delete">
+                      <Trash2 size={14} />
                     </button>
                   </div>
-                ) : (
-                  <>
-                    <span className="truncate font-medium text-sm leading-tight group-data-[status=active]:font-bold">
-                      {c.isBranch && "🌿 "}
-                      {c.name}
-                    </span>
-                    <span className="text-[10px] text-[var(--color-text-muted)] mt-0.5 flex items-center gap-2">
-                      {new Date(c.createdAt).toLocaleString()}
-                      {unreadChatIds.includes(c.id) && (
-                        <span className="inline-flex items-center rounded-full bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg)]">
-                          New
-                        </span>
-                      )}
-                    </span>
-                  </>
                 )}
               </div>
-              {!editingId && (
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    type="button"
-                    onClick={(e) => handleStartRename(c.id, c.name, e)}
-                    className="p-1.5 hover:bg-[var(--color-surface)] rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
-                    title="Rename">
-                    <Edit2 size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => handleExport(c.id, e)}
-                    className="p-1.5 hover:bg-[var(--color-surface)] rounded-lg text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"
-                    title="Export">
-                    <Download size={14} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => handleDelete(c.id, e)}
-                    className="p-1.5 hover:bg-red-500/10 rounded-lg text-[var(--color-text-muted)] hover:text-red-400"
-                    title="Delete">
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-              )}
             </div>
-          </Link>
-        ))}
+          );
+
+          return editingId === c.id ? (
+            <div key={c.id}>{row}</div>
+          ) : (
+            <Link
+              key={c.id}
+              to="/chat/$chatId"
+              params={{ chatId: c.id }}
+              onClick={() => clearUnreadChat(c.id)}
+              activeProps={{
+                "data-status": "active",
+              }}>
+              {row}
+            </Link>
+          );
+        })}
         {sortedChats.length === 0 && !isLoading && (
           <div className="flex flex-col items-center justify-center p-8 text-center text-[var(--color-text-muted)] opacity-50">
             <MessageSquare size={32} className="mb-2" />

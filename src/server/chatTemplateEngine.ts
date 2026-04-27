@@ -20,8 +20,8 @@ export const GEMMA4_THINKING_CONFIG: ThinkingTagConfig = {
  * Default thinking tag boundaries fallback primarily tuned for DeepSeek architecture models.
  */
 export const DEFAULT_THINKING_CONFIG: ThinkingTagConfig = {
-  openTag: "<think>\n",
-  closeTag: "</think>\n",
+  openTag: "<think>",
+  closeTag: "</think>",
   enableToken: undefined,
 };
 

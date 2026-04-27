@@ -67,7 +67,8 @@ export const MessageBubble = React.memo(
     );
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const renderedContent = message.content || message.rawContent || "";
+    const renderedContent =
+      message.content || (message.thinkingContent ? "" : message.rawContent) || "";
 
     useEffect(() => {
       if (isEditing && textareaRef.current) {
@@ -98,10 +99,6 @@ export const MessageBubble = React.memo(
           className={`text-xs uppercase tracking-widest font-bold text-[var(--color-text-muted)] mb-1 ${message.role === "user" ? "mr-1" : "ml-1"}`}>
           {message.role}
         </div>
-
-        {message.role === "assistant" && message.thinkingContent && (
-          <ThinkingBlock content={message.thinkingContent} isLive={!!isStreaming} />
-        )}
 
         {message.attachments && message.attachments.length > 0 && (
           <div
@@ -175,18 +172,23 @@ export const MessageBubble = React.memo(
             </div>
           </div>
         ) : (
-          <div
-            className={`max-w-[85%] rounded-3xl p-5 shadow-sm text-base ${
-              message.role === "user"
-                ? "bg-[var(--color-surface-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] rounded-tr-sm"
-                : "bg-transparent text-[var(--color-text-primary)] rounded-tl-sm"
-            }`}>
-            <div className="prose prose-invert max-w-none prose-p:leading-relaxed prose-pre:bg-[#11111b] prose-pre:border prose-pre:border-[var(--color-border)] prose-pre:rounded-xl">
-              <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
-                {renderedContent + (isStreaming ? " \u2588" : "")}
-              </ReactMarkdown>
+          <>
+            <div
+              className={`max-w-[85%] rounded-3xl p-5 shadow-sm text-base ${
+                message.role === "user"
+                  ? "bg-[var(--color-surface-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] rounded-tr-sm"
+                  : "bg-transparent text-[var(--color-text-primary)] rounded-tl-sm"
+              }`}>
+              <div className="prose prose-invert max-w-none prose-p:leading-relaxed prose-pre:bg-[#11111b] prose-pre:border prose-pre:border-[var(--color-border)] prose-pre:rounded-xl">
+                <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+                  {renderedContent + (isStreaming ? " \u2588" : "")}
+                </ReactMarkdown>
+              </div>
             </div>
-          </div>
+            {message.role === "assistant" && message.thinkingContent && (
+              <ThinkingBlock content={message.thinkingContent} isLive={!!isStreaming} />
+            )}
+          </>
         )}
 
         {toolCalls &&

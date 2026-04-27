@@ -40,6 +40,7 @@ export function ModelLibraryPanel() {
     reason: "vision" | "audio" | "both";
     messages: any[];
   } | null>(null);
+  const [isCreatingChat, setIsCreatingChat] = useState(false);
 
   const filteredModels = models.filter(
     (m) =>
@@ -87,19 +88,24 @@ export function ModelLibraryPanel() {
   };
 
   const handleStartNewChat = async () => {
+    if (isCreatingChat) return;
+    setIsCreatingChat(true);
     try {
       const chat = await createChatMut.mutateAsync({ name: "New Chat (Model Switch)" });
-      navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
+      if (chat?.id) {
+        navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
+      }
     } catch (error) {
       console.error("New chat creation failed:", error);
     } finally {
+      setIsCreatingChat(false);
       setGuardModal(null);
       setRightPanelView(null);
     }
   };
 
   return (
-    <div className="flex flex-col h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] w-[450px] shadow-xl overflow-hidden shrink-0">
+    <div className="flex flex-col h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] w-[560px] max-w-full shadow-xl overflow-hidden shrink-0">
       <div className="flex items-center justify-between p-4 border-b border-[var(--color-border)] bg-[var(--color-surface-elevated)]">
         <div>
           <h2 className="font-semibold text-lg flex items-center gap-2">Model Registry</h2>
@@ -156,7 +162,7 @@ export function ModelLibraryPanel() {
                 <button
                   type="button"
                   className={clsx(
-                    "w-full text-left group relative border rounded-2xl p-4 transition-all hover:shadow-md cursor-pointer",
+                    "w-full min-w-0 text-left group relative border rounded-2xl p-4 transition-all hover:shadow-md cursor-pointer",
                     isLoaded
                       ? "border-[var(--color-accent)] bg-[var(--color-accent)]/5 shadow-inner"
                       : "border-[var(--color-border)] bg-[var(--color-bg)] hover:border-[var(--color-text-muted)]",
@@ -175,15 +181,15 @@ export function ModelLibraryPanel() {
                         <Cpu size={20} />
                       </div>
                       <div>
-                        <h3 className="font-semibold text-[var(--color-text-primary)] leading-tight break-words">
+                        <h3 className="font-semibold text-[var(--color-text-primary)] leading-tight break-words max-w-full">
                           {model.modelName}
                         </h3>
                         <div className="flex items-center gap-2 mt-1 flex-wrap min-w-0">
-                          <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)] font-mono min-w-0 break-words">
-                            <span className="bg-[var(--color-surface-elevated)] px-1.5 py-0.5 rounded border border-[var(--color-border)] max-w-full break-words">
+                          <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)] font-mono min-w-0 truncate">
+                            <span className="bg-[var(--color-surface-elevated)] px-1.5 py-0.5 rounded border border-[var(--color-border)] max-w-full truncate">
                               {model.metadata?.architecture || "Unknown Arch"}
                             </span>
-                            <span className="max-w-full break-words">
+                            <span className="max-w-full truncate">
                               {model.metadata?.fileSizeBytes
                                 ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
                                 : "Unknown Size"}
@@ -278,6 +284,7 @@ export function ModelLibraryPanel() {
         <MultimodalGuardModal
           onClose={() => setGuardModal(null)}
           onNewChat={handleStartNewChat}
+          isNewChatDisabled={isCreatingChat}
           reason={guardModal.reason}
           incompatibleMessages={guardModal.messages}
         />

@@ -27,6 +27,16 @@ const queryClient = new QueryClient();
 describe("ChatSidebar Component", () => {
   beforeEach(() => {
     mock.restore();
+    mock.module("@tanstack/react-router", () => ({
+      useParams: () => ({ chatId: "chat-1" }),
+      useNavigate: () => mock(),
+      Link: ({ children, to, onClick }: any) => (
+        <a href={to} onClick={onClick}>
+          {children}
+        </a>
+      ),
+      useRouter: () => ({ buildLocation: () => ({}) }),
+    }));
     useAppStore.setState({ unreadChatIds: [] });
   });
 
@@ -130,6 +140,78 @@ describe("ChatSidebar Component", () => {
     if (secondChatLink) fireEvent.click(secondChatLink);
 
     expect(useAppStore.getState().unreadChatIds).not.toContain("chat-2");
+  });
+
+  it("disables the New Chat button while a creation request is pending", () => {
+    const mutateSpy = mock();
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [[{ id: "chat-1", name: "First Chat", createdAt: 1000 }]],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mutateSpy, isPending: true }),
+      useUpdateChat: () => ({ mutate: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    const newChatButton = screen.getByRole("button", { name: /new chat/i });
+    expect(newChatButton).toBeTruthy();
+    expect((newChatButton as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(newChatButton);
+    expect(mutateSpy).not.toHaveBeenCalled();
+  });
+
+  it("does not trigger navigation when renaming a chat row", () => {
+    const linkClickSpy = mock();
+    mock.module("@tanstack/react-router", () => ({
+      useParams: () => ({ chatId: "chat-1" }),
+      useNavigate: () => mock(),
+      Link: ({ children, to, onClick }: any) => (
+        <a href={to} onClick={onClick ?? linkClickSpy}>
+          {children}
+        </a>
+      ),
+      useRouter: () => ({ buildLocation: () => ({}) }),
+    }));
+
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [[{ id: "chat-1", name: "First Chat", createdAt: 1000 }]],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), isPending: false }),
+      useUpdateChat: () => ({ mutate: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    const renameButton = screen.getByTitle("Rename");
+    fireEvent.click(renameButton);
+    expect(linkClickSpy).not.toHaveBeenCalled();
+    const renameInputs = screen.getAllByRole("textbox");
+    const renameInput = renameInputs[renameInputs.length - 1];
+    expect(renameInput).toBeTruthy();
+    fireEvent.click(renameInput);
+    expect(linkClickSpy).not.toHaveBeenCalled();
   });
 
   it("shows empty sidebar state when there are no chats", () => {

@@ -105,7 +105,7 @@ describe("MessageBubble Component", () => {
     expect(screen.getByText("I am thinking")).toBeTruthy();
   });
 
-  it("falls back to rawContent when assistant content is empty", () => {
+  it("falls back to rawContent when assistant content is empty and there is no thinking trace", () => {
     const msg: ChatMessage = {
       id: "a3",
       chatId: "c1",
@@ -128,5 +128,35 @@ describe("MessageBubble Component", () => {
     );
 
     expect(screen.getByText("Hello from raw content fallback")).toBeTruthy();
+  });
+
+  it("does not render raw thinking JSON in the main assistant bubble", () => {
+    const msg: ChatMessage = {
+      id: "a4",
+      chatId: "c1",
+      role: "assistant",
+      content: "",
+      rawContent: '<think>{"story": "raw json"}</think>',
+      thinkingContent: '{"story": "raw json"}',
+      position: 5,
+      createdAt: 5,
+    };
+
+    render(
+      <MessageBubble
+        message={msg}
+        onEdit={() => {}}
+        onBranch={() => {}}
+        onRegenerate={() => {}}
+        onContinue={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+
+    expect(screen.queryByText('{"story": "raw json"}')).toBeNull();
+
+    const button = screen.getByRole("button", { name: /Expand thinking trace/i });
+    fireEvent.click(button);
+    expect(screen.getByText('{"story": "raw json"}')).toBeTruthy();
   });
 });

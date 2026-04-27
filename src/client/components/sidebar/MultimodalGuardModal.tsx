@@ -13,6 +13,8 @@ interface MultimodalGuardModalProps {
   onClose: () => void;
   /** Callback to start a new chat instead. */
   onNewChat: () => void;
+  /** Whether starting a new chat is currently disabled. */
+  isNewChatDisabled?: boolean;
   /** The reason the switch is blocked ("vision", "audio", or "both"). */
   reason: "vision" | "audio" | "both";
   /** A list of messages in the current chat that cause the incompatibility. */
@@ -29,6 +31,7 @@ interface MultimodalGuardModalProps {
 export function MultimodalGuardModal({
   onClose,
   onNewChat,
+  isNewChatDisabled,
   reason,
   incompatibleMessages,
 }: MultimodalGuardModalProps) {
@@ -92,7 +95,12 @@ export function MultimodalGuardModal({
           <button
             type="button"
             onClick={onNewChat}
-            className="flex-1 px-4 py-3 bg-[var(--color-accent)] text-white rounded-xl hover:shadow-xl transition-all font-bold text-sm shadow-indigo-500/20">
+            disabled={isNewChatDisabled}
+            className={`flex-1 px-4 py-3 rounded-xl transition-all font-bold text-sm shadow-indigo-500/20 ${
+              isNewChatDisabled
+                ? "bg-[var(--color-border)] text-[var(--color-text-muted)] cursor-not-allowed"
+                : "bg-[var(--color-accent)] text-white hover:shadow-xl"
+            }`}>
             Start New Chat
           </button>
         </div>

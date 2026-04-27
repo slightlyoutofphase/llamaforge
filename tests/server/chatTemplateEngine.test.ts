@@ -17,6 +17,12 @@ describe("chatTemplateEngine", () => {
       expect(config.openTag).toBe("<|channel>thought\n");
       expect(config.closeTag).toBe("<channel|>");
     });
+
+    it("defaults to plain <think> tags for standard models", () => {
+      const config = detectThinkingConfig();
+      expect(config.openTag).toBe("<think>");
+      expect(config.closeTag).toBe("</think>");
+    });
   });
 
   describe("parseThinkTags", () => {
