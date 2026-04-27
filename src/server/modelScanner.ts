@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ModelEntry } from "@shared/types.js";
 import { parseGgufMetadata } from "./ggufReader";
+import { logError, logInfo, logWarn } from "./logger";
 import { cachedGgufMetadata, setCachedGgufMetadata } from "./persistence/chatRepo";
 
 const EXCLUDED_DIRS = new Set(["node_modules", "dist", "build", ".git", ".next", "venv", "target"]);
@@ -58,9 +59,9 @@ async function walkDir(
     }
   } catch (err: any) {
     if (err?.code === "ENOENT" || err?.code === "ENOTDIR" || err?.code === "EACCES") {
-      console.warn(`Skipping inaccessible path ${dir}: ${err.message}`);
+      logWarn(`Skipping inaccessible path ${dir}: ${err.message}`);
     } else {
-      console.error(`Error walking directory ${dir}:`, err);
+      logError(`Error walking directory ${dir}:`, err);
     }
   }
   return files;
@@ -89,15 +90,13 @@ export async function scanModels(
       (Number(process.env.MODEL_SCAN_MAX_ENTRIES) || DEFAULT_SCAN_MAX_ENTRIES),
   };
 
-  console.log(`Scanning models at: ${rootPath}`);
-  console.log(
-    `Scan options: depth=${resolvedOptions.maxDepth} entries=${resolvedOptions.maxEntries}`,
-  );
+  logInfo(`Scanning models at: ${rootPath}`);
+  logInfo(`Scan options: depth=${resolvedOptions.maxDepth} entries=${resolvedOptions.maxEntries}`);
 
   try {
     const stats = await fs.stat(rootPath);
     if (!stats.isDirectory()) {
-      console.warn(`Models path ${rootPath} is not a directory. Skipping scan.`);
+      logWarn(`Models path ${rootPath} is not a directory. Skipping scan.`);
       return [];
     }
 
@@ -152,9 +151,9 @@ export async function scanModels(
     }
   } catch (err: any) {
     if (err?.code === "ENOENT" || err?.code === "ENOTDIR") {
-      console.warn(`Models path ${rootPath} does not exist or is not accessible. Skipping scan.`);
+      logWarn(`Models path ${rootPath} does not exist or is not accessible. Skipping scan.`);
     } else {
-      console.error(`Critical error scanning models at ${rootPath}:`, err);
+      logError(`Critical error scanning models at ${rootPath}:`, err);
     }
   }
 
@@ -179,7 +178,7 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
         metadata.fileSizeBytes = stat.size;
         await setCachedGgufMetadata(entry.primaryPath, mtime, metadata);
       } catch (err: any) {
-        console.warn(
+        logWarn(
           `Failed to parse GGUF metadata for ${entry.primaryPath}: ${err?.message || String(err)}`,
         );
       }
@@ -187,9 +186,7 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
 
     return metadata ? { ...entry, metadata } : entry;
   } catch (err: any) {
-    console.warn(
-      `Unable to populate metadata for ${entry.primaryPath}: ${err?.message || String(err)}`,
-    );
+    logWarn(`Unable to populate metadata for ${entry.primaryPath}: ${err?.message || String(err)}`);
     return entry;
   }
 }

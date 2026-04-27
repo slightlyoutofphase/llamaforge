@@ -9,6 +9,7 @@ import type { AppSettings } from "@shared/types.js";
 import type { ServerWebSocket } from "bun";
 import { getHardwareInfo } from "./hardwareProbe";
 import { getServerStatus, loadModel, unloadModel } from "./llamaServer";
+import { logError } from "./logger";
 import { populateMetadata, scanModels } from "./modelScanner";
 import { loadSettings } from "./persistence/settingsRepo";
 import { addConnection, recordPong, removeConnection } from "./wsHub";
@@ -50,9 +51,7 @@ const MAX_MESSAGE_CONTENT_LENGTH = 25000;
 const MAX_MESSAGE_ATTACHMENTS = 5;
 const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 
-// S5 fix: debounce background metadata population (once per 60 seconds max)
-const _METADATA_DEBOUNCE_MS = 60_000;
-let _lastMetadataPopulationTime = 0;
+// S5 fix: removed debounce and background logic because it broke UI immediate availability
 
 function normalizeAttachmentPath(attachPath: string): string | null {
   if (!attachPath || typeof attachPath !== "string") return null;
@@ -118,19 +117,14 @@ export function createRouter(_settings: AppSettings) {
           }),
         );
 
-        // S5 fix: debounce background metadata population to avoid I/O spikes on every call
-        const now = Date.now();
-        if (now - _lastMetadataPopulationTime > _METADATA_DEBOUNCE_MS) {
-          _lastMetadataPopulationTime = now;
-          void (async () => {
-            try {
-              const enriched = await Promise.all(rawModels.map((m) => populateMetadata(m)));
-              const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
-              await ensureModelDefaultPresets(enriched);
-            } catch (e) {
-              console.error("Background model metadata population failed:", e);
-            }
-          })();
+        // Ensure presets are generated synchronously so they are immediately available
+        try {
+          const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
+          await ensureModelDefaultPresets(models);
+          const { broadcast } = await import("./wsHub");
+          broadcast({ type: "presets_updated" });
+        } catch (e) {
+          logError("Synchronous model metadata population failed:", e);
         }
 
         return new Response(JSON.stringify(models), {
@@ -150,15 +144,14 @@ export function createRouter(_settings: AppSettings) {
           }),
         );
 
-        void (async () => {
-          try {
-            const enriched = await Promise.all(rawModels.map((m) => populateMetadata(m)));
-            const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
-            await ensureModelDefaultPresets(enriched);
-          } catch (e) {
-            console.error("Background model metadata population failed:", e);
-          }
-        })();
+        try {
+          const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
+          await ensureModelDefaultPresets(models);
+          const { broadcast } = await import("./wsHub");
+          broadcast({ type: "presets_updated" });
+        } catch (e) {
+          logError("Synchronous model metadata population failed:", e);
+        }
 
         return new Response(JSON.stringify(models), {
           status: 200,

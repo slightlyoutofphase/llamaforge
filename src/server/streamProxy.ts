@@ -6,13 +6,9 @@
 
 import type { ChatMessage } from "@shared/types.js";
 import { triggerAutoname } from "./autoname";
-import {
-  detectThinkingConfig,
-  parseThinkTags,
-  prepareHistoryForRender,
-  renderPrompt,
-} from "./chatTemplateEngine";
+import { detectThinkingConfig, parseThinkTags } from "./chatTemplateEngine";
 import { getServerStatus } from "./llamaServer";
+import { logError, logWarn } from "./logger";
 import { processUpload } from "./multimodal";
 import { addMessage, getChat, getNextPosition, updateChat } from "./persistence/chatRepo";
 import { getInferencePresets, getSystemPresets } from "./persistence/presetRepo";
@@ -30,7 +26,7 @@ type GenerationSession = {
 const activeGenerations = new Map<string, GenerationSession>();
 
 function logStreamProxyError(context: string, err: unknown, details?: Record<string, unknown>) {
-  console.error(
+  logError(
     "[streamProxy] Error in",
     context,
     details ? JSON.stringify(details) : undefined,
@@ -174,7 +170,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       const db = await import("./persistence/db").then((m) => m.getDb());
       db.prepare("DELETE FROM attachments WHERE message_id = ?").run(userMessageId);
       db.prepare("DELETE FROM messages WHERE id = ?").run(userMessageId);
-      console.error(
+      logError(
         "[streamProxy] Rolled back partially created user message after attachment processing failed",
         {
           chatId,
@@ -271,12 +267,16 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     infPreset?.thinkingTagOverride,
   );
   const useTools = infPreset?.toolCallsEnabled && infPreset.tools && infPreset.tools.length > 0;
-  const hasMedia = rawMessages.some((m) =>
+  const _hasMedia = rawMessages.some((m) =>
     m.attachments?.some((a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/")),
   );
-  const useChatCompletions = useTools || hasMedia;
+  // Always use /v1/chat/completions — llama-server is launched with --jinja
+  // and handles chat template rendering natively. The old /completion fallback
+  // used a broken "{{ messages }}" Jinja template that serialized the messages
+  // array as raw JSON, producing garbage output.
+  const _useChatCompletions = true;
 
-  let endpoint = `http://127.0.0.1:${server.port}/completion`;
+  const endpoint = `http://127.0.0.1:${server.port}/v1/chat/completions`;
   const requestBody: Record<string, unknown> = {
     stream: true,
     cache_prompt: true,
@@ -288,117 +288,96 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     stop: infPreset?.stopStrings ?? [],
   };
 
-  if (useChatCompletions) {
-    endpoint = `http://127.0.0.1:${server.port}/v1/chat/completions`;
-    const { buildContentParts } = await import("./multimodal");
+  const { buildContentParts } = await import("./multimodal");
 
-    requestBody.messages = [];
-    for (const m of rawMessages) {
-      const mediaAtts =
-        m.attachments?.filter(
-          (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/"),
-        ) || [];
+  requestBody.messages = [];
+  for (const m of rawMessages) {
+    const mediaAtts =
+      m.attachments?.filter(
+        (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/"),
+      ) || [];
 
-      const contentParts = await buildContentParts(
-        m.content,
-        m.attachments || [],
-        modelMeta || undefined,
+    // For messages with media attachments, build multimodal content parts;
+    // for plain text messages, just use the text content string directly.
+    const hasMediaAttachments = mediaAtts.length > 0;
+    const contentParts = hasMediaAttachments
+      ? await buildContentParts(m.content, m.attachments || [], modelMeta || undefined)
+      : m.content;
+
+    let finalContent = contentParts;
+
+    // Multimodal warning for history
+    const hasUnsupportedMedia = mediaAtts.some((a) => {
+      if (a.mimeType.startsWith("image/") && !modelMeta?.hasVisionEncoder) return true;
+      if (a.mimeType.startsWith("audio/") && !modelMeta?.hasAudioEncoder) return true;
+      return false;
+    });
+
+    if (hasUnsupportedMedia) {
+      const warning =
+        "[System info: Some multimodal attachments were removed because the current active model lacks encoders for them.]\n";
+      if (typeof finalContent === "string") {
+        finalContent = warning + finalContent;
+      } else if (Array.isArray(finalContent)) {
+        const textPart = finalContent.find((p) => p.type === "text");
+        if (textPart) {
+          textPart.text = warning + textPart.text;
+        } else {
+          finalContent.push({ type: "text", text: warning });
+        }
+      }
+    }
+
+    const apiMsg: {
+      role: string;
+      content: any;
+      tool_calls?: any[];
+      tool_call_id?: string;
+      name?: string;
+    } = { role: m.role, content: finalContent };
+
+    if (m.toolCallsJson) {
+      try {
+        apiMsg.tool_calls = JSON.parse(m.toolCallsJson);
+      } catch (_e) {}
+    }
+    if (m.toolCallId) {
+      apiMsg.tool_call_id = m.toolCallId;
+      // Find function name for tool result
+      const assistantMsg = rawMessages.find(
+        (prev) =>
+          prev.role === "assistant" &&
+          prev.toolCallsJson &&
+          JSON.parse(prev.toolCallsJson).some((tc: { id: string }) => tc.id === m.toolCallId),
       );
-
-      let finalContent = contentParts;
-
-      // Multimodal warning for history
-      const hasUnsupportedMedia = mediaAtts.some((a) => {
-        if (a.mimeType.startsWith("image/") && !modelMeta?.hasVisionEncoder) return true;
-        if (a.mimeType.startsWith("audio/") && !modelMeta?.hasAudioEncoder) return true;
-        return false;
-      });
-
-      if (hasUnsupportedMedia) {
-        const warning =
-          "[System info: Some multimodal attachments were removed because the current active model lacks encoders for them.]\n";
-        if (typeof finalContent === "string") {
-          finalContent = warning + finalContent;
-        } else if (Array.isArray(finalContent)) {
-          const textPart = finalContent.find((p) => p.type === "text");
-          if (textPart) {
-            textPart.text = warning + textPart.text;
-          } else {
-            finalContent.push({ type: "text", text: warning });
-          }
-        }
+      if (assistantMsg?.toolCallsJson) {
+        const tcs = JSON.parse(assistantMsg.toolCallsJson);
+        const matchingTc = tcs.find((tc: { id: string }) => tc.id === m.toolCallId);
+        if (matchingTc) apiMsg.name = matchingTc.function.name;
       }
-
-      const apiMsg: {
-        role: string;
-        content: any;
-        tool_calls?: any[];
-        tool_call_id?: string;
-        name?: string;
-      } = { role: m.role, content: finalContent };
-
-      if (m.toolCallsJson) {
-        try {
-          apiMsg.tool_calls = JSON.parse(m.toolCallsJson);
-        } catch (_e) {}
-      }
-      if (m.toolCallId) {
-        apiMsg.tool_call_id = m.toolCallId;
-        // Find function name for tool result
-        const assistantMsg = rawMessages.find(
-          (prev) =>
-            prev.role === "assistant" &&
-            prev.toolCallsJson &&
-            JSON.parse(prev.toolCallsJson).some((tc: { id: string }) => tc.id === m.toolCallId),
-        );
-        if (assistantMsg?.toolCallsJson) {
-          const tcs = JSON.parse(assistantMsg.toolCallsJson);
-          const matchingTc = tcs.find((tc: { id: string }) => tc.id === m.toolCallId);
-          if (matchingTc) apiMsg.name = matchingTc.function.name;
-        }
-      }
-      (requestBody.messages as any[]).push(apiMsg);
     }
-
-    if (useTools) {
-      requestBody.tools = infPreset.tools.map((t) => ({
-        type: "function",
-        function: t,
-      }));
-    }
-
-    if (infPreset?.structuredOutput?.enabled && infPreset.structuredOutput.schema) {
-      requestBody.response_format = {
-        type: "json_schema",
-        json_schema: infPreset.structuredOutput.schema,
-      };
-    }
-
-    if (infPreset?.thinkingEnabled ?? true) {
-      requestBody.chat_template_kwargs = { enable_thinking: true };
-      requestBody.reasoning_format = "none";
-    }
-  } else {
-    const prepHistory = prepareHistoryForRender(rawMessages, thinkingConfig);
-    const promptStr = renderPrompt(
-      prepHistory,
-      server.config?.chatTemplate || "{{ messages }}",
-      !isContinue,
-      { enable_thinking: infPreset?.thinkingEnabled ?? true },
-    );
-    requestBody.prompt = promptStr;
+    (requestBody.messages as any[]).push(apiMsg);
   }
 
-  if (
-    !useChatCompletions &&
-    infPreset?.structuredOutput?.enabled &&
-    infPreset?.structuredOutput?.grammar
-  ) {
-    requestBody.grammar = infPreset.structuredOutput.grammar;
+  if (useTools) {
+    requestBody.tools = infPreset.tools.map((t) => ({
+      type: "function",
+      function: t,
+    }));
   }
 
-  if (!useChatCompletions && (infPreset?.thinkingEnabled ?? true) && thinkingConfig.enableToken) {
-    requestBody.prompt += thinkingConfig.enableToken;
+  if (infPreset?.structuredOutput?.enabled && infPreset.structuredOutput.schema) {
+    requestBody.response_format = {
+      type: "json_schema",
+      json_schema: infPreset.structuredOutput.schema,
+    };
+  }
+
+  // Enable thinking tag handling via llama-server's native template kwargs
+  if (infPreset?.thinkingEnabled ?? true) {
+    requestBody.chat_template_kwargs = { enable_thinking: true };
+    // Use reasoning_format "none" so we get raw thinking tags we can parse ourselves
+    requestBody.reasoning_format = "none";
   }
 
   const abortController = new AbortController();
@@ -417,7 +396,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const resetInactivityTimer = () => {
     clearTimeout(inactivityTimer);
     inactivityTimer = setTimeout(() => {
-      console.warn(`Generation timeout for chat ${chatId} (${timeoutMs}ms)`);
+      logWarn(`Generation timeout for chat ${chatId} (${timeoutMs}ms)`);
       abortGeneration(chatId);
     }, timeoutMs);
   };
@@ -543,30 +522,25 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               continue;
             }
 
-            let delta = "";
-            if (useChatCompletions) {
-              const tcDelta = parsed.choices?.[0]?.delta?.tool_calls;
-              if (tcDelta) {
-                for (const tc of tcDelta) {
-                  const idx = tc.index ?? 0;
-                  if (!accumulatedToolCalls[idx]) {
-                    accumulatedToolCalls[idx] = {
-                      id: tc.id,
-                      type: "function",
-                      function: { name: "", arguments: "" },
-                    };
-                  }
-                  if (tc.id) accumulatedToolCalls[idx].id = tc.id;
-                  if (tc.function?.name)
-                    accumulatedToolCalls[idx].function.name += tc.function.name;
-                  if (tc.function?.arguments)
-                    accumulatedToolCalls[idx].function.arguments += tc.function.arguments;
+            // Extract content delta from the OpenAI-style chat completions response
+            const tcDelta = parsed.choices?.[0]?.delta?.tool_calls;
+            if (tcDelta) {
+              for (const tc of tcDelta) {
+                const idx = tc.index ?? 0;
+                if (!accumulatedToolCalls[idx]) {
+                  accumulatedToolCalls[idx] = {
+                    id: tc.id,
+                    type: "function",
+                    function: { name: "", arguments: "" },
+                  };
                 }
+                if (tc.id) accumulatedToolCalls[idx].id = tc.id;
+                if (tc.function?.name) accumulatedToolCalls[idx].function.name += tc.function.name;
+                if (tc.function?.arguments)
+                  accumulatedToolCalls[idx].function.arguments += tc.function.arguments;
               }
-              delta = parsed.choices?.[0]?.delta?.content || "";
-            } else {
-              delta = parsed.content || "";
             }
+            const delta = parsed.choices?.[0]?.delta?.content || "";
 
             if (useTools && parsed.choices?.[0]?.finish_reason === "tool_calls") {
               const toolCalls = accumulatedToolCalls.filter(Boolean);
@@ -694,8 +668,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               }
             }
 
-            const isStop = useTools ? !!parsed.choices?.[0]?.finish_reason : parsed.stop;
-            if (isStop) {
+            // Detect stop condition from the chat completions response
+            const finishReason = parsed.choices?.[0]?.finish_reason;
+            if (finishReason) {
               const timings = parsed.timings || {
                 tokens_cached: 0,
                 tokens_evaluated: 0,
@@ -709,13 +684,8 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                 prompt_per_token_ms: 0,
               };
               let stopReason: import("@shared/types.js").WsStopFrame["stopReason"] = "eos";
-              if (useChatCompletions) {
-                const fr = parsed.choices?.[0]?.finish_reason;
-                if (fr === "length") stopReason = "max_tokens";
-                if (fr === "tool_calls") stopReason = "tool_calls";
-              } else {
-                if (parsed.stopped_limit) stopReason = "max_tokens";
-              }
+              if (finishReason === "length") stopReason = "max_tokens";
+              if (finishReason === "tool_calls") stopReason = "tool_calls";
 
               if (
                 stopReason === "max_tokens" &&
@@ -764,7 +734,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
           db.prepare(
             "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
           ).run(prevContent, fullRawContent, prevThinking || null, assistantMessageId);
-          console.warn("[streamProxy] Generation aborted by user or timeout", {
+          logWarn("[streamProxy] Generation aborted by user or timeout", {
             chatId,
             assistantMessageId,
             generationId,
@@ -794,10 +764,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                 dbCleanup.prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
               }
             } catch (cleanupErr) {
-              console.error(
-                "[streamProxy] Failed to clean up orphaned assistant message",
-                cleanupErr,
-              );
+              logError("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
             }
           }
           broadcast({
@@ -838,7 +805,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
             dbCleanup.prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
           }
         } catch (cleanupErr) {
-          console.error("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
+          logError("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
         }
       }
       broadcast({

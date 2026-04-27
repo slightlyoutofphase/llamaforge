@@ -6,6 +6,7 @@
 
 import { Template } from "@huggingface/jinja";
 import type { ChatMessage, ThinkingTagConfig } from "@shared/types.js";
+import { logWarn } from "./logger";
 
 /**
  * Configuration specifically for the Gemma 4 architectures regarding their unique formatting.
@@ -168,7 +169,7 @@ export function renderPrompt(
   } catch (_e) {
     // M9 fix: log a visible warning so the user knows the template rendering failed
     // and that output quality may be degraded due to the basic fallback format
-    console.warn(
+    logWarn(
       `[chatTemplateEngine] Jinja template rendering failed, using basic fallback. ` +
         `Model output quality may be degraded. Error: ${_e instanceof Error ? _e.message : String(_e)}`,
     );

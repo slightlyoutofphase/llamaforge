@@ -5,6 +5,7 @@
 
 import type { WsAutonameFrame } from "@shared/types.js";
 import { getServerStatus } from "./llamaServer";
+import { logError } from "./logger";
 import { getChat, updateChat } from "./persistence/chatRepo";
 import { broadcast } from "./wsHub";
 
@@ -88,10 +89,10 @@ Title:`;
         name: title,
       } as WsAutonameFrame);
     } else {
-      console.error(`Autoname completion failed with status ${res.status}`);
+      logError(`Autoname completion failed with status ${res.status}`);
     }
   } catch (e) {
-    console.error("Autonaming failed:", e instanceof Error ? e.message : String(e));
+    logError("Autonaming failed:", e instanceof Error ? e.message : String(e));
   } finally {
     activeAutonames.delete(chatId);
   }

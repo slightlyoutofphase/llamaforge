@@ -3,6 +3,7 @@
  * Left sidebar component for managing chat history: searching, sorting, renaming, deleting, and exporting sessions.
  */
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Check,
@@ -15,9 +16,9 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
 import type React from "react";
 import { useEffect, useMemo, useState } from "react";
+import { logError } from "../../logger";
 import { useCreateChat, useDeleteChat, useInfiniteChats, useUpdateChat } from "../../queries";
 import { useAppStore } from "../../store";
 
@@ -65,7 +66,7 @@ export function ChatSidebar() {
       if (!newChat?.id) throw new Error("Failed to create new chat.");
       navigate({ to: "/chat/$chatId", params: { chatId: newChat.id } });
     } catch (err: unknown) {
-      console.error("Create chat failed", err);
+      logError("Create chat failed", err);
     }
   };
 

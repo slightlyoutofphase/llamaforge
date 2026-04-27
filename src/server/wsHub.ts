@@ -6,6 +6,7 @@
 
 import type { LlamaServerStatus, WsFrame } from "@shared/types.js";
 import type { ServerWebSocket } from "bun";
+import { logWarn } from "./logger";
 
 const connections = new Set<ServerWebSocket<unknown>>();
 const lastPongTimes = new WeakMap<ServerWebSocket<unknown>, number>();
@@ -22,7 +23,7 @@ function startHeartbeat(): void {
     for (const ws of Array.from(connections)) {
       const lastPong = lastPongTimes.get(ws) ?? now;
       if (now - lastPong > STALE_THRESHOLD_MS) {
-        console.warn("[wsHub] Closing stale WebSocket (no pong received)");
+        logWarn("[wsHub] Closing stale WebSocket (no pong received)");
         connections.delete(ws);
         try {
           ws.close(1001, "Heartbeat timeout");
@@ -89,7 +90,7 @@ export function broadcast(frame: WsFrame): void {
       ws.send(data);
     } catch (err) {
       connections.delete(ws);
-      console.warn("Failed to send frame to websocket, removing connection:", err);
+      logWarn("Failed to send frame to websocket, removing connection:", err);
     }
   }
 }

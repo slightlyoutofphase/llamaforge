@@ -13,6 +13,7 @@ import type {
   WsFrame,
 } from "@shared/types.js";
 import { create } from "zustand";
+import { logError, logInfo } from "./logger";
 
 /**
  * A notification object for user-facing alerts.
@@ -107,6 +108,8 @@ interface AppState {
   ) => void;
   /** Removes a notification by ID. */
   removeNotification: (id: string) => void;
+  /** Adds a local log message to the UI console. */
+  addLog: (level: "info" | "warn" | "error" | "debug" | "server", body: string) => void;
   /** Establishes or re-establishes the WebSocket connection. */
   connectWs: (manual?: boolean) => void;
   /** Disconnects the WebSocket and suppresses automatic reconnect attempts. */
@@ -266,6 +269,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   removeNotification: (id) =>
     set((state) => ({ notifications: state.notifications.filter((note) => note.id !== id) })),
+  addLog: (level, body) =>
+    set((state) => ({ logs: [...state.logs.slice(-100), `[${level}] ${body}`] })),
   clearUnreadChat: (chatId) =>
     set((state) => ({ unreadChatIds: state.unreadChatIds.filter((id) => id !== chatId) })),
 
@@ -289,7 +294,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     ws.onopen = () => {
       currentReconnectDelay = 2000;
       set({ isConnected: true, errorMessage: null, errorActionLabel: null, errorAction: null });
-      console.log("WS connected");
+      logInfo("WS connected");
     };
 
     ws.onerror = () => {
@@ -317,7 +322,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           errorActionLabel: "Retry",
           errorAction: () => get().connectWs(),
         });
-        console.log(`WS disconnected, reconnecting in ${currentReconnectDelay}ms...`);
+        logInfo(`WS disconnected, reconnecting in ${currentReconnectDelay}ms...`);
         reconnectTimer = window.setTimeout(() => {
           reconnectTimer = null;
           get().connectWs(false);
@@ -333,7 +338,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       try {
         frame = JSON.parse(event.data) as WsFrame;
       } catch (err) {
-        console.error("Failed to parse WS message", err);
+        logError("Failed to parse WS message", err);
         return;
       }
 
@@ -493,8 +498,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           });
           // S2 fix: Dispatch a custom event so React Query providers can invalidate the chats query
           window.dispatchEvent(new CustomEvent("llamaforge:chats-invalidate"));
+        } else if (frame.type === "presets_updated") {
+          window.dispatchEvent(new CustomEvent("llamaforge:presets-invalidate"));
         } else if (frame.type === "error") {
-          console.error("WS Error frame:", frame.message);
+          logError("WS Error frame:", frame.message);
           set({
             isGenerating: false,
             currentGenerationId: null,
@@ -502,7 +509,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           });
         }
       } catch (err) {
-        console.error("Error processing WS frame:", err);
+        logError("Error processing WS frame:", err);
       }
     };
   },
@@ -679,7 +686,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
     } catch (e: unknown) {
-      console.error("Fetch chat failed", e);
+      logError("Fetch chat failed", e);
       get().setError(e instanceof Error ? e.message : "Failed to load chat.", "Retry", () =>
         get().loadChat(chatId),
       );
@@ -720,7 +727,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         };
       });
     } catch (e) {
-      console.error("Failed to load more messages", e);
+      logError("Failed to load more messages", e);
     }
   },
 
@@ -740,7 +747,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
     } catch (e: unknown) {
-      console.error("Fetch hardware failed", e);
+      logError("Fetch hardware failed", e);
       get().addNotification(
         e instanceof Error ? e.message : "Failed to fetch hardware.",
         "error",
@@ -766,7 +773,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
     } catch (e: unknown) {
-      console.error("Fetch models failed", e);
+      logError("Fetch models failed", e);
       get().addNotification(
         e instanceof Error ? e.message : "Failed to fetch models.",
         "error",
@@ -804,7 +811,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
     } catch (e: unknown) {
-      console.error("Fetch server status failed", e);
+      logError("Fetch server status failed", e);
       get().addNotification(
         e instanceof Error ? e.message : "Failed to fetch server status.",
         "error",
@@ -828,7 +835,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
     } catch (e: unknown) {
-      console.error("Fetch prompt cache stats failed", e);
+      logError("Fetch prompt cache stats failed", e);
       get().addNotification(
         e instanceof Error ? e.message : "Failed to fetch prompt cache stats.",
         "error",
@@ -885,7 +892,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
     } catch (e: unknown) {
-      console.error("Unload failed", e);
+      logError("Unload failed", e);
       get().addNotification(
         e instanceof Error ? e.message : "Model unload failed.",
         "error",

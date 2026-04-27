@@ -3,6 +3,7 @@
  * Provides the model library panel for browsing and loading GGUF models.
  */
 
+import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import {
   Activity,
@@ -16,8 +17,8 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
+import { logError } from "../../logger";
 import { useCreateChat, useLoadPresets } from "../../queries";
-import { useNavigate } from "@tanstack/react-router";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { MultimodalGuardModal } from "./MultimodalGuardModal";
@@ -96,7 +97,7 @@ export function ModelLibraryPanel() {
         navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
       }
     } catch (error) {
-      console.error("New chat creation failed:", error);
+      logError("New chat creation failed:", error);
     } finally {
       setIsCreatingChat(false);
       setGuardModal(null);

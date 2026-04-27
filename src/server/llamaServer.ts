@@ -3,8 +3,8 @@
  * Llama server lifecycle management — spawn, unload, and switch model processes.
  */
 
-import type { LlamaServerStatus, ModelLoadConfig } from "@shared/types.js";
 import fs from "node:fs/promises";
+import type { LlamaServerStatus, ModelLoadConfig } from "@shared/types.js";
 import { type Subprocess, spawn } from "bun";
 import { findFreePort } from "./utils/network";
 import { broadcastLog, broadcastStatus } from "./wsHub";

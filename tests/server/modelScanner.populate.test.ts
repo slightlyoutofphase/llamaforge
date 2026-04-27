@@ -7,8 +7,8 @@ import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { initDb } from "../../src/server/persistence/db";
 import { cachedGgufMetadata } from "../../src/server/persistence/chatRepo";
+import { initDb } from "../../src/server/persistence/db";
 
 mock.module("../../src/server/ggufReader", () => ({
   parseGgufMetadata: async (_filePath: string) => ({

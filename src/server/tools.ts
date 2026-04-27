@@ -18,7 +18,7 @@ export function generateGrammarFromSchema(schema: Record<string, unknown>): stri
   try {
     return json2gbnf(schema as any);
   } catch (error) {
-    console.error("Failed to compile JSON schema to GBNF", error);
+    logError("Failed to compile JSON schema to GBNF", error);
     return "";
   }
 }
@@ -122,6 +122,7 @@ export const BUILT_IN_TOOLS = [
 ];
 
 import { evaluate } from "mathjs";
+import { logError } from "./logger";
 
 /**
  * Executes a built-in tool function.

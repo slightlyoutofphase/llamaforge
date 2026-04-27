@@ -7,6 +7,7 @@
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Check, ChevronDown, ChevronUp, Cpu, FileText, Settings2, Terminal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { logError } from "../../logger";
 import {
   useBranchChat,
   useContinueChat,
@@ -260,7 +261,7 @@ export function ChatView() {
           });
         }
       } catch (e: unknown) {
-        console.error("Edit failed", e);
+        logError("Edit failed", e);
         setError(e instanceof Error ? e.message : "Failed to edit message.", "Retry", () =>
           handleEdit(messageId, newContent),
         );
@@ -285,7 +286,7 @@ export function ChatView() {
         if (!newChat?.id) throw new Error("Branch response missing new chat id.");
         navigate({ to: "/chat/$chatId", params: { chatId: newChat.id } });
       } catch (e: unknown) {
-        console.error("Branch failed", e);
+        logError("Branch failed", e);
         setError(e instanceof Error ? e.message : "Failed to create branch.", "Retry", () =>
           handleBranch(id),
         );
@@ -329,7 +330,7 @@ export function ChatView() {
           await regenerateMutation.mutateAsync(currentChatId);
         }
       } catch (e: unknown) {
-        console.error("Regeneration failed", e);
+        logError("Regeneration failed", e);
         setError(e instanceof Error ? e.message : "Failed to regenerate chat.", "Retry", () =>
           handleRegenerate(id),
         );
@@ -373,7 +374,7 @@ export function ChatView() {
           await continueMutation.mutateAsync(currentChatId);
         }
       } catch (e: unknown) {
-        console.error("Continue failed", e);
+        logError("Continue failed", e);
         setError(e instanceof Error ? e.message : "Failed to continue chat.", "Retry", () =>
           handleContinue(id),
         );

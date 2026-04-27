@@ -6,6 +6,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { logError, logInfo } from "../logger";
 import { getDb } from "./db";
 
 /**
@@ -56,10 +57,10 @@ export async function cleanupOrphanedAttachments() {
 
                 const relPath = ["attachments", chatDir.name, msgDir.name, file.name].join("/");
                 if (!referencedSet.has(relPath)) {
-                  console.log(`Cleaning up orphaned attachment: ${relPath}`);
+                  logInfo(`Cleaning up orphaned attachment: ${relPath}`);
                   await fs
                     .unlink(path.join(msgDirPath, file.name))
-                    .catch((e) => console.error(`Failed to unlink orphaned file ${relPath}:`, e));
+                    .catch((e) => logError(`Failed to unlink orphaned file ${relPath}:`, e));
                 }
               }),
             );
@@ -69,7 +70,7 @@ export async function cleanupOrphanedAttachments() {
             if (remainingInMsg.length === 0) {
               await fs
                 .rmdir(msgDirPath)
-                .catch((e) => console.error(`Failed to rmdir ${msgDirPath}:`, e));
+                .catch((e) => logError(`Failed to rmdir ${msgDirPath}:`, e));
             }
           }),
         );
@@ -77,9 +78,7 @@ export async function cleanupOrphanedAttachments() {
         // If chat directory is now empty, remove it
         const remainingInChat = await fs.readdir(chatDirPath).catch(() => []);
         if (remainingInChat.length === 0) {
-          await fs
-            .rmdir(chatDirPath)
-            .catch((e) => console.error(`Failed to rmdir ${chatDirPath}:`, e));
+          await fs.rmdir(chatDirPath).catch((e) => logError(`Failed to rmdir ${chatDirPath}:`, e));
         }
       }),
     );
@@ -88,6 +87,6 @@ export async function cleanupOrphanedAttachments() {
       // Expected if attachments dir doesn't exist yet
       return;
     }
-    console.error("Cleanup orphaned attachments failed:", err);
+    logError("Cleanup orphaned attachments failed:", err);
   }
 }

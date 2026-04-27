@@ -4,6 +4,7 @@
  * Manages global connectivity, theme injection, keyboard shortcuts, and the primary three-column grid.
  */
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { MessageSquare, Server, Settings, Terminal } from "lucide-react";
 import { useEffect } from "react";
@@ -14,7 +15,7 @@ import { SystemPresetEditor } from "./components/preset/SystemPresetEditor";
 import { ChatSidebar } from "./components/sidebar/ChatSidebar";
 import { ModelLibraryPanel } from "./components/sidebar/ModelLibraryPanel";
 import { HardwareInfo } from "./HardwareInfo";
-import { useSettings } from "./queries";
+import { queryKeys, useSettings } from "./queries";
 import { SettingsPanel } from "./SettingsPanel";
 import { useAppStore } from "./store";
 import { useUiStore } from "./uiStore";
@@ -44,6 +45,7 @@ export default function App() {
   } = useAppStore();
   const { setRightPanelView, rightPanelView, toggleConsole } = useUiStore();
   const { data: settings } = useSettings();
+  const queryClient = useQueryClient();
 
   const location = useLocation();
   const activeTab = location.pathname.startsWith("/chat") ? "chat" : "models";
@@ -86,6 +88,16 @@ export default function App() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [toggleConsole]);
+
+  useEffect(() => {
+    const handlePresetsInvalidate = () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.presetsLoad() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.presetsInference() });
+    };
+    window.addEventListener("llamaforge:presets-invalidate", handlePresetsInvalidate);
+    return () =>
+      window.removeEventListener("llamaforge:presets-invalidate", handlePresetsInvalidate);
+  }, [queryClient]);
 
   const renderRightPanel = () => {
     if (rightPanelView === "settings") return <SettingsPanel />;

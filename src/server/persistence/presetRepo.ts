@@ -4,6 +4,7 @@
  */
 
 import type { InferencePreset, LoadPreset, SystemPromptPreset } from "@shared/types.js";
+import { logWarn } from "../logger";
 import { generateGrammarFromSchema } from "../tools";
 import { getDb } from "./db";
 
@@ -11,7 +12,7 @@ function safeParse<T>(json: string, fallback: T): T {
   try {
     return JSON.parse(json) as T;
   } catch (err) {
-    console.warn("[presetRepo] Failed to parse preset config JSON", {
+    logWarn("[presetRepo] Failed to parse preset config JSON", {
       error: err instanceof Error ? err.message : String(err),
       snippet: json.slice(0, 160),
     });

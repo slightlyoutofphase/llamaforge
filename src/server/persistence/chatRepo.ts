@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { ChatMessage, ChatSession, GgufDisplayMetadata } from "@shared/types.js";
+import { logError, logWarn } from "../logger";
 import { getDb } from "./db";
 
 const APP_ROOT = path.join(os.homedir(), ".llamaforge");
@@ -49,11 +50,11 @@ function isValidMessageRole(value: unknown): value is "system" | "user" | "assis
 
 function assertImportPayload(parsed: any) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    console.error("[chatRepo] Invalid imported chat payload: not an object", { parsed });
+    logError("[chatRepo] Invalid imported chat payload: not an object", { parsed });
     throw new Error("Imported chat must be a JSON object.");
   }
   if (!Array.isArray(parsed.messages)) {
-    console.error("[chatRepo] Invalid imported chat payload: missing messages array", { parsed });
+    logError("[chatRepo] Invalid imported chat payload: missing messages array", { parsed });
     throw new Error("Imported chat must include a messages array.");
   }
 
@@ -73,7 +74,7 @@ function assertImportPayload(parsed: any) {
       }
       for (const [attIndex, att] of msg.attachments.entries()) {
         if (!att || typeof att !== "object") {
-          console.error("[chatRepo] Invalid attachment object in imported chat", {
+          logError("[chatRepo] Invalid attachment object in imported chat", {
             messageIndex: index,
             attachmentIndex: attIndex,
             att,
@@ -81,7 +82,7 @@ function assertImportPayload(parsed: any) {
           throw new Error(`Attachment at index ${attIndex} for message ${index} is invalid.`);
         }
         if (typeof att.fileName !== "string" || att.fileName.length === 0) {
-          console.error("[chatRepo] Imported attachment missing fileName", {
+          logError("[chatRepo] Imported attachment missing fileName", {
             messageIndex: index,
             attachmentIndex: attIndex,
             att,
@@ -338,7 +339,7 @@ export async function deleteChat(id: string): Promise<void> {
       if (fullPath) await fs.unlink(fullPath);
     } catch (e) {
       // S13 fix: log file deletion failures for debugging
-      console.warn("[chatRepo] Failed to delete attachment file during chat cleanup", {
+      logWarn("[chatRepo] Failed to delete attachment file during chat cleanup", {
         chatId: id,
         filePath: row.file_path,
         error: e instanceof Error ? e.message : String(e),
@@ -352,7 +353,7 @@ export async function deleteChat(id: string): Promise<void> {
     await fs.rm(chatDir, { recursive: true, force: true });
   } catch (e) {
     // S13 fix: log directory cleanup failures
-    console.warn("[chatRepo] Failed to remove chat attachments directory", {
+    logWarn("[chatRepo] Failed to remove chat attachments directory", {
       chatId: id,
       error: e instanceof Error ? e.message : String(e),
     });
@@ -609,7 +610,7 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
         const newFilePath = path.join(newAppDir, safeName);
         const oldFilePath = resolveAttachmentPath(att.filePath);
         if (!oldFilePath) {
-          console.error("[chatRepo] Invalid attachment path for branch copy", {
+          logError("[chatRepo] Invalid attachment path for branch copy", {
             chatId,
             messageId: msg.id,
             attachmentPath: att.filePath,
@@ -648,10 +649,7 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
     try {
       await deleteChat(newChatId);
     } catch (cleanupErr) {
-      console.error(
-        "Failed to clean up partially created branch after attachment failure:",
-        cleanupErr,
-      );
+      logError("Failed to clean up partially created branch after attachment failure:", cleanupErr);
     }
     throw new Error(
       `Branch creation failed while copying attachments: ${err instanceof Error ? err.message : String(err)}`,
@@ -699,7 +697,7 @@ export async function exportChat(chatId: string, format: "json" | "markdown"): P
                 const buf = await fs.readFile(fp);
                 b64 = buf.toString("base64");
               } catch (_e) {
-                console.warn("[chatRepo] Missing attachment file during export", {
+                logWarn("[chatRepo] Missing attachment file during export", {
                   filePath: att.file_path,
                   messageId: m.id,
                   attachmentId: att.id,
@@ -765,7 +763,7 @@ export async function importChat(jsonContent: string): Promise<string> {
   try {
     parsed = JSON.parse(jsonContent);
   } catch (err) {
-    console.error("[chatRepo] Failed to parse imported chat JSON", {
+    logError("[chatRepo] Failed to parse imported chat JSON", {
       error: err instanceof Error ? err.message : String(err),
       snippet: jsonContent.slice(0, 160),
     });
@@ -877,7 +875,7 @@ export async function importChat(jsonContent: string): Promise<string> {
         now,
       );
     } catch (err) {
-      console.warn("[chatRepo] Failed to write imported attachment file, skipping DB record", {
+      logWarn("[chatRepo] Failed to write imported attachment file, skipping DB record", {
         filePath: fw.filePath,
         fileName: fw.fileName,
         error: err instanceof Error ? err.message : String(err),

@@ -3,9 +3,9 @@
  * Tests for the model selector and saved preset navigation.
  */
 
-import { describe, expect, it, beforeAll, beforeEach, afterEach, afterAll, mock } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, cleanup } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
 
 mock.module("@tanstack/react-router", () => ({

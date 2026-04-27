@@ -7,6 +7,7 @@ import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
+import { logError, logInfo, logWarn } from "../logger";
 
 let _db: Database | null = null;
 let _dbPath: string | null = null;
@@ -68,7 +69,7 @@ export function getDb(path?: string): Database {
     if (resolvedPath === ":memory:") {
       throw err; // Can't recover in-memory DBs
     }
-    console.error(
+    logError(
       `[db] Failed to open database at ${resolvedPath}. ` +
         `The file may be corrupted. Attempting recovery by creating a fresh database.`,
       err,
@@ -77,9 +78,9 @@ export function getDb(path?: string): Database {
     const corruptPath = `${resolvedPath}.corrupt.${Date.now()}`;
     try {
       fs.renameSync(resolvedPath, corruptPath);
-      console.warn(`[db] Corrupt database renamed to: ${corruptPath}`);
+      logWarn(`[db] Corrupt database renamed to: ${corruptPath}`);
     } catch (renameErr) {
-      console.error(`[db] Could not rename corrupt database file:`, renameErr);
+      logError(`[db] Could not rename corrupt database file:`, renameErr);
       throw new Error(
         `Database file is corrupted and cannot be recovered automatically. ` +
           `Original error: ${err instanceof Error ? err.message : String(err)}`,
@@ -103,7 +104,7 @@ export function getDb(path?: string): Database {
         try {
           _db.exec("PRAGMA incremental_vacuum(200)");
         } catch (err) {
-          console.error("Incremental vacuum failed:", err);
+          logError("Incremental vacuum failed:", err);
         }
       }
     },
@@ -119,7 +120,7 @@ export function getDb(path?: string): Database {
   ];
 
   if (currentVersion > LATEST_DB_VERSION) {
-    console.warn(
+    logWarn(
       `Database schema version ${currentVersion} is newer than supported version ${LATEST_DB_VERSION}. ` +
         "Proceeding in read-only compatibility mode.",
     );
@@ -127,7 +128,7 @@ export function getDb(path?: string): Database {
   }
 
   if (currentVersion < LATEST_DB_VERSION) {
-    console.log(`Migrating database from version ${currentVersion} to ${LATEST_DB_VERSION}...`);
+    logInfo(`Migrating database from version ${currentVersion} to ${LATEST_DB_VERSION}...`);
     try {
       _db.exec("BEGIN TRANSACTION;");
       for (let i = currentVersion; i < LATEST_DB_VERSION; i++) {
@@ -135,10 +136,10 @@ export function getDb(path?: string): Database {
       }
       _db.exec(`PRAGMA user_version = ${LATEST_DB_VERSION};`);
       _db.exec("COMMIT;");
-      console.log(`Migration to version ${LATEST_DB_VERSION} complete.`);
+      logInfo(`Migration to version ${LATEST_DB_VERSION} complete.`);
     } catch (e) {
       _db.exec("ROLLBACK;");
-      console.error("Database migration failed:", e);
+      logError("Database migration failed:", e);
       throw e;
     }
   }

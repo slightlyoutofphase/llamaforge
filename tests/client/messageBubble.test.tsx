@@ -4,9 +4,9 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { render, screen, fireEvent } from "@testing-library/react";
-import { MessageBubble } from "../../src/client/components/chat/MessageBubble";
 import type { ChatMessage } from "@shared/types";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { MessageBubble } from "../../src/client/components/chat/MessageBubble";
 
 describe("MessageBubble Component", () => {
   it("renders user messages with attachments", () => {

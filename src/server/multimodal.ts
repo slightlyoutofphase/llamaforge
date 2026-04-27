@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Attachment, GgufDisplayMetadata } from "@shared/types.js";
+import { logWarn } from "./logger";
 import { getDb } from "./persistence/db";
 
 const APP_ROOT = path.join(os.homedir(), ".llamaforge");
@@ -85,7 +86,7 @@ export async function processUpload(
   if (mimeType === "application/pdf") {
     // M8 fix: skip extraction for very large PDFs to prevent OOM
     if (buffer.byteLength > MAX_PDF_EXTRACTION_BYTES) {
-      console.warn(
+      logWarn(
         `[multimodal] PDF exceeds ${MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)}MB limit for text extraction, skipping: ${fileName} (${(buffer.byteLength / (1024 * 1024)).toFixed(1)}MB)`,
       );
       attachment.extractedText = `[PDF text extraction skipped: file size (${(buffer.byteLength / (1024 * 1024)).toFixed(1)}MB) exceeds the ${MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)}MB extraction limit]`;
@@ -101,7 +102,7 @@ export async function processUpload(
         }
         attachment.extractedText = fullText;
       } catch (e) {
-        console.warn("PDF extraction failed", e);
+        logWarn("PDF extraction failed", e);
         attachment.extractedText = `[Error extracting PDF text: ${e instanceof Error ? e.message : String(e)}]`;
       }
     }
@@ -202,7 +203,7 @@ export async function buildContentParts(
         }
         return fullText;
       } catch (e) {
-        console.warn("PDF extraction failed", e);
+        logWarn("PDF extraction failed", e);
         return undefined;
       }
     }
@@ -213,7 +214,7 @@ export async function buildContentParts(
       try {
         return (await fs.readFile(absPath)).toString("utf-8");
       } catch (e) {
-        console.warn(`Failed reading attachment file: ${attachment.filePath}`, e);
+        logWarn(`Failed reading attachment file: ${attachment.filePath}`, e);
       }
     }
     return undefined;
@@ -231,13 +232,13 @@ export async function buildContentParts(
       try {
         const absPath = resolveStoredAttachmentPath(a.filePath);
         if (!absPath) {
-          console.warn(`Invalid attachment path: ${a.filePath}`);
+          logWarn(`Invalid attachment path: ${a.filePath}`);
           continue;
         }
         try {
           await fs.access(absPath);
         } catch {
-          console.warn(`Attachment file missing: ${absPath}`);
+          logWarn(`Attachment file missing: ${absPath}`);
           continue;
         }
 
@@ -250,7 +251,7 @@ export async function buildContentParts(
         };
         parts.push(mediaPart);
       } catch (e) {
-        console.warn(`Failed resolving attachment file: ${a.filePath}`, e);
+        logWarn(`Failed resolving attachment file: ${a.filePath}`, e);
       }
     }
   }

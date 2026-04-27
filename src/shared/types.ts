@@ -321,6 +321,10 @@ export interface WsMessageFrame {
 /**
  * Unified type representing all potential messages a server may emit natively across connected websocket channels.
  */
+export interface WsPresetsUpdatedFrame {
+  type: "presets_updated";
+}
+
 export type WsFrame =
   | WsTokenFrame
   | WsStopFrame
@@ -329,7 +333,8 @@ export type WsFrame =
   | WsServerStatusFrame
   | WsAutonameFrame
   | WsToolCallFrame
-  | WsMessageFrame;
+  | WsMessageFrame
+  | WsPresetsUpdatedFrame;
 
 /**
  * Upstream message representation where clients explicitly demand a stop to an actively executing generation session.

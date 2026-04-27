@@ -4,11 +4,12 @@
  */
 
 import type { ModelEntry, ModelLoadConfig } from "@shared/types.js";
+import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { ChevronDown, Cpu, Database, Loader2, Play, Square } from "lucide-react";
 import { useEffect, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
 import { MultimodalGuardModal } from "./components/sidebar/MultimodalGuardModal";
+import { logError } from "./logger";
 import { useCreateChat, useLoadPresets } from "./queries";
 import { useAppStore } from "./store";
 
@@ -123,7 +124,7 @@ export function ModelSelector() {
         loadModel(guardModal.configToLoad);
       }
     } catch (error) {
-      console.error("New chat creation failed:", error);
+      logError("New chat creation failed:", error);
     } finally {
       setIsCreatingChat(false);
       setGuardModal(null);
@@ -253,11 +254,13 @@ export function ModelSelector() {
                           }))
                         }
                         className="w-full appearance-none bg-[var(--color-bg)] border border-[var(--color-border)] text-xs font-medium px-4 py-2 pr-8 rounded-xl disabled:opacity-50 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] outline-none cursor-pointer">
-                        {loadPresets?.map((p) => (
-                          <option key={p.id} value={p.id} title={p.name}>
-                            {p.name} {p.isDefault && "(Default)"}
-                          </option>
-                        ))}
+                        {loadPresets
+                          ?.filter((p) => !p.modelPath || p.modelPath === model.primaryPath)
+                          .map((p) => (
+                            <option key={p.id} value={p.id} title={p.name}>
+                              {p.name} {p.isDefault && "(Default)"}
+                            </option>
+                          ))}
                       </select>
                       <ChevronDown
                         size={14}
