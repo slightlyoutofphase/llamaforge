@@ -176,6 +176,19 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
       try {
         metadata = await parseGgufMetadata(entry.primaryPath);
         metadata.fileSizeBytes = stat.size;
+
+        if (entry.mmProjPath) {
+          try {
+            const mmProjMetadata = await parseGgufMetadata(entry.mmProjPath);
+            metadata.hasVisionEncoder = mmProjMetadata.hasVisionEncoder;
+            metadata.hasAudioEncoder = mmProjMetadata.hasAudioEncoder;
+          } catch (mmErr: any) {
+            logWarn(
+              `Failed to parse MMPROJ metadata for ${entry.mmProjPath}: ${mmErr?.message || String(mmErr)}`,
+            );
+          }
+        }
+
         await setCachedGgufMetadata(entry.primaryPath, mtime, metadata);
       } catch (err: any) {
         logWarn(

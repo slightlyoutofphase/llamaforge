@@ -468,6 +468,9 @@ import { type Subprocess } from "bun";
 import { type ModelLoadConfig } from "@shared/types.js";
 import { findFreePort } from "./utils/network.js";
 import { broadcastStatus, broadcastLog } from "./wsHub.js";
+import { writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 let proc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
 let activePort: number | null = null;
@@ -485,7 +488,26 @@ let currentConfig: ModelLoadConfig | null = null;
 export async function loadModel(
   config: ModelLoadConfig,
   llamaServerBin: string,
-): Promise<number> { ... }
+): Promise<number> {
+  // ... (full implementation unchanged except for temp-file handling for chatTemplateFile)
+  const port = await findFreePort();
+  const args = buildArgs(config, port);
+
+  // Temporary file handling for custom Jinja templates (per UI editor contract)
+  let tempTemplatePath: string | undefined;
+  if (config.chatTemplateFile !== undefined) {
+    tempTemplatePath = join(tmpdir(), `llamaforge-chat-template-${Date.now()}.jinja`);
+    writeFileSync(tempTemplatePath, config.chatTemplateFile, "utf-8");
+    // The path is already embedded in buildArgs via config.chatTemplateFile
+  }
+
+  proc = Bun.spawn([llamaServerBin, ...args], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  // ... (readiness polling, stderr forwarding, cleanup of temp file on unload, etc.)
+  return port;
+}
 ```
 
 The flags array is constructed deterministically from `ModelLoadConfig`:
@@ -494,6 +516,13 @@ The flags array is constructed deterministically from `ModelLoadConfig`:
 /**
  * Builds the CLI argument array for llama-server from a ModelLoadConfig.
  * Every field in ModelLoadConfig maps 1:1 to a documented llama-server flag.
+ * All flags (except the three fixed exceptions noted below) are fully
+ * user-configurable via the Load Preset Editor in the UI.
+ *
+ * Fixed exceptions (never exposed in UI):
+ *   --parallel 1
+ *   --jinja
+ *   --image-min-tokens 70
  *
  * @param config - The load configuration.
  * @param port - The port to bind to.
@@ -514,45 +543,99 @@ function buildArgs(config: ModelLoadConfig, port: number): readonly string[] {
     "--rope-freq-scale", String(config.ropeFreqScale),
     "--cache-type-k", config.kvCacheTypeK,
     "--cache-type-v", config.kvCacheTypeV,
-    "--parallel", "1",           // single-user, single slot
-    "--cont-batching",           // always enabled for responsiveness
-    "--flash-attn",              // always enabled
-    "--jinja",                   // required for tool calling (see §13)
+    "--parallel", "1",                    // single-user, single slot (required for prompt caching and per-request system/inference preset switching)
+    "--jinja",                            // required for tool calling and custom Jinja templates
+    "--image-min-tokens", "70",           // fixed minimum for Gemma 4 / dynamic resolution vision models per UI spec
   ];
 
+  // Continuous batching (fully configurable)
+  if (config.contBatching) {
+    args.push("--cont-batching");
+  } else {
+    args.push("--no-cont-batching");
+  }
+
+  // Flash Attention (fully configurable; takes explicit on/off/auto value)
+  args.push("--flash-attn", config.flashAttn);
+
+  // Full-size SWA cache (fully configurable)
+  if (config.swaFull) {
+    args.push("--swa-full");
+  } else {
+    args.push("--no-swa-full");
+  }
+
+  // Unified KV buffer (fully configurable)
+  if (config.kvUnified) {
+    args.push("--kv-unified");
+  } else {
+    args.push("--no-kv-unified");
+  }
+
+  // KV cache offload (fully configurable via positive/negative form)
+  if (config.noKvOffload) {
+    args.push("--no-kv-offload");
+  } else {
+    args.push("--kv-offload");
+  }
+
+  // KV shifting reuse (fully configurable)
+  args.push("--cache-reuse", String(config.cacheReuse ?? 0));
+
+  // Image token budget for dynamic resolution vision models
+  args.push("--image-max-tokens", String(config.imageMaxTokens ?? 560));
+
+  // Context shift (fully configurable)
+  if (config.contextShift) {
+    args.push("--context-shift");
+  } else {
+    args.push("--no-context-shift");
+  }
+
+  // Seed (fully configurable)
+  args.push("--seed", String(config.seedOverride ?? -1));
+
+  // mmproj (multimodal projector) – passed only when present
   if (config.mmProjPath !== undefined) {
     args.push("--mmproj", config.mmProjPath);
   }
+
+  // main GPU and tensor split for multi-GPU
   if (config.mainGpu !== undefined) {
     args.push("--main-gpu", String(config.mainGpu));
   }
   if (config.tensorSplit !== undefined) {
     args.push("--tensor-split", config.tensorSplit.join(","));
   }
+
+  // memory locking
   if (config.mlock) {
     args.push("--mlock");
   }
+
+  // mmap control
   if (config.noMmap) {
     args.push("--no-mmap");
   }
+
+  // NUMA
   if (config.numa !== undefined) {
     args.push("--numa", config.numa);
   }
+
+  // logging
   if (config.logLevel !== undefined) {
     args.push("--log-verbosity", String(config.logLevel));
   }
-  if (config.seedOverride !== undefined) {
-    args.push("--seed", String(config.seedOverride));
-  }
-  if (config.chatTemplate !== undefined) {
-    args.push("--chat-template", config.chatTemplate);
-  }
+
+  // chat template handling per UI spec
+  // The Jinja template editor in Load Preset Editor is pre-filled with the GGUF default.
+  // --chat-template-file (via temporary file) is used ONLY when the user has actually modified the default.
+  // Built-in --chat-template is never used; the file path approach guarantees full custom Jinja support.
   if (config.chatTemplateFile !== undefined) {
+    // temporary file path is already written by loadModel() and stored in config.chatTemplateFile
     args.push("--chat-template-file", config.chatTemplateFile);
   }
-  // NOTE: --cache-prompt is NOT passed here; prompt caching is handled
-  // at the /completion level (cache_prompt: true in request body).
-  // See §8 for the full cache_prompt architecture rationale.
 
   return args;
 }
@@ -562,7 +645,7 @@ function buildArgs(config: ModelLoadConfig, port: number): readonly string[] {
 
 **stderr / stdout pipe:** `proc.stderr` (a `ReadableStream<Uint8Array>`) is consumed in a `for await` loop. Each line is parsed: if it matches the llama-server JSON log format, it is decoded and re-broadcast; otherwise it is broadcast as a raw `server`-level log frame.
 
-**Unload:** Sends `SIGTERM` to the child process, waits up to 5 seconds for clean exit, then sends `SIGKILL`. After the process exits, `activePort`, `proc`, and `currentConfig` are all set to `null`.
+**Unload:** Sends `SIGTERM` to the child process, waits up to 5 seconds for clean exit, then sends `SIGKILL`. After the process exits, `activePort`, `proc`, and `currentConfig` are all set to `null`. Any temporary Jinja template file created for `--chat-template-file` is automatically cleaned up.
 
 **Model switch (mid-conversation):** The `switchModel()` exported function:
 1. Calls `unloadModel()` and awaits it.
@@ -571,14 +654,15 @@ function buildArgs(config: ModelLoadConfig, port: number): readonly string[] {
 
 The frontend receives `WsServerStatusFrame` events at each state transition.
 
-#### `ModelLoadConfig` type
+#### `ModelLoadConfig` type (updated for full flag coverage)
 
 ```typescript
 // src/shared/types.ts
 
 /**
  * All parameters needed to launch llama-server for a single model.
- * Fields map directly to documented llama-server CLI flags.
+ * Every documented llama-server CLI flag (except the three fixed exceptions)
+ * is exposed here and is fully configurable via the Load Preset Editor UI.
  */
 export interface ModelLoadConfig {
   /** Absolute path to the primary .gguf model file. */
@@ -593,19 +677,33 @@ export interface ModelLoadConfig {
   ropeScaling: "none" | "linear" | "yarn";
   ropeFreqBase: number;
   ropeFreqScale: number;
-  kvCacheTypeK: "f16" | "f32" | "q8_0" | "q4_0";
-  kvCacheTypeV: "f16" | "f32" | "q8_0" | "q4_0";
+  kvCacheTypeK: "f16" | "f32" | "bf16" | "q8_0" | "q4_0" | "q4_1" | "iq4_nl" | "q5_0" | "q5_1";
+  kvCacheTypeV: "f16" | "f32" | "bf16" | "q8_0" | "q4_0" | "q4_1" | "iq4_nl" | "q5_0" | "q5_1";
   mlock: boolean;
   noMmap: boolean;
+  contBatching: boolean;           // fully configurable
+  flashAttn: "on" | "off" | "auto"; // fully configurable
+  swaFull: boolean;                // fully configurable
+  kvUnified: boolean;              // fully configurable
+  noKvOffload: boolean;            // fully configurable (controls --kv-offload / --no-kv-offload)
+  cacheReuse: number;              // fully configurable
+  imageMaxTokens: number;          // fully configurable VIR budget in Load Preset Editor
+  contextShift: boolean;           // fully configurable
   mainGpu?: number;
   tensorSplit?: number[];
   numa?: "distribute" | "isolate" | "numactl";
   logLevel?: number;
   seedOverride?: number;
-  chatTemplate?: string;
+  /** Only present when user has modified the GGUF default in the Jinja editor. */
   chatTemplateFile?: string;
 }
 ```
+
+**Temporary file handling for custom Jinja templates** (performed inside `loadModel` before calling `buildArgs`):
+- If `config.chatTemplateFile` (i.e., user-modified override) is supplied, a temporary file is written to the OS temp directory containing the exact Jinja string from the preset.
+- The path to this temp file is passed via `--chat-template-file`.
+- The temp file is automatically cleaned up on unload or process exit.
+- No `--chat-template` (string) flag is ever used; the file-based approach is used exclusively for overrides to satisfy the UI editor contract.
 
 ---
 
@@ -667,12 +765,12 @@ export interface GgufDisplayMetadata {
   feedForwardLength: number | undefined;
   /** Quantisation type string derived from `general.file_type` */
   quantType: string | undefined;
-  /** Whether this model has a vision encoder — from `clip.has_vision_encoder` */
+  /** Whether this model has a vision encoder — from `clip.has_vision_encoder` (in companion MMPROJ GGUF header) */
   hasVisionEncoder: boolean;
-  /** Whether this model has an audio encoder — from `clip.has_audio_encoder` */
+  /** Whether this model has an audio encoder — from `clip.has_audio_encoder` (in companion MMPROJ GGUF header) */
   hasAudioEncoder: boolean;
-  /** Default temperature from GGUF sampling metadata — from `general.sampling.temperature` if present */
-  defaultTemperature: number | undefined;
+  /** Default temp from GGUF sampling metadata — from `general.sampling.temp` if present */
+  defaultTemp: number | undefined;
   /** Default top-k — from `general.sampling.top_k` if present */
   defaultTopK: number | undefined;
   /** Default top-p — from `general.sampling.top_p` if present */
@@ -692,11 +790,9 @@ export interface GgufDisplayMetadata {
 
 The key pattern `{arch}.context_length` is resolved by reading `general.architecture` first, then composing the key. For example, if `general.architecture` is `"llama"`, then the context length key is `"llama.context_length"`.
 
-The `clip.has_vision_encoder` and `clip.has_audio_encoder` keys are read to determine multimodal capabilities. These drive the model switching guard (§19).
+The `clip.has_vision_encoder` and `clip.has_audio_encoder` keys are read (FROM THE COMPANION MMPROJ GGUF TO A MAIN LLM GGUF, WHEN PRESENT) to determine multimodal capabilities. These drive the model switching guard (§19).
 
 All GGUF parsing is done server-side only. The client receives the already-parsed `GgufDisplayMetadata` in API responses. Parsing is done lazily: when the scanner first finds a model, it enqueues the file for parsing. Parsed results are cached in the SQLite model cache table keyed by `(absolutePath, mtime)`.
-
-Here's the full section rewritten cleanly:
 
 ---
 
@@ -773,9 +869,9 @@ export function renderPrompt(
 **Template source priority (highest to lowest):**
 1. User manual override stored in the active load preset (`loadPreset.chatTemplateOverride`).
 2. `tokenizer.chat_template` value read from GGUF header at scan time.
-3. llama-server's built-in template (used when `--chat-template` is not passed and GGUF has no template).
+3. llama-server's built-in template for the model type (if GGUF has no template embedded at all).
 
-When a user override is active and the model is being loaded, the override is passed to llama-server via `--chat-template` flag if it is a named built-in (e.g. `chatml`), or via a temp file written to the OS temp directory and passed via `--chat-template-file` if it is a custom Jinja string.
+When a user override is active and the model is being loaded, the override is passed to llama-server via a temp file written to the OS temp directory and passed via `--chat-template-file` as a custom Jinja string.
 
 **Reasoning trace stripping for multi-turn history:** For models with thinking enabled, the thinking block content must be stripped from assistant messages when those messages are re-injected into subsequent prompts (because the model was not trained to see raw thoughts in history outside of specific tool-call scenarios). The engine's `prepareHistoryForRender()` function handles this per-model based on the active `ThinkingTagConfig`.
 
@@ -838,7 +934,7 @@ This module orchestrates the complete request-response cycle for a chat turn.
         prompt: <rendered string>,
         stream: true,
         cache_prompt: true,
-        temperature: inferencePreset.temperature,
+        temp: inferencePreset.temp,
         top_k: inferencePreset.topK,
         top_p: inferencePreset.topP,
         min_p: inferencePreset.minP,
@@ -901,7 +997,7 @@ The Bun backend receives the uploaded files and stores them on disk under `{HOME
 | Category | MIME types | Handling |
 |---|---|---|
 | Images | `image/jpeg`, `image/png`, `image/gif`, `image/webp` | Passed as local file URL `image_url` parts referencing stored `.llamaforge` attachments; VIR is governed by the active model load preset via `--image-max-tokens` |
-| Audio | `audio/wav`, `audio/mp3`, `audio/ogg`, `audio/flac`, `audio/webm` | Passed as local file URL `image_url` parts referencing stored `.llamaforge` attachments (requires `clip.has_audio_encoder: true`) |
+| Audio | `audio/wav`, `audio/mp3`, `audio/ogg`, `audio/flac`, `audio/webm` | Passed as local file URL `image_url` parts referencing stored `.llamaforge` attachments (requires `clip.has_audio_encoder: true` in companion MMPROJ GGUF header) |
 | Plain text | `text/plain` | Content read and injected as text block in the user message |
 | Markdown | `text/markdown` | Same as plain text |
 | PDF | `application/pdf` | Extracted text using `pdfjs-dist` (pure-TypeScript PDF parser); injected as text block. Text-extraction path is fully documented in `src/server/multimodal.ts`. |
@@ -1075,6 +1171,7 @@ The app shell also includes:
 - A dismissible error banner for critical application errors with an optional corrective action button.
 - Toast-style notifications in the bottom-right corner for transient user feedback.
 - A developer console toggle accessible from the left nav and via the hotkey `Ctrl+` ` (or `Cmd+`` on Mac).
+- A context fullness indicator for loaded models (e.g. 534 / 16384)
 
 ---
 
@@ -1266,7 +1363,7 @@ export interface InferencePreset {
   /** If set, this preset is the auto-generated default for the given model path. */
   sourceModelPath?: string;
   isDefault: boolean;
-  temperature: number;
+  temp: number;
   topK: number;
   topP: number;
   minP: number;
@@ -1316,7 +1413,7 @@ When a model is loaded for the first time (no existing presets for its path):
    - `thinkingTagOverride` = auto-detected based on architecture
    - All other fields = safe defaults
 3. An `InferencePreset` named `"Default (from GGUF)"` is created with:
-   - `temperature` = `metadata.defaultTemperature ?? 0.8`
+   - `temp` = `metadata.defaultTemp ?? 0.8`
    - `topK` = `metadata.defaultTopK ?? 40`
    - `topP` = `metadata.defaultTopP ?? 0.95`
    - `minP` = `metadata.defaultMinP ?? 0.05`
@@ -1332,13 +1429,13 @@ Each preset type has a dedicated editor component in the right panel.
 **Load Preset Editor:**
 - Accordion sections: Core (context, GPU layers), Batching, Memory (mlock, no-mmap), RoPE, KV Cache, Advanced (NUMA, main GPU, tensor split).
 - Binary path fields at top: llama-server binary path, mmproj path (auto-detected or manual).
-- Jinja template override: CodeMirror editor (auto mode based on detected template, markdown-like for Jinja), with "Reset to GGUF default" and "Reset to built-in default" buttons.
+- Jinja template override: CodeMirror editor (auto mode based on detected template, markdown-like for Jinja), with "Reset to GGUF default" button. This editor by default should be filled in WITH the GGUF default for the per-model preset, initially, and the contents should be passed with `--chat-template-file` via temp file at model load time ONLY IF the user actually modifies it from the default state.
 - VIR budget: Select the model-wide image token budget for dynamic image resolution, which is mapped to `--image-min-tokens 70` and `--image-max-tokens <value>` at model load time.
 - Thinking tag override: Two text inputs for open/close tag strings, one text input for enable token, plus a "Detect from architecture" button.
 - Preset name, save, duplicate, delete actions.
 
 **Inference Preset Editor:**
-- Sections: Sampling (temp, top-k, top-p, min-p, dynamic temperature), Repetition (repeat penalty, repeat-last-n, TFS-Z, typical-p, presence/frequency penalty), Mirostat, Generation Limits (max tokens, stop strings), Tools (see §13), Structured Output.
+- Sections: Sampling (temp, top-k, top-p, min-p, dynamic temp), Repetition (repeat penalty, repeat-last-n, TFS-Z, typical-p, presence/frequency penalty), Mirostat, Generation Limits (max tokens, stop strings), Tools (see §13), Structured Output.
 - All numeric fields are sliders with adjacent numeric inputs for precision.
 - Switching inference presets while a model is loaded: the new preset is applied immediately to all subsequent requests; no restart required.
 
@@ -1419,6 +1516,7 @@ The chat input area shows live generation statistics when available:
 - `Context: <used> / <contextSize>` token usage summary.
 - `Predicted: <N> tokens` prediction estimate for the current response.
 - `Tokens Cached: <N>` when the model reused prompt tokens from the cache.
+- `Tokens Per Second: <N>` displaying the TPS under each assistant response.
 - A red `Context Window Exceeded` warning appears if the model stops due to context limit.
 
 ### Attachment previews
@@ -1492,7 +1590,7 @@ If no model is currently loaded, autonaming is skipped silently and navigation p
 
 Autonaming can be disabled globally in Settings. When disabled, the "Running Autonaming…" step never occurs.
 
-The inference preset for autonaming is hardcoded: temperature 0.3, top-k 10, max_tokens 20, no stop strings override. This ensures deterministic, short names.
+The inference preset for autonaming is hardcoded: temp 0.3, top-k 10, max_tokens 20, no stop strings override. This ensures deterministic, short names.
 
 ---
 
@@ -1851,7 +1949,7 @@ export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const; // updated per release
 **Tests (`tests/server/modelScanner.test.ts`):**
 - Uses a real temporary directory tree created by the test.
 - Verifies: sole MMPROJ folder yields no models; primary + MMPROJ in same folder yields one model with `mmProjPath` set; multiple GGUFs in one `MODELNAME` folder yield one entry per GGUF; publisher/model folder structure is correctly parsed.
-- `ggufReader.test.ts`: given a small real GGUF file (included in `tests/fixtures/`), verify all metadata keys parse correctly and the `clip.has_vision_encoder` boolean is correctly read.
+- `ggufReader.test.ts`: given a small real GGUF file (included in `tests/fixtures/`), verify all metadata keys parse correctly and the `clip.has_vision_encoder` and `clip.has_audio_encoder` booleans are correctly read from conpanion MMPROJ GGUF.
 
 ### Phase 3 — llama-server Lifecycle & Backend API
 
@@ -1909,7 +2007,7 @@ export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const; // updated per release
 - Full CRUD coverage for all entities using real in-memory SQLite.
 - Branch: verify the branched chat contains the correct subset of messages and `parent_id` is set.
 - Export/import round-trip: export a chat to JSON, import it, verify all messages and attachments are identical.
-- Default preset initialisation: given GGUF metadata with `defaultTemperature: 0.7`, verify the created `InferencePreset` has `temperature: 0.7`.
+- Default preset initialisation: given GGUF metadata with `defaultTemp: 0.7`, verify the created `InferencePreset` has `temp: 0.7`.
 - Inference preset switch without model reload: verify the new preset ID is applied to the next request without any llama-server restart.
 
 ### Phase 7 — Multimodal Upload & Tool Calling
@@ -1964,7 +2062,7 @@ export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const; // updated per release
 
 **Tests (`tests/client/presetEditors.test.ts`):**
 - `happy-dom`: render `InferencePresetEditor` with a fixture preset, verify all sliders render with correct initial values.
-- Verify that changing the temperature slider triggers a debounced `PUT /api/presets/inference/:id` call (using a `fetch` mock in test context only).
+- Verify that changing the temp slider triggers a debounced `PUT /api/presets/inference/:id` call (using a `fetch` mock in test context only).
 - Verify the "Reset to GGUF default" button in `LoadPresetEditor` resets the Jinja template to the fixture metadata value.
 
 ### Phase 10 — React SPA: Chat View, Streaming, Message Actions
@@ -2011,7 +2109,7 @@ All E2E tests require `TEST_LLAMA_SERVER_BIN` and a small real GGUF (`TEST_GGUF_
 - **Full conversation cycle:** Start server → load model → send 3 messages → verify responses arrive → verify `tokens_cached` > 0 on message 3 → unload model.
 - **Model switch mid-chat:** Load model A → send 1 message → switch to model B → send 1 message → verify both messages present in DB with correct model association.
 - **System prompt switch:** Load model → set system prompt preset A → send message → switch to preset B → send message → verify prompt B was rendered in second request (inspect stored rawContent).
-- **Inference preset switch:** Load model → apply high-temperature preset → regenerate → apply low-temperature preset → regenerate again → verify no server restarts occurred (PID check).
+- **Inference preset switch:** Load model → apply high-temp preset → regenerate → apply low-temp preset → regenerate again → verify no server restarts occurred (PID check).
 - **Branch:** Create chat, 4 messages → branch at message 2 → verify branch has 2 messages and `parent_id`.
 - **Edit + auto-regen:** Edit user message 2 → verify messages 3+ are deleted → verify assistant response auto-generated.
 - **Continue:** Generate short response with low `maxTokens` → continue → verify total response length in DB is greater than original.

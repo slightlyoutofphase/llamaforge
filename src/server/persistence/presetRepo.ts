@@ -44,7 +44,7 @@ export async function getLoadPresets(): Promise<LoadPreset[]> {
   return rows.map((r) => {
     const parsed = safeParse<{ config: LoadPreset["config"]; chatTemplateOverride?: string }>(
       r.config_json,
-      { config: {} as LoadPreset["config"], chatTemplateOverride: undefined },
+      { config: {} as LoadPreset["config"] } as any,
     );
     return {
       id: r.id,
@@ -172,7 +172,7 @@ export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>)
   if (!existing) return;
   const currentConfig = safeParse<{ config: LoadPreset["config"]; chatTemplateOverride?: string }>(
     existing.config_json,
-    { config: {} as LoadPreset["config"], chatTemplateOverride: undefined },
+    { config: {} as LoadPreset["config"] } as any,
   );
 
   const newConfigJson = JSON.stringify({
@@ -374,9 +374,9 @@ export async function ensureModelDefaultPresets(
           contextSize: m.metadata.contextLength || 4096,
           contextShift: true,
           gpuLayers: -1,
-          threads: 4,
-          batchSize: 512,
-          microBatchSize: 128,
+          threads: -1,
+          batchSize: 2048,
+          microBatchSize: 512,
           ropeScaling: "none",
           ropeFreqBase: 0,
           ropeFreqScale: 0.0,
@@ -384,7 +384,12 @@ export async function ensureModelDefaultPresets(
           kvCacheTypeV: "f16",
           mlock: false,
           noMmap: false,
-          flashAttention: true,
+          contBatching: true,
+          flashAttn: "auto",
+          swaFull: false,
+          kvUnified: true,
+          noKvOffload: false,
+          cacheReuse: 0,
         },
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -406,7 +411,7 @@ export async function ensureModelDefaultPresets(
         minP: m.metadata.defaultMinP ?? 0.05,
         repeatPenalty: m.metadata.defaultRepeatPenalty ?? 1.1,
         repeatLastN: 64,
-        tfsZ: 1.0,
+
         typicalP: 1.0,
         presencePenalty: 0.0,
         frequencyPenalty: 0.0,

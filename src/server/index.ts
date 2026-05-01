@@ -9,7 +9,7 @@ import { serve } from "bun";
 import { getProc, loadModel } from "./llamaServer";
 import { logError, logInfo } from "./logger";
 import { scanModels } from "./modelScanner";
-import { initDb } from "./persistence/db";
+import { initDb, resetDb } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
 import { createRouter } from "./router";
 
@@ -90,6 +90,11 @@ async function main() {
         proc.kill(9); // Send SIGKILL immediately to ensure it dies before we exit
       }
     } catch (_e) {}
+    try {
+      resetDb();
+    } catch (e) {
+      logError("Failed to close database during shutdown:", e);
+    }
     server.stop();
     process.exit(0);
   };

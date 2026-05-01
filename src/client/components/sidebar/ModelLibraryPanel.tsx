@@ -52,14 +52,11 @@ export function ModelLibraryPanel() {
   const selectedModel = models.find((m) => m.primaryPath === selectedPath);
   const defaultLoadPreset = loadPresets?.find((p) => p.isDefault) || loadPresets?.[0];
 
-  const handleLoad = (p: { id: string; config: any; thinkingTagOverride?: any }) => {
+  const handleLoad = (p: { id: string; config: any }) => {
     if (!selectedModel || isGenerating) return;
 
     // Check for multimodal incompatibility
-    const hasVision =
-      !!p.config.mmProjPath ||
-      !!selectedModel.mmProjPath ||
-      !!selectedModel.metadata?.hasVisionEncoder;
+    const hasVision = !!selectedModel.metadata?.hasVisionEncoder;
     const hasAudio = !!selectedModel.metadata?.hasAudioEncoder;
 
     const visionMsgs = messages.filter((m) =>
@@ -83,7 +80,6 @@ export function ModelLibraryPanel() {
     loadModel({
       ...p.config,
       modelPath: selectedModel.primaryPath,
-      thinkingTagOverride: p.thinkingTagOverride,
       presetId: p.id,
     });
   };
@@ -196,7 +192,7 @@ export function ModelLibraryPanel() {
                                 : "Unknown Size"}
                             </span>
                           </div>
-                          {(model.mmProjPath || model.metadata?.hasVisionEncoder) && (
+                          {model.metadata?.hasVisionEncoder && (
                             <span className="bg-blue-500/10 text-blue-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-blue-500/20 uppercase tracking-wider max-w-full break-words">
                               Vision
                             </span>

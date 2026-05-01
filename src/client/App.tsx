@@ -42,6 +42,7 @@ export default function App() {
     clearError,
     notifications,
     removeNotification,
+    unloadModel,
   } = useAppStore();
   const { setRightPanelView, rightPanelView, toggleConsole } = useUiStore();
   const { data: settings } = useSettings();
@@ -177,6 +178,14 @@ export default function App() {
                 {serverStatus}
               </span>
             </span>
+            {serverStatus === "running" && (
+              <button
+                type="button"
+                onClick={() => unloadModel()}
+                className="rounded-xl border border-[var(--color-error)] text-[var(--color-error)] px-3 py-1 hover:bg-[var(--color-error)] hover:text-white transition-colors">
+                Unload Model
+              </button>
+            )}
             <button
               type="button"
               onClick={() => (isConnected ? disconnectWs() : connectWs())}

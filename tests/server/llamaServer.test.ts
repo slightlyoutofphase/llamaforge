@@ -23,6 +23,12 @@ describe("llamaServer", () => {
       kvCacheTypeV: "f16",
       mlock: true,
       noMmap: false,
+      contBatching: true,
+      flashAttn: "on",
+      swaFull: false,
+      noKvOffload: false,
+      cacheReuse: 0,
+      chatTemplateFile: "/tmp/custom.jinja",
     };
 
     const args = buildArgs(config, 12345);
@@ -33,13 +39,22 @@ describe("llamaServer", () => {
     expect(args).toContain("--port");
     expect(args[args.indexOf("--port") + 1]).toBe("12345");
 
-    expect(args).toContain("-ngl");
-    expect(args[args.indexOf("-ngl") + 1]).toBe("33");
+    expect(args).toContain("--n-gpu-layers");
+    expect(args[args.indexOf("--n-gpu-layers") + 1]).toBe("33");
 
     expect(args).toContain("--mlock");
     expect(args).not.toContain("--no-mmap");
     expect(args).toContain("--parallel");
     expect(args).toContain("--jinja");
+    expect(args).toContain("--cont-batching");
+    expect(args).toContain("--flash-attn");
+    expect(args[args.indexOf("--flash-attn") + 1]).toBe("on");
+
+    expect(args).toContain("--kv-offload");
+    expect(args).toContain("--cache-reuse");
+    expect(args[args.indexOf("--cache-reuse") + 1]).toBe("0");
+    expect(args).toContain("--chat-template-file");
+    expect(args[args.indexOf("--chat-template-file") + 1]).toBe("/tmp/custom.jinja");
   });
 
   it("adds optional arguments when provided", () => {
@@ -50,7 +65,6 @@ describe("llamaServer", () => {
       numa: "distribute",
       logLevel: 3,
       seedOverride: 42,
-      chatTemplate: "chatml",
     };
 
     const args = buildArgs(config as ModelLoadConfig, 8080);
@@ -69,9 +83,6 @@ describe("llamaServer", () => {
 
     expect(args).toContain("--seed");
     expect(args[args.indexOf("--seed") + 1]).toBe("42");
-
-    expect(args).toContain("--chat-template");
-    expect(args[args.indexOf("--chat-template") + 1]).toBe("chatml");
   });
 
   it("adds image token load flags when configured", () => {
@@ -89,7 +100,11 @@ describe("llamaServer", () => {
       kvCacheTypeV: "f16",
       mlock: false,
       noMmap: false,
-      flashAttention: false,
+      contBatching: false,
+      flashAttn: "off",
+      swaFull: false,
+      noKvOffload: true,
+      cacheReuse: 0,
       imageMaxTokens: 560,
     };
 

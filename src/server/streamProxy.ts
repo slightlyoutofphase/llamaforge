@@ -190,14 +190,32 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     }
   }
 
+  const { getMetadataForPath } = await import("./persistence/chatRepo");
+  const modelMeta = server.config?.modelPath
+    ? await getMetadataForPath(server.config.modelPath)
+    : null;
+  const thinkingConfig = detectThinkingConfig(
+    modelMeta?.architecture,
+    infPreset?.thinkingTagOverride,
+  );
+  const thinkingEnabled = infPreset?.thinkingEnabled ?? true;
+
   let rawMessages: ChatMessage[] = [];
-  if (sysPreset) {
+
+  let sysContent = sysPreset?.content || "";
+  if (thinkingEnabled && thinkingConfig.enableToken) {
+    sysContent = sysContent
+      ? `${sysContent}\n\n${thinkingConfig.enableToken}`
+      : thinkingConfig.enableToken;
+  }
+
+  if (sysContent) {
     rawMessages.push({
       id: "sys",
       chatId,
       role: "system",
-      content: sysPreset.content,
-      rawContent: sysPreset.content,
+      content: sysContent,
+      rawContent: sysContent,
       position: 0,
       createdAt: Date.now(),
     });
@@ -258,23 +276,11 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const promptTokensCount = await getTokens(rawMessages, server.port);
   // --- End Overflow Policy ---
 
-  const { getMetadataForPath } = await import("./persistence/chatRepo");
-  const modelMeta = server.config?.modelPath
-    ? await getMetadataForPath(server.config.modelPath)
-    : null;
-  const thinkingConfig = detectThinkingConfig(
-    modelMeta?.architecture,
-    infPreset?.thinkingTagOverride,
-  );
   const useTools = infPreset?.toolCallsEnabled && infPreset.tools && infPreset.tools.length > 0;
-  const _hasMedia = rawMessages.some((m) =>
-    m.attachments?.some((a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/")),
-  );
   // Always use /v1/chat/completions — llama-server is launched with --jinja
   // and handles chat template rendering natively. The old /completion fallback
   // used a broken "{{ messages }}" Jinja template that serialized the messages
   // array as raw JSON, producing garbage output.
-  const _useChatCompletions = true;
 
   const endpoint = `http://127.0.0.1:${server.port}/v1/chat/completions`;
   const requestBody: Record<string, unknown> = {
@@ -284,6 +290,25 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     top_k: infPreset?.topK ?? 40,
     top_p: infPreset?.topP ?? 0.95,
     min_p: infPreset?.minP ?? 0.05,
+    typical_p: infPreset?.typicalP ?? 1.0,
+
+    repeat_penalty: infPreset?.repeatPenalty ?? 1.1,
+    repeat_last_n: infPreset?.repeatLastN ?? 64,
+    presence_penalty: infPreset?.presencePenalty ?? 0.0,
+    frequency_penalty: infPreset?.frequencyPenalty ?? 0.0,
+    mirostat: infPreset?.mirostat ?? 0,
+    mirostat_tau: infPreset?.mirostatTau ?? 5.0,
+    mirostat_eta: infPreset?.mirostatEta ?? 0.1,
+    dynatemp_range: infPreset?.dynaTempRange ?? 0.0,
+    dynatemp_exponent: infPreset?.dynaTempExponent ?? 1.0,
+    dry_multiplier: infPreset?.dryMultiplier ?? 0.0,
+    dry_base: infPreset?.dryBase ?? 1.75,
+    dry_allowed_length: infPreset?.dryAllowedLength ?? 2,
+    dry_penalty_last_n: infPreset?.dryPenaltyLastN ?? -1,
+    dry_sequence_breakers: infPreset?.drySequenceBreakers ?? ["\n", ":", '"', "*"],
+    xtc_probability: infPreset?.xtcProbability ?? 0.0,
+    xtc_threshold: infPreset?.xtcThreshold ?? 0.1,
+    seed: infPreset?.seed !== undefined && infPreset.seed !== -1 ? infPreset.seed : undefined,
     n_predict: infPreset?.maxTokens ?? -1,
     stop: infPreset?.stopStrings ?? [],
   };

@@ -4,6 +4,8 @@
  */
 
 import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { LlamaServerStatus, ModelLoadConfig } from "@shared/types.js";
 import { type Subprocess, spawn } from "bun";
 import { findFreePort } from "./utils/network";
@@ -94,33 +96,48 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
     "--ctx-size",
     String(config.contextSize),
     ...(config.contextShift ? ["--context-shift"] : ["--no-context-shift"]),
-    "-ngl",
+    "--n-gpu-layers",
     String(config.gpuLayers),
     "--threads",
     String(config.threads),
+    ...(config.threadsBatch !== undefined ? ["--threads-batch", String(config.threadsBatch)] : []),
     "--batch-size",
     String(config.batchSize),
     "--ubatch-size",
     String(config.microBatchSize),
-    "--rope-scaling",
-    config.ropeScaling,
-    "--rope-freq-base",
-    String(config.ropeFreqBase),
-    "--rope-freq-scale",
-    String(config.ropeFreqScale),
+    ...(config.ropeScaling !== "none" ? ["--rope-scaling", config.ropeScaling] : []),
+    ...(config.ropeFreqBase > 0 ? ["--rope-freq-base", String(config.ropeFreqBase)] : []),
+    ...(config.ropeFreqScale > 0 ? ["--rope-freq-scale", String(config.ropeFreqScale)] : []),
     "--cache-type-k",
     config.kvCacheTypeK,
     "--cache-type-v",
     config.kvCacheTypeV,
     "--parallel",
     "1",
-    "--cont-batching",
     "--jinja",
   ];
 
-  if (config.flashAttention) {
-    args.push("--flash-attn", "on");
+  if (config.contBatching) {
+    args.push("--cont-batching");
+  } else {
+    args.push("--no-cont-batching");
   }
+
+  if (config.flashAttn) {
+    args.push("--flash-attn", config.flashAttn);
+  }
+
+  if (config.swaFull) {
+    args.push("--swa-full");
+  }
+
+  if (config.noKvOffload) {
+    args.push("--no-kv-offload");
+  } else {
+    args.push("--kv-offload");
+  }
+
+  args.push("--cache-reuse", String(config.cacheReuse ?? 0));
 
   if (config.mmProjPath) {
     args.push("--mmproj", config.mmProjPath);
@@ -146,9 +163,6 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
   if (config.seedOverride !== undefined) {
     args.push("--seed", String(config.seedOverride));
   }
-  if (config.chatTemplate) {
-    args.push("--chat-template", config.chatTemplate);
-  }
   if (config.chatTemplateFile) {
     args.push("--chat-template-file", config.chatTemplateFile);
   }
@@ -157,6 +171,14 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
     args.push("--image-min-tokens", "70");
     args.push("--image-max-tokens", String(config.imageMaxTokens));
   }
+
+  if (config.kvUnified !== undefined) {
+    args.push(config.kvUnified ? "--kv-unified" : "--no-kv-unified");
+  }
+
+  // Pass --media-path to allow local file URLs for multimodal requests
+  const APP_ROOT = path.join(os.homedir(), ".llamaforge");
+  args.push("--media-path", APP_ROOT);
 
   return args;
 }
@@ -217,9 +239,16 @@ export async function loadModel(
     }
 
     setStatus("loading");
-    currentConfig = config;
-
     const port = await findFreePort(minPort, maxPort);
+
+    // Temporary file handling for custom Jinja templates
+    if (config.chatTemplateFile !== undefined) {
+      const tempPath = path.join(os.tmpdir(), `llamaforge-chat-template-${Date.now()}.jinja`);
+      await fs.writeFile(tempPath, config.chatTemplateFile, "utf-8");
+      config = { ...config, chatTemplateFile: tempPath };
+    }
+
+    currentConfig = config;
     const args = buildArgs(config, port);
 
     proc = spawn({
@@ -259,7 +288,9 @@ async function waitForHealthCheck(port: number): Promise<boolean> {
       return false; // Process died, no need to keep polling
     }
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/health`);
+      const res = await fetch(`http://127.0.0.1:${port}/health`, {
+        signal: AbortSignal.timeout(1000),
+      });
       if (res.ok) {
         return true;
       }
@@ -378,6 +409,9 @@ export async function unloadModel(): Promise<void> {
       }
     }
   } finally {
+    if (currentConfig?.chatTemplateFile) {
+      fs.unlink(currentConfig.chatTemplateFile).catch(() => {});
+    }
     proc = null;
     activePort = null;
     currentConfig = null;

@@ -76,15 +76,24 @@ export function ModelSelector() {
           kvCacheTypeV: "f16",
           mlock: false,
           noMmap: false,
-          flashAttention: false,
+          contBatching: true,
+          flashAttn: "on",
+          swaFull: false,
+          kvUnified: true,
+          noKvOffload: false,
+          cacheReuse: 0,
         };
 
     // Always override the path to the selected model
     config.modelPath = model.primaryPath;
 
+    // Map template override
+    if (preset?.chatTemplateOverride) {
+      config.chatTemplateFile = preset.chatTemplateOverride;
+    }
+
     // Check for multimodal incompatibility
-    const hasVision =
-      !!config.mmProjPath || !!model.mmProjPath || !!model.metadata?.hasVisionEncoder;
+    const hasVision = !!model.metadata?.hasVisionEncoder;
     const hasAudio = !!model.metadata?.hasAudioEncoder;
 
     const visionMsgs = messages.filter((m) =>
@@ -224,8 +233,11 @@ export function ModelSelector() {
                             ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
                             : "Unknown Size"}
                         </span>
-                        {(model.metadata?.hasVisionEncoder || model.mmProjPath) && (
+                        {model.metadata?.hasVisionEncoder && (
                           <span className="text-blue-400 truncate max-w-full">VISION ENABLED</span>
+                        )}
+                        {model.metadata?.hasAudioEncoder && (
+                          <span className="text-purple-400 truncate max-w-full">AUDIO ENABLED</span>
                         )}
                       </div>
 

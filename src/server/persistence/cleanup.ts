@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { logError, logInfo } from "../logger";
+import { getActiveGenerationChatIds } from "../streamProxy";
 import { getDb } from "./db";
 
 /**
@@ -35,7 +36,6 @@ export async function cleanupOrphanedAttachments() {
     const referencedSet = new Set(referencedFiles);
 
     // M7 fix: skip cleanup for chats with active generations to prevent race conditions
-    const { getActiveGenerationChatIds } = await import("../streamProxy");
     const activeChatIds = getActiveGenerationChatIds();
     await Promise.all(
       chatDirs.map(async (chatDir) => {

@@ -3,7 +3,7 @@
  * Provides the main chat input bar, handling file uploads and text entry.
  */
 
-import { Image as ImageIcon, Paperclip, Plus, Send, X } from "lucide-react";
+import { Paperclip, Plus, Send, X } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
@@ -102,7 +102,11 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
               key={id}
               className="flex items-center gap-2 bg-[var(--color-bg)] border border-[var(--color-border)] px-2 py-1.5 rounded-lg text-sm group">
               {file.type.startsWith("image/") ? (
-                <ImageIcon size={14} className="text-blue-400" />
+                <img
+                  src={URL.createObjectURL(file)}
+                  alt={file.name}
+                  className="h-8 w-8 rounded object-cover"
+                />
               ) : (
                 <Paperclip size={14} />
               )}

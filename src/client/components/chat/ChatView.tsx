@@ -474,7 +474,7 @@ export function ChatView() {
           </span>
           {loadedModel && (
             <div className="flex gap-1">
-              {(loadedModel.mmProjPath || loadedModel.metadata?.hasVisionEncoder) && (
+              {loadedModel.metadata?.hasVisionEncoder && (
                 <div
                   className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"
                   title="Vision Capable"

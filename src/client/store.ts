@@ -154,6 +154,7 @@ let reconnectTimer: number | null = null;
 const pendingChatFrames = new Map<string, WsFrame[]>();
 // M6 fix: guard against duplicate sends from rapid clicks
 let sendInProgress = false;
+let loadingDefaultChatLock = false;
 
 function frameHasChatId(frame: WsFrame): frame is WsFrame & { chatId: string } {
   const chatIdValue = (frame as { chatId?: string }).chatId;
@@ -657,28 +658,34 @@ export const useAppStore = create<AppState>((set, get) => ({
           errorMessage: null,
         }));
       } else if (chatId === "default-chat") {
-        const createRes = await fetch("/api/chats", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: "New Chat" }),
-        });
-        if (createRes.ok) {
-          const chat = await createRes.json();
-          set({
-            currentChatId: chat.id,
-            messages: [],
-            currentChatMetadata: {
-              name: chat.name,
-              systemPresetId: chat.systemPresetId,
-              inferencePresetId: chat.inferencePresetId,
-            },
-            errorMessage: null,
+        if (loadingDefaultChatLock) return;
+        loadingDefaultChatLock = true;
+        try {
+          const createRes = await fetch("/api/chats", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: "New Chat" }),
           });
-        } else {
-          const errorBody = await createRes.text().catch(() => "");
-          set({
-            errorMessage: `Unable to create default chat: ${createRes.status}${errorBody ? `: ${errorBody}` : ""}`,
-          });
+          if (createRes.ok) {
+            const chat = await createRes.json();
+            set({
+              currentChatId: chat.id,
+              messages: [],
+              currentChatMetadata: {
+                name: chat.name,
+                systemPresetId: chat.systemPresetId,
+                inferencePresetId: chat.inferencePresetId,
+              },
+              errorMessage: null,
+            });
+          } else {
+            const errorBody = await createRes.text().catch(() => "");
+            set({
+              errorMessage: `Unable to create default chat: ${createRes.status}${errorBody ? `: ${errorBody}` : ""}`,
+            });
+          }
+        } finally {
+          loadingDefaultChatLock = false;
         }
       } else {
         get().setError(`Unable to load chat: ${res.statusText || res.status}`, "Retry", () =>

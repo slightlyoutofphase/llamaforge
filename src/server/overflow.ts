@@ -38,6 +38,7 @@ async function fetchTokenCount(text: string, port?: number): Promise<number> {
     const res = await fetch(`http://127.0.0.1:${port}/tokenize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(5000),
       body: JSON.stringify({ content: text }),
     });
     if (!res.ok) return Math.ceil(text.length / 3.5);

@@ -33,7 +33,7 @@ describe("optimizer", () => {
   it("suggests full offload for 8B model on 4090", () => {
     const config = optimizeLoadConfig(mockHardware, mockMeta);
     expect(config.gpuLayers).toBe(32);
-    expect(config.flashAttention).toBe(true);
+    expect(config.flashAttn).toBe("auto");
     expect(config.contextSize).toBe(8192);
   });
 

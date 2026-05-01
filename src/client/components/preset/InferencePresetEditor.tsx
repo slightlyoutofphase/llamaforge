@@ -74,7 +74,7 @@ export function InferencePresetEditor() {
       minP: 0.05,
       repeatPenalty: 1.1,
       repeatLastN: 64,
-      tfsZ: 1.0,
+
       typicalP: 1.0,
       presencePenalty: 0.0,
       frequencyPenalty: 0.0,
@@ -83,6 +83,13 @@ export function InferencePresetEditor() {
       mirostatEta: 0.1,
       dynaTempRange: 0.0,
       dynaTempExponent: 1.0,
+      dryMultiplier: 0.0,
+      dryBase: 1.75,
+      dryAllowedLength: 2,
+      dryPenaltyLastN: -1,
+      drySequenceBreakers: ["\n", ":", '"', "*"],
+      xtcProbability: 0.0,
+      xtcThreshold: 0.1,
       seed: -1,
       maxTokens: -1,
       stopStrings: [],
@@ -272,25 +279,6 @@ export function InferencePresetEditor() {
               className="w-full"
             />
           </div>
-
-          <div className="space-y-1">
-            <label htmlFor="tfsZRange" className="text-sm font-medium flex justify-between">
-              <span>TFS-Z</span>
-              <span className="text-[var(--color-text-muted)] font-mono">
-                {(localState.tfsZ ?? 1.0).toFixed(2)}
-              </span>
-            </label>
-            <input
-              id="tfsZRange"
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={localState.tfsZ ?? 1.0}
-              onChange={(e) => updateField("tfsZ", parseFloat(e.target.value))}
-              className="w-full"
-            />
-          </div>
         </section>
 
         <section className="space-y-4">
@@ -319,7 +307,25 @@ export function InferencePresetEditor() {
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-1 mt-2">
+            <label htmlFor="repeatLastNInput" className="text-sm font-medium flex justify-between">
+              <span>Repeat Last N Tokens</span>
+              <span className="text-[var(--color-text-muted)] font-mono">
+                {localState.repeatLastN ?? 64}
+              </span>
+            </label>
+            <input
+              id="repeatLastNInput"
+              type="number"
+              min="-1"
+              step="1"
+              value={localState.repeatLastN ?? 64}
+              onChange={(e) => updateField("repeatLastN", parseInt(e.target.value, 10))}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4 mt-4">
             <div className="space-y-1">
               <label
                 htmlFor="presencePenaltyRange"
@@ -358,6 +364,97 @@ export function InferencePresetEditor() {
                 value={localState.frequencyPenalty ?? 0}
                 onChange={(e) => updateField("frequencyPenalty", parseFloat(e.target.value))}
                 className="w-full"
+              />
+            </div>
+          </div>
+
+          <div className="pt-2 border-t border-[var(--color-border)] mt-4">
+            <h4 className="text-xs font-bold text-[var(--color-text-muted)] mb-2 uppercase">
+              DRY Penalty
+            </h4>
+
+            <div className="space-y-1">
+              <label htmlFor="dryMultiplier" className="text-sm font-medium flex justify-between">
+                <span>Multiplier</span>
+                <span className="text-[var(--color-text-muted)] font-mono">
+                  {(localState.dryMultiplier ?? 0.0).toFixed(1)}
+                </span>
+              </label>
+              <input
+                id="dryMultiplier"
+                type="range"
+                min="0"
+                max="2"
+                step="0.1"
+                value={localState.dryMultiplier ?? 0.0}
+                onChange={(e) => updateField("dryMultiplier", parseFloat(e.target.value))}
+                className="w-full"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 mt-2">
+              <div className="space-y-1">
+                <label htmlFor="dryBase" className="text-sm font-medium">
+                  Base
+                </label>
+                <input
+                  id="dryBase"
+                  type="number"
+                  step="0.05"
+                  value={localState.dryBase ?? 1.75}
+                  onChange={(e) => updateField("dryBase", parseFloat(e.target.value))}
+                  className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="dryAllowedLength" className="text-sm font-medium">
+                  Allowed Len
+                </label>
+                <input
+                  id="dryAllowedLength"
+                  type="number"
+                  step="1"
+                  value={localState.dryAllowedLength ?? 2}
+                  onChange={(e) => updateField("dryAllowedLength", parseInt(e.target.value, 10))}
+                  className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1 mt-2">
+              <label htmlFor="dryPenaltyLastN" className="text-sm font-medium">
+                Penalty Last N
+              </label>
+              <input
+                id="dryPenaltyLastN"
+                type="number"
+                step="1"
+                min="-1"
+                value={localState.dryPenaltyLastN ?? -1}
+                onChange={(e) => updateField("dryPenaltyLastN", parseInt(e.target.value, 10))}
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs"
+              />
+            </div>
+
+            <div className="space-y-1 mt-2">
+              <label htmlFor="drySequenceBreakers" className="text-sm font-medium">
+                Sequence Breakers (JSON array)
+              </label>
+              <input
+                id="drySequenceBreakers"
+                type="text"
+                value={JSON.stringify(localState.drySequenceBreakers ?? ["\n", ":", '"', "*"])}
+                onChange={(e) => {
+                  try {
+                    const parsed = JSON.parse(e.target.value);
+                    if (Array.isArray(parsed)) {
+                      updateField("drySequenceBreakers", parsed);
+                    }
+                  } catch {
+                    // Ignore parsing error while typing
+                  }
+                }}
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs font-mono"
               />
             </div>
           </div>
@@ -436,6 +533,48 @@ export function InferencePresetEditor() {
               />
             </div>
           </div>
+
+          <div className="pt-2 border-t border-[var(--color-border)] mt-4">
+            <h4 className="text-xs font-bold text-[var(--color-text-muted)] mb-2 uppercase">
+              XTC Sampler
+            </h4>
+            <div className="space-y-1">
+              <label htmlFor="xtcProbability" className="text-sm font-medium flex justify-between">
+                <span>Probability</span>
+                <span className="text-[var(--color-text-muted)] font-mono">
+                  {(localState.xtcProbability ?? 0.0).toFixed(2)}
+                </span>
+              </label>
+              <input
+                id="xtcProbability"
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={localState.xtcProbability ?? 0.0}
+                onChange={(e) => updateField("xtcProbability", parseFloat(e.target.value))}
+                className="w-full"
+              />
+            </div>
+            <div className="space-y-1 mt-2">
+              <label htmlFor="xtcThreshold" className="text-sm font-medium flex justify-between">
+                <span>Threshold</span>
+                <span className="text-[var(--color-text-muted)] font-mono">
+                  {(localState.xtcThreshold ?? 0.1).toFixed(2)}
+                </span>
+              </label>
+              <input
+                id="xtcThreshold"
+                type="range"
+                min="0"
+                max="0.5"
+                step="0.01"
+                value={localState.xtcThreshold ?? 0.1}
+                onChange={(e) => updateField("xtcThreshold", parseFloat(e.target.value))}
+                className="w-full"
+              />
+            </div>
+          </div>
         </section>
 
         <section className="space-y-4">
@@ -453,6 +592,42 @@ export function InferencePresetEditor() {
               min="-1"
               value={localState.maxTokens ?? -1}
               onChange={(e) => updateField("maxTokens", parseInt(e.target.value, 10))}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md outline-none focus:border-[var(--color-accent)]"
+            />
+          </div>
+
+          <div className="space-y-2 mt-4">
+            <label htmlFor="seedInput" className="text-sm font-medium">
+              Seed (-1 = random)
+            </label>
+            <input
+              id="seedInput"
+              type="number"
+              value={localState.seed ?? -1}
+              onChange={(e) => updateField("seed", parseInt(e.target.value, 10))}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md outline-none focus:border-[var(--color-accent)]"
+            />
+          </div>
+
+          <div className="space-y-2 mt-4">
+            <label htmlFor="stopStringsInput" className="text-sm font-medium">
+              Stop Strings (comma-separated)
+            </label>
+            <input
+              id="stopStringsInput"
+              type="text"
+              value={(localState.stopStrings || []).join(", ")}
+              onChange={(e) =>
+                updateField(
+                  "stopStrings",
+                  e.target.value
+                    ? e.target.value
+                        .split(",")
+                        .map((s) => s.trim())
+                        .filter(Boolean)
+                    : [],
+                )
+              }
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md outline-none focus:border-[var(--color-accent)]"
             />
           </div>
@@ -544,77 +719,86 @@ export function InferencePresetEditor() {
               className="accent-[var(--color-accent)]"
             />
           </h3>
-
-          <div className="pt-1 pb-2 space-y-2">
-            <div className="text-xs font-bold text-[var(--color-text-muted)] tracking-wider">
-              Thinking Tag Overrides
+          <div className="grid grid-cols-2 gap-2 text-xs mt-2">
+            <div>
+              <label
+                htmlFor="thinkingOpenTag"
+                className="block mb-1 text-[var(--color-text-muted)]">
+                Open Tag
+              </label>
+              <input
+                id="thinkingOpenTag"
+                type="text"
+                value={localState.thinkingTagOverride?.openTag || ""}
+                disabled={localState.isDefault}
+                onChange={(e) =>
+                  updateField("thinkingTagOverride", {
+                    openTag: e.target.value,
+                    closeTag: localState.thinkingTagOverride?.closeTag || "</think>",
+                    enableToken: localState.thinkingTagOverride?.enableToken,
+                  })
+                }
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
+                placeholder="<think>"
+              />
             </div>
-            <div className="grid grid-cols-2 gap-2 text-xs">
-              <div>
-                <label
-                  htmlFor="thinkingOpenTagInput"
-                  className="block mb-1 text-[var(--color-text-muted)]">
-                  Open Tag
-                </label>
-                <input
-                  id="thinkingOpenTagInput"
-                  type="text"
-                  value={localState.thinkingTagOverride?.openTag || ""}
-                  disabled={localState.isDefault}
-                  onChange={(e) =>
-                    updateField("thinkingTagOverride", {
-                      openTag: e.target.value,
-                      closeTag: localState.thinkingTagOverride?.closeTag || "</think>",
-                      enableToken: localState.thinkingTagOverride?.enableToken,
-                    })
-                  }
-                  className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
-                  placeholder="<think>"
-                />
-              </div>
-              <div>
-                <label
-                  htmlFor="thinkingCloseTagInput"
-                  className="block mb-1 text-[var(--color-text-muted)]">
-                  Close Tag
-                </label>
-                <input
-                  id="thinkingCloseTagInput"
-                  type="text"
-                  value={localState.thinkingTagOverride?.closeTag || ""}
-                  disabled={localState.isDefault}
-                  onChange={(e) =>
-                    updateField("thinkingTagOverride", {
-                      openTag: localState.thinkingTagOverride?.openTag || "<think>",
-                      closeTag: e.target.value,
-                      enableToken: localState.thinkingTagOverride?.enableToken,
-                    })
-                  }
-                  className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
-                  placeholder="</think>"
-                />
-              </div>
-              <div className="col-span-2">
-                <label
-                  htmlFor="thinkingEnableTokenInput"
-                  className="block mb-1 text-[var(--color-text-muted)]">
-                  Enable Token (Fallback injected to sys prompt)
-                </label>
-                <input
-                  id="thinkingEnableTokenInput"
-                  type="text"
-                  value={localState.thinkingTagOverride?.enableToken || ""}
-                  disabled={localState.isDefault}
-                  onChange={(e) =>
-                    updateField("thinkingTagOverride", {
-                      openTag: localState.thinkingTagOverride?.openTag || "<think>",
-                      closeTag: localState.thinkingTagOverride?.closeTag || "</think>",
-                      enableToken: e.target.value,
-                    })
-                  }
-                  className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
-                />
-              </div>
+            <div>
+              <label
+                htmlFor="thinkingCloseTag"
+                className="block mb-1 text-[var(--color-text-muted)]">
+                Close Tag
+              </label>
+              <input
+                id="thinkingCloseTag"
+                type="text"
+                value={localState.thinkingTagOverride?.closeTag || ""}
+                disabled={localState.isDefault}
+                onChange={(e) =>
+                  updateField("thinkingTagOverride", {
+                    openTag: localState.thinkingTagOverride?.openTag || "<think>",
+                    closeTag: e.target.value,
+                    enableToken: localState.thinkingTagOverride?.enableToken,
+                  })
+                }
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
+                placeholder="</think>"
+              />
+            </div>
+            <div className="col-span-2">
+              <label
+                htmlFor="thinkingEnableToken"
+                className="block mb-1 text-[var(--color-text-muted)]">
+                Enable Token (Fallback injected to sys prompt)
+              </label>
+              <input
+                id="thinkingEnableToken"
+                type="text"
+                value={localState.thinkingTagOverride?.enableToken || ""}
+                disabled={localState.isDefault}
+                onChange={(e) =>
+                  updateField("thinkingTagOverride", {
+                    openTag: localState.thinkingTagOverride?.openTag || "<think>",
+                    closeTag: localState.thinkingTagOverride?.closeTag || "</think>",
+                    enableToken: e.target.value,
+                  })
+                }
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
+              />
+            </div>
+            <div className="col-span-2 pt-1">
+              <button
+                type="button"
+                disabled={localState.isDefault}
+                onClick={() => {
+                  updateField("thinkingTagOverride", {
+                    openTag: "<|channel>thought\n",
+                    closeTag: "<channel|>",
+                    enableToken: "<|think|>",
+                  });
+                }}
+                className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-accent)] disabled:opacity-50 mt-1 block">
+                Load Gemma 4 Defaults
+              </button>
             </div>
           </div>
         </section>

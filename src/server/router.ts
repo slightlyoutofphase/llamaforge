@@ -170,7 +170,7 @@ export function createRouter(_settings: AppSettings) {
         if (
           !isPlainObject(body) ||
           typeof body.modelPath !== "string" ||
-          body.modelPath.length === 0
+          (body.modelPath as string).length === 0
         ) {
           return badRequest("server/load requires a valid modelPath string.");
         }
@@ -199,7 +199,7 @@ export function createRouter(_settings: AppSettings) {
         }
         try {
           const port = await loadModel(
-            body,
+            body as unknown as import("@shared/types.js").ModelLoadConfig,
             curSettings.llamaServerPath,
             curSettings.llamaPortRangeMin,
             curSettings.llamaPortRangeMax,
@@ -235,7 +235,7 @@ export function createRouter(_settings: AppSettings) {
         const { optimizeLoadConfig } = await import("./optimizer");
 
         const hw = await getHardwareInfo();
-        const metadata = await getMetadataForPath(body.modelPath);
+        const metadata = await getMetadataForPath(body.modelPath as string);
         if (!metadata) return new Response("Model metadata not found", { status: 404 });
 
         const optimized = optimizeLoadConfig(hw, metadata);
@@ -310,7 +310,7 @@ export function createRouter(_settings: AppSettings) {
             try {
               const body: any = await cloned.json();
               if (isPlainObject(body) && typeof body.content === "string") {
-                content = body.content;
+                content = body.content as string;
                 parsed = true;
               }
             } catch (_jsonErr) {
@@ -421,7 +421,7 @@ export function createRouter(_settings: AppSettings) {
             if (!isPlainObject(body) || typeof body.messageId !== "string" || !body.messageId) {
               return badRequest("Branch creation requires a valid messageId.");
             }
-            const newId = await chatRepo.createBranch(id, body.messageId);
+            const newId = await chatRepo.createBranch(id, body.messageId as string);
             return jsonResponse({ id: newId });
           }
           if (action === "export") {
@@ -436,7 +436,7 @@ export function createRouter(_settings: AppSettings) {
 
             if (msgs.length > 0) {
               const lastMsg = msgs[msgs.length - 1];
-              if (lastMsg.role === "assistant" || lastMsg.role === "tool") {
+              if (lastMsg && (lastMsg.role === "assistant" || lastMsg.role === "tool")) {
                 // Find the last user message to keep
                 let lastUserIdx = msgs.length - 1;
                 while (lastUserIdx >= 0 && msgs[lastUserIdx].role !== "user") {
@@ -484,7 +484,7 @@ export function createRouter(_settings: AppSettings) {
             // We need to branch from the user message BEFORE the assistant message we are regenerating
             const chatForRegen = await chatRepo.getChat(id);
             const msgs = chatForRegen?.messages || [];
-            let branchPoint = body.messageId;
+            let branchPoint = body.messageId as string;
             const msgIdx = msgs.findIndex((m) => m.id === branchPoint);
 
             if (
@@ -521,16 +521,21 @@ export function createRouter(_settings: AppSettings) {
               typeof body.messageId !== "string" ||
               !body.messageId ||
               typeof body.newContent !== "string" ||
-              body.newContent.length === 0
+              (body.newContent as string).length === 0
             ) {
               return badRequest("branch-and-edit requires a valid messageId and newContent.");
             }
-            const newId = await chatRepo.createBranch(id, body.messageId);
+            const newId = await chatRepo.createBranch(id, body.messageId as string);
             const newChat = await chatRepo.getChat(newId);
             const newMsg = newChat?.messages?.[newChat.messages.length - 1];
 
             if (newMsg) {
-              await chatRepo.updateMessage(newMsg.id, body.newContent, body.newContent, undefined);
+              await chatRepo.updateMessage(
+                newMsg.id,
+                body.newContent as string,
+                body.newContent as string,
+                undefined,
+              );
             }
 
             const { proxyCompletion } = await import("./streamProxy");
@@ -558,7 +563,7 @@ export function createRouter(_settings: AppSettings) {
             // any immediately following tool messages in the branch to maintain state integrity.
             const chatForBranch = await chatRepo.getChat(id);
             const msgs = chatForBranch?.messages || [];
-            let branchPoint = body.messageId;
+            let branchPoint = body.messageId as string;
             const msgIdx = msgs.findIndex((m) => m.id === branchPoint);
 
             if (msgIdx >= 0 && msgs[msgIdx].role === "assistant") {
@@ -604,7 +609,7 @@ export function createRouter(_settings: AppSettings) {
           return badRequest("chat import requires a valid content string.");
         }
         try {
-          const newId = await chatRepo.importChat(body.content);
+          const newId = await chatRepo.importChat(body.content as string);
           return jsonResponse({ id: newId });
         } catch (err: unknown) {
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -641,12 +646,25 @@ export function createRouter(_settings: AppSettings) {
           } catch (_err: unknown) {
             return badRequest("Invalid JSON payload for preset creation.");
           }
-          if (!isPlainObject(body) || typeof body.name !== "string" || body.name.length === 0) {
+          if (
+            !isPlainObject(body) ||
+            typeof body.name !== "string" ||
+            (body.name as string).length === 0
+          ) {
             return badRequest("Preset creation requires a name.");
           }
-          if (type === "load") await presetRepo.createLoadPreset(body);
-          if (type === "inference") await presetRepo.createInferencePreset(body);
-          if (type === "system") await presetRepo.createSystemPreset(body);
+          if (type === "load")
+            await presetRepo.createLoadPreset(
+              body as unknown as import("@shared/types.js").LoadPreset,
+            );
+          if (type === "inference")
+            await presetRepo.createInferencePreset(
+              body as unknown as import("@shared/types.js").InferencePreset,
+            );
+          if (type === "system")
+            await presetRepo.createSystemPreset(
+              body as unknown as import("@shared/types.js").SystemPromptPreset,
+            );
           return jsonResponse({ success: true });
         }
 

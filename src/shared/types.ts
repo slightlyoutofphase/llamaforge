@@ -25,6 +25,8 @@ export interface ModelLoadConfig {
   batchSize: number;
   /** Logical batch size. */
   microBatchSize: number;
+  /** Number of threads to use during batch and prompt processing. Defaults to threads. */
+  threadsBatch?: number;
   /** RoPE scaling strategy for extended context. */
   ropeScaling: "none" | "linear" | "yarn";
   /** Base frequency for RoPE. */
@@ -32,15 +34,25 @@ export interface ModelLoadConfig {
   /** Frequency scale for RoPE. */
   ropeFreqScale: number;
   /** Quantization format for Key cache. */
-  kvCacheTypeK: "f16" | "f32" | "q8_0" | "q4_0";
+  kvCacheTypeK: "f16" | "f32" | "bf16" | "q8_0" | "q4_0" | "q4_1" | "iq4_nl" | "q5_0" | "q5_1";
   /** Quantization format for Value cache. */
-  kvCacheTypeV: "f16" | "f32" | "q8_0" | "q4_0";
+  kvCacheTypeV: "f16" | "f32" | "bf16" | "q8_0" | "q4_0" | "q4_1" | "iq4_nl" | "q5_0" | "q5_1";
+  /** Whether to use unified KV cache shared across sequences. */
+  kvUnified?: boolean;
   /** Enable memory locking to prevent swapping. */
   mlock: boolean;
   /** Disable memory mapping (mmap). */
   noMmap: boolean;
-  /** Enable Flash Attention if supported by backend. */
-  flashAttention: boolean;
+  /** Enable continuous batching. */
+  contBatching: boolean;
+  /** Flash Attention configuration. */
+  flashAttn: "on" | "off" | "auto";
+  /** Full-size SWA cache. */
+  swaFull: boolean;
+  /** Disable KV offload. */
+  noKvOffload: boolean;
+  /** Cache reuse. */
+  cacheReuse: number;
   /** ID of the main GPU to use. */
   mainGpu?: number;
   /** Tensor split ratios across multiple GPUs. */
@@ -51,14 +63,10 @@ export interface ModelLoadConfig {
   logLevel?: number;
   /** Fixed seed override for reproducibility. */
   seedOverride?: number;
-  /** Jinja2 chat template string. */
-  chatTemplate?: string;
   /** Path to a file containing a chat template. */
   chatTemplateFile?: string;
   /** Maximum number of image tokens for dynamic image resolution at model load time. */
   imageMaxTokens?: number;
-  /** Custom configuration for parsing thinking tags. */
-  thinkingTagOverride?: ThinkingTagConfig;
   /** ID of the preset used to generate this config. */
   presetId?: string;
 }
@@ -426,8 +434,7 @@ export interface InferencePreset {
   repeatPenalty: number;
   /** Number of tokens to use for repeat penalty history. */
   repeatLastN: number;
-  /** Typical frequency strength parameter. */
-  tfsZ: number;
+
   /** Typical p parameter for generation. */
   typicalP: number;
   /** Presence penalty for token selection. */
@@ -444,6 +451,20 @@ export interface InferencePreset {
   dynaTempRange: number;
   /** Exponent controlling dynamic temperature scaling. */
   dynaTempExponent: number;
+  /** DRY sampling multiplier. */
+  dryMultiplier?: number;
+  /** DRY sampling base value. */
+  dryBase?: number;
+  /** DRY sampling allowed length. */
+  dryAllowedLength?: number;
+  /** DRY sampling penalty last N tokens. */
+  dryPenaltyLastN?: number;
+  /** DRY sampling sequence breakers. */
+  drySequenceBreakers?: string[];
+  /** XTC token removal probability. */
+  xtcProbability?: number;
+  /** XTC token removal probability threshold. */
+  xtcThreshold?: number;
   /** Random seed for deterministic generation. */
   seed: number;
   /** Maximum token generation length. */

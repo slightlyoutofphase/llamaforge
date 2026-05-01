@@ -136,9 +136,10 @@ export function LoadPresetEditor() {
         contextSize: 4096,
         contextShift: false,
         gpuLayers: -1,
-        threads: 8,
-        batchSize: 512,
-        microBatchSize: 128,
+        threads: -1,
+        threadsBatch: -1,
+        batchSize: 2048,
+        microBatchSize: 512,
         ropeScaling: "none",
         ropeFreqBase: 0,
         ropeFreqScale: 0,
@@ -146,8 +147,15 @@ export function LoadPresetEditor() {
         kvCacheTypeV: "f16",
         mlock: false,
         noMmap: false,
-        flashAttention: true,
+        contBatching: true,
+        flashAttn: "auto",
+        swaFull: false,
+        kvUnified: true,
+        noKvOffload: false,
+        cacheReuse: 0,
         imageMaxTokens: 280,
+        logLevel: 3,
+        seedOverride: -1,
       },
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -347,15 +355,30 @@ export function LoadPresetEditor() {
           </div>
           <div className="space-y-1">
             <label htmlFor="threads" className="text-xs font-medium flex justify-between">
-              <span>Threads</span>
+              <span>Threads (-1 = auto)</span>
             </label>
             <input
               id="threads"
               type="number"
-              min="1"
+              min="-1"
               step="1"
-              value={config.threads ?? 4}
+              value={config.threads ?? -1}
               onChange={(e) => updateConfigField("threads", parseInt(e.target.value, 10))}
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor="threadsBatch" className="text-xs font-medium flex justify-between">
+              <span>Threads Batch (-1 = auto)</span>
+            </label>
+            <input
+              id="threadsBatch"
+              type="number"
+              min="-1"
+              step="1"
+              value={config.threadsBatch ?? config.threads ?? -1}
+              onChange={(e) => updateConfigField("threadsBatch", parseInt(e.target.value, 10))}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
             />
@@ -370,7 +393,7 @@ export function LoadPresetEditor() {
             <input
               id="batchSize"
               type="number"
-              value={config.batchSize ?? 512}
+              value={config.batchSize ?? 2048}
               onChange={(e) => updateConfigField("batchSize", parseInt(e.target.value, 10))}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
@@ -386,6 +409,16 @@ export function LoadPresetEditor() {
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
+            <label className="flex items-center gap-2 mt-2">
+              <input
+                type="checkbox"
+                checked={config.contBatching ?? true}
+                onChange={(e) => updateConfigField("contBatching", e.target.checked)}
+                disabled={isReadonly}
+                className="accent-[var(--color-accent)]"
+              />
+              <span className="font-medium">Continuous Batching</span>
+            </label>
           </div>
         </Accordion>
 
@@ -414,13 +447,62 @@ export function LoadPresetEditor() {
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
-                checked={!!config.flashAttention}
-                onChange={(e) => updateConfigField("flashAttention", e.target.checked)}
+                checked={config.kvUnified ?? true}
+                onChange={(e) => updateConfigField("kvUnified", e.target.checked)}
                 disabled={isReadonly}
                 className="accent-[var(--color-accent)]"
               />
-              <span className="font-medium">Flash Attention (if supported)</span>
+              <span className="font-medium">Unified KV Cache</span>
             </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={config.swaFull ?? false}
+                onChange={(e) => updateConfigField("swaFull", e.target.checked)}
+                disabled={isReadonly}
+                className="accent-[var(--color-accent)]"
+              />
+              <span className="font-medium">Full-size SWA</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={config.noKvOffload ?? false}
+                onChange={(e) => updateConfigField("noKvOffload", e.target.checked)}
+                disabled={isReadonly}
+                className="accent-[var(--color-accent)]"
+              />
+              <span className="font-medium">Disable KV Offload</span>
+            </label>
+
+            <label htmlFor="flashAttn" className="block font-medium mt-2">
+              Flash Attention
+            </label>
+            <select
+              id="flashAttn"
+              value={config.flashAttn ?? "on"}
+              onChange={(e) =>
+                updateConfigField("flashAttn", e.target.value as "on" | "off" | "auto")
+              }
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded">
+              <option value="on">on</option>
+              <option value="off">off</option>
+              <option value="auto">auto</option>
+            </select>
+
+            <label htmlFor="cacheReuse" className="block font-medium mt-2">
+              Cache Reuse (0 = default)
+            </label>
+            <input
+              id="cacheReuse"
+              type="number"
+              value={config.cacheReuse ?? 0}
+              onChange={(e) => updateConfigField("cacheReuse", parseInt(e.target.value, 10))}
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
+            />
+
             <div className="mt-2 text-xs border-t border-[var(--color-border)] pt-2 space-y-2">
               <label htmlFor="kvCacheK" className="block font-medium">
                 KV Cache Type (K)
@@ -431,15 +513,20 @@ export function LoadPresetEditor() {
                 onChange={(e) =>
                   updateConfigField(
                     "kvCacheTypeK",
-                    e.target.value as "f16" | "f32" | "q8_0" | "q4_0",
+                    e.target.value as ModelLoadConfig["kvCacheTypeK"],
                   )
                 }
                 disabled={isReadonly}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded">
                 <option value="f16">f16</option>
                 <option value="f32">f32</option>
+                <option value="bf16">bf16</option>
                 <option value="q8_0">q8_0</option>
+                <option value="q5_1">q5_1</option>
+                <option value="q5_0">q5_0</option>
+                <option value="q4_1">q4_1</option>
                 <option value="q4_0">q4_0</option>
+                <option value="iq4_nl">iq4_nl</option>
               </select>
               <label htmlFor="kvCacheV" className="block font-medium">
                 KV Cache Type (V)
@@ -450,15 +537,20 @@ export function LoadPresetEditor() {
                 onChange={(e) =>
                   updateConfigField(
                     "kvCacheTypeV",
-                    e.target.value as "f16" | "f32" | "q8_0" | "q4_0",
+                    e.target.value as ModelLoadConfig["kvCacheTypeV"],
                   )
                 }
                 disabled={isReadonly}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded">
                 <option value="f16">f16</option>
                 <option value="f32">f32</option>
+                <option value="bf16">bf16</option>
                 <option value="q8_0">q8_0</option>
+                <option value="q5_1">q5_1</option>
+                <option value="q5_0">q5_0</option>
+                <option value="q4_1">q4_1</option>
                 <option value="q4_0">q4_0</option>
+                <option value="iq4_nl">iq4_nl</option>
               </select>
             </div>
           </div>
@@ -564,6 +656,28 @@ export function LoadPresetEditor() {
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
               placeholder="e.g. 3,2"
+            />
+            <label htmlFor="logLevel" className="block font-medium mt-2">
+              Log Level
+            </label>
+            <input
+              id="logLevel"
+              type="number"
+              value={config.logLevel ?? 3}
+              onChange={(e) => updateConfigField("logLevel", parseInt(e.target.value, 10))}
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
+            />
+            <label htmlFor="seedOverride" className="block font-medium mt-2">
+              Seed Override (-1 = random)
+            </label>
+            <input
+              id="seedOverride"
+              type="number"
+              value={config.seedOverride ?? -1}
+              onChange={(e) => updateConfigField("seedOverride", parseInt(e.target.value, 10))}
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
           </div>
         </Accordion>

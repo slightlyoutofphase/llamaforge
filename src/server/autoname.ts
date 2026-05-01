@@ -59,6 +59,7 @@ Title:`;
     const res = await fetch(`http://127.0.0.1:${server.port}/completion`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(10000),
       body: JSON.stringify({
         prompt,
         n_predict: 15,

@@ -48,7 +48,7 @@ export async function loadSettings(): Promise<AppSettings> {
 
   try {
     const parsed = JSON.parse(row.settings_json);
-    _cachedSettings = { ...DEFAULT_SETTINGS, ...parsed };
+    _cachedSettings = { ...DEFAULT_SETTINGS, ...parsed } as AppSettings;
     return { ..._cachedSettings };
   } catch (_err) {
     _cachedSettings = { ...DEFAULT_SETTINGS };

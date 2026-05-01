@@ -146,16 +146,6 @@ export async function buildContentParts(
   metadata?: GgufDisplayMetadata,
 ): Promise<any[] | string> {
   // Multimodal guard
-  const hasImages = attachments.some((a) => a.mimeType.startsWith("image/"));
-  const hasAudio = attachments.some((a) => a.mimeType.startsWith("audio/"));
-
-  if (hasImages && metadata && !metadata.hasVisionEncoder) {
-    // We let the caller decide how to handle this, but for internal building we filter out what the model can't handle
-    // or we throw. The current streamProxy filters them.
-  }
-  if (hasAudio && metadata && !metadata.hasAudioEncoder) {
-    // Similarly, we let caller handle it, but buildContentParts skips what it can't handle.
-  }
 
   let finalString = "";
   const parts: any[] = [];

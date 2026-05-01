@@ -19,7 +19,7 @@ export function optimizeLoadConfig(
   const suggested: Partial<ModelLoadConfig> = {};
 
   const hasGpu = hardware.gpus.length > 0;
-  suggested.flashAttention = hasGpu;
+  suggested.flashAttn = hasGpu ? "auto" : "off";
 
   const totalVram = hardware.gpus.reduce((acc, g) => acc + Math.max(0, g.vramBytes), 0);
   const blockCount = Math.max(0, metadata.blockCount ?? 0);
@@ -60,9 +60,8 @@ export function optimizeLoadConfig(
   }
 
   const useGpuLoad = gpuLayers > 0;
-  const batchSize = useGpuLoad ? 512 : 128;
-  suggested.batchSize = batchSize;
-  suggested.microBatchSize = Math.min(Math.max(1, batchSize), batchSize);
+  suggested.batchSize = useGpuLoad ? 2048 : 512;
+  suggested.microBatchSize = useGpuLoad ? 512 : 128;
 
   suggested.mlock =
     metadata.fileSizeBytes > 0 && metadata.fileSizeBytes < hardware.totalRamBytes * 0.5;
