@@ -694,8 +694,8 @@ export async function exportChat(chatId: string, format: "json" | "markdown"): P
             let b64 = "";
             if (fp) {
               try {
-                const buf = await fs.readFile(fp);
-                b64 = buf.toString("base64");
+                const arrBuffer = await Bun.file(fp).arrayBuffer();
+                b64 = Buffer.from(arrBuffer).toString("base64");
               } catch (_e) {
                 logWarn("[chatRepo] Missing attachment file during export", {
                   filePath: att.file_path,
@@ -863,7 +863,7 @@ export async function importChat(jsonContent: string): Promise<string> {
   for (const fw of fileWrites) {
     try {
       await fs.mkdir(path.dirname(fw.filePath), { recursive: true });
-      await fs.writeFile(fw.filePath, Buffer.from(fw.base64Data, "base64"));
+      await Bun.write(fw.filePath, Buffer.from(fw.base64Data, "base64"));
       // File written successfully — now insert the DB record
       insertAttachment.run(
         fw.attId,

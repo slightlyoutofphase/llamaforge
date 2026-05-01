@@ -66,7 +66,7 @@ export async function processUpload(
   const safeName = Bun.randomUUIDv7() + ext;
   const filePath = path.join(appData, safeName);
 
-  await fs.writeFile(filePath, Buffer.from(buffer));
+  await Bun.write(filePath, buffer);
 
   const relPath = path
     .relative(path.join(os.homedir(), ".llamaforge"), filePath)
@@ -166,9 +166,9 @@ export async function buildContentParts(
       if (cached !== undefined) return cached;
       // M8 fix: check file size before extraction to prevent OOM
       try {
-        const fsStat = await fs.stat(absPath);
-        if (fsStat.size > MAX_PDF_EXTRACTION_BYTES) {
-          const sizeMsg = `[PDF text extraction skipped: file size (${(fsStat.size / (1024 * 1024)).toFixed(1)}MB) exceeds the ${MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)}MB extraction limit]`;
+        const fileSize = Bun.file(absPath).size;
+        if (fileSize > MAX_PDF_EXTRACTION_BYTES) {
+          const sizeMsg = `[PDF text extraction skipped: file size (${(fileSize / (1024 * 1024)).toFixed(1)}MB) exceeds the ${MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)}MB extraction limit]`;
           _pdfTextCache.set(absPath, sizeMsg);
           return sizeMsg;
         }
@@ -177,7 +177,7 @@ export async function buildContentParts(
       }
       try {
         const pdfjs = await import("pdfjs-dist");
-        const buffer = await fs.readFile(absPath);
+        const buffer = await Bun.file(absPath).arrayBuffer();
         const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise;
         let fullText = "";
         for (let i = 1; i <= doc.numPages; i++) {
@@ -202,7 +202,7 @@ export async function buildContentParts(
       const absPath = resolveStoredAttachmentPath(attachment.filePath);
       if (!absPath) return undefined;
       try {
-        return (await fs.readFile(absPath)).toString("utf-8");
+        return await Bun.file(absPath).text();
       } catch (e) {
         logWarn(`Failed reading attachment file: ${attachment.filePath}`, e);
       }
@@ -225,9 +225,7 @@ export async function buildContentParts(
           logWarn(`Invalid attachment path: ${a.filePath}`);
           continue;
         }
-        try {
-          await fs.access(absPath);
-        } catch {
+        if (!(await Bun.file(absPath).exists())) {
           logWarn(`Attachment file missing: ${absPath}`);
           continue;
         }

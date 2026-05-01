@@ -10,31 +10,37 @@ import { pathToFileURL } from "node:url";
 
 const APP_ROOT = path.join(os.homedir(), ".llamaforge");
 
-// Mock fs/promises
+// Mock fs/promises for any remaining directory operations
 mock.module("node:fs/promises", () => ({
   default: {
-    readFile: async (path: string) => {
-      if (path.includes("img.png")) return Buffer.from("abc");
-      if (path.includes("audio.wav")) return Buffer.from("def");
-      if (path.includes("pic.jpg")) return Buffer.from("ghi");
-      if (path.includes("text.txt")) return Buffer.from("Hello text file");
-      throw new Error(`File not found: ${path}`);
-    },
-    access: async () => {},
     mkdir: async () => {},
-    writeFile: async () => {},
-  },
-  access: async () => {},
-  readFile: async (path: string) => {
-    if (path.includes("img.png")) return Buffer.from("abc");
-    if (path.includes("audio.wav")) return Buffer.from("def");
-    if (path.includes("pic.jpg")) return Buffer.from("ghi");
-    if (path.includes("text.txt")) return Buffer.from("Hello text file");
-    throw new Error(`File not found: ${path}`);
   },
   mkdir: async () => {},
-  writeFile: async () => {},
 }));
+
+import { spyOn, afterAll } from "bun:test";
+
+const fileSpy = spyOn(Bun, "file").mockImplementation((path: string | URL) => {
+  const pathStr = path.toString();
+  return {
+    exists: async () => true,
+    size: 100,
+    text: async () => {
+      if (pathStr.includes("img.png")) return "abc";
+      if (pathStr.includes("audio.wav")) return "def";
+      if (pathStr.includes("pic.jpg")) return "ghi";
+      if (pathStr.includes("text.txt")) return "Hello text file";
+      throw new Error(`File not found: ${pathStr}`);
+    },
+    arrayBuffer: async () => {
+      if (pathStr.includes("img.png")) return Buffer.from("abc").buffer;
+      if (pathStr.includes("audio.wav")) return Buffer.from("def").buffer;
+      if (pathStr.includes("pic.jpg")) return Buffer.from("ghi").buffer;
+      if (pathStr.includes("text.txt")) return Buffer.from("Hello text file").buffer;
+      throw new Error(`File not found: ${pathStr}`);
+    },
+  } as any;
+});
 
 import { buildContentParts } from "../../src/server/multimodal";
 
@@ -179,5 +185,9 @@ describe("multimodal", () => {
     const parts = res as any[];
     expect(parts[0].type).toBe("image_url");
     expect(parts[0].resolution).toBeUndefined();
+  });
+
+  afterAll(() => {
+    fileSpy.mockRestore();
   });
 });

@@ -13,6 +13,14 @@ let _db: Database | null = null;
 let _dbPath: string | null = null;
 let _vacuumInterval: ReturnType<typeof setInterval> | null = null;
 
+export function getAppDataDir(): string {
+  const appData = join(os.homedir(), ".llamaforge");
+  if (!fs.existsSync(appData)) {
+    fs.mkdirSync(appData, { recursive: true });
+  }
+  return appData;
+}
+
 function resolveDbPath(path?: string): string {
   if (path === ":memory:") {
     return path;
@@ -20,11 +28,7 @@ function resolveDbPath(path?: string): string {
 
   if (path) return path;
 
-  const appData = join(os.homedir(), ".llamaforge");
-  if (!fs.existsSync(appData)) {
-    fs.mkdirSync(appData, { recursive: true });
-  }
-  return join(appData, "llamaforge.db");
+  return join(getAppDataDir(), "llamaforge.db");
 }
 
 /**

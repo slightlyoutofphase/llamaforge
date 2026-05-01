@@ -9,18 +9,25 @@ import os from "node:os";
 import path from "node:path";
 import { cleanupOrphanedAttachments } from "../../src/server/persistence/cleanup";
 import { getDb, initDb, resetDb } from "../../src/server/persistence/db";
+import * as dbModule from "../../src/server/persistence/db";
+import { spyOn } from "bun:test";
 
 describe("cleanupOrphanedAttachments", () => {
-  const rootDir = path.join(os.homedir(), ".llamaforge", "attachments");
+  let tmpDir: string;
+  let rootDir: string;
 
   beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "llamaforge-test-"));
+    rootDir = path.join(tmpDir, "attachments");
+    spyOn(dbModule, "getAppDataDir").mockReturnValue(tmpDir);
+
     await initDb(":memory:");
     await fs.mkdir(rootDir, { recursive: true });
   });
 
   afterEach(async () => {
     resetDb();
-    await fs.rm(path.join(os.homedir(), ".llamaforge"), { recursive: true, force: true });
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it("removes unreferenced files and empty directories", async () => {
@@ -32,8 +39,8 @@ describe("cleanupOrphanedAttachments", () => {
     const refPath = "attachments/test-chat/msg-1/referenced.txt";
     const orphanPath = "attachments/test-chat/msg-1/orphaned.txt";
 
-    await fs.writeFile(path.join(os.homedir(), ".llamaforge", refPath), "ok");
-    await fs.writeFile(path.join(os.homedir(), ".llamaforge", orphanPath), "delete me");
+    await fs.writeFile(path.join(tmpDir, refPath), "ok");
+    await fs.writeFile(path.join(tmpDir, orphanPath), "delete me");
 
     // Only one file is referenced in DB
     db.prepare("INSERT INTO chats (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)").run(

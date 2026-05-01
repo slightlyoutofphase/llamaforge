@@ -4,11 +4,10 @@
  */
 
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { logError, logInfo } from "../logger";
 import { getActiveGenerationChatIds } from "../streamProxy";
-import { getDb } from "./db";
+import { getAppDataDir, getDb } from "./db";
 
 /**
  * Scans the attachments directory and deletes any files that are not referenced in the SQLite database.
@@ -21,7 +20,7 @@ import { getDb } from "./db";
  * ```
  */
 export async function cleanupOrphanedAttachments() {
-  const rootDir = path.join(os.homedir(), ".llamaforge", "attachments");
+  const rootDir = path.join(getAppDataDir(), "attachments");
   const db = getDb();
 
   try {

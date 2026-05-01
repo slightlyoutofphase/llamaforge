@@ -244,7 +244,7 @@ export async function loadModel(
     // Temporary file handling for custom Jinja templates
     if (config.chatTemplateFile !== undefined) {
       const tempPath = path.join(os.tmpdir(), `llamaforge-chat-template-${Date.now()}.jinja`);
-      await fs.writeFile(tempPath, config.chatTemplateFile, "utf-8");
+      await Bun.write(tempPath, config.chatTemplateFile);
       config = { ...config, chatTemplateFile: tempPath };
     }
 
