@@ -8,6 +8,12 @@ import App from "../App";
 import { ChatView } from "../components/chat/ChatView";
 import { ModelSelector } from "../ModelSelector";
 
+/**
+ * Displays a route-level fallback UI when TanStack Router surfaces an error.
+ *
+ * @param props - Error boundary props containing the routed error.
+ * @returns The rendered error state for the current route.
+ */
 function ErrorFallback({ error }: { error: unknown }) {
   return (
     <div className="flex h-full w-full items-center justify-center p-4">

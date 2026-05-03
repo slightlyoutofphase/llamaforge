@@ -77,6 +77,12 @@ export function MessageActions({
   );
 }
 
+/**
+ * Renders a single icon button within the message action toolbar.
+ *
+ * @param props - Button configuration including the icon, click handler, and tooltip label.
+ * @returns The rendered action button, or `null` when no click handler is available.
+ */
 function ActionBtn({
   icon,
   onClick,

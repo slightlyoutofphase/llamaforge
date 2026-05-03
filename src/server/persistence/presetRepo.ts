@@ -15,6 +15,12 @@ type ParsedLoadPresetPayload = {
   thinkingTagOverride?: LoadPreset["thinkingTagOverride"];
 };
 
+/**
+ * Checks whether an unknown value matches the thinking-tag override shape stored with load presets.
+ *
+ * @param value - Unknown payload candidate.
+ * @returns `true` when the value is a valid thinking-tag override object.
+ */
 function isThinkingTagOverride(
   value: unknown,
 ): value is NonNullable<LoadPreset["thinkingTagOverride"]> {
@@ -30,6 +36,12 @@ function isThinkingTagOverride(
   );
 }
 
+/**
+ * Normalizes legacy and current flash-attention fields into the modern preset representation.
+ *
+ * @param rawConfig - Raw parsed preset config object.
+ * @returns Normalized flash-attention value, or `undefined` when none is present.
+ */
 function normalizeFlashAttnValue(
   rawConfig: Record<string, unknown>,
 ): LoadPreset["config"]["flashAttn"] | undefined {
@@ -46,6 +58,12 @@ function normalizeFlashAttnValue(
   return undefined;
 }
 
+/**
+ * Normalizes a raw load-preset config object into the stored load config shape.
+ *
+ * @param rawConfig - Raw parsed config payload.
+ * @returns Normalized load preset configuration.
+ */
 function normalizeLoadPresetConfig(rawConfig: Record<string, unknown>): LoadPreset["config"] {
   const configWithoutLegacy: Record<string, unknown> = { ...rawConfig };
   delete configWithoutLegacy["flashAttention"];
@@ -57,6 +75,12 @@ function normalizeLoadPresetConfig(rawConfig: Record<string, unknown>): LoadPres
   };
 }
 
+/**
+ * Parses the stored JSON payload for a load preset.
+ *
+ * @param configJson - JSON payload stored in the database.
+ * @returns Parsed load preset config plus optional template overrides.
+ */
 function parseLoadPresetPayload(configJson: string): ParsedLoadPresetPayload {
   const parsed = safeParse<Record<string, unknown>>(configJson, {});
   const parsedConfig = parsed["config"];
@@ -74,6 +98,12 @@ function parseLoadPresetPayload(configJson: string): ParsedLoadPresetPayload {
   };
 }
 
+/**
+ * Serializes a load preset payload into the database JSON format.
+ *
+ * @param payload - Parsed load preset payload.
+ * @returns JSON text ready for persistence.
+ */
 function serializeLoadPresetPayload(payload: ParsedLoadPresetPayload): string {
   return JSON.stringify({
     config: normalizeLoadPresetConfig(payload.config as unknown as Record<string, unknown>),
@@ -86,6 +116,13 @@ function serializeLoadPresetPayload(payload: ParsedLoadPresetPayload): string {
   });
 }
 
+/**
+ * Parses JSON safely while logging malformed preset payloads.
+ *
+ * @param json - Raw JSON string from persistence.
+ * @param fallback - Fallback value returned when parsing fails.
+ * @returns Parsed JSON value or the provided fallback.
+ */
 function safeParse<T>(json: string, fallback: T): T {
   try {
     return JSON.parse(json) as T;
@@ -196,9 +233,10 @@ export async function getSystemPresets(): Promise<SystemPromptPreset[]> {
 }
 
 /**
- * Inserts a newly configured hardware-load preset into the database natively.
+ * Persists a new load preset to the database.
  *
- * @param preset - The LoadPreset configuration.
+ * @param preset - Load preset to persist.
+ * @returns A promise that resolves once the preset row has been inserted.
  */
 export async function createLoadPreset(preset: LoadPreset): Promise<void> {
   const db = getDb();
@@ -238,10 +276,11 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
 }
 
 /**
- * Updates an existing load preset safely inside the database table.
+ * Updates an existing load preset in the database.
  *
- * @param id - Specific identifier.
- * @param updates - Revisions to the LoadPreset property payload mappings.
+ * @param id - Identifier of the preset to update.
+ * @param updates - Partial load preset fields to merge into the existing row.
+ * @returns A promise that resolves once the preset row has been updated.
  */
 export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>): Promise<void> {
   const db = getDb();
@@ -286,18 +325,20 @@ export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>)
 }
 
 /**
- * Removes a hardware-load preset ensuring it is not globally marked as readonly.
+ * Deletes a mutable load preset.
  *
- * @param id - Targeted ID string.
+ * @param id - Identifier of the load preset to remove.
+ * @returns A promise that resolves once the delete statement has completed.
  */
 export async function deleteLoadPreset(id: string): Promise<void> {
   getDb().prepare("DELETE FROM load_presets WHERE id = ? AND is_readonly = 0").run(id);
 }
 
 /**
- * Submits inference and parsing configuration definitions into SQLite preset persistence.
+ * Persists a new inference preset to the database.
  *
- * @param preset - Bound InferencePreset map structure.
+ * @param preset - Inference preset to persist.
+ * @returns A promise that resolves once the preset row has been inserted.
  */
 export async function createInferencePreset(preset: InferencePreset): Promise<void> {
   const db = getDb();
@@ -320,10 +361,11 @@ export async function createInferencePreset(preset: InferencePreset): Promise<vo
 }
 
 /**
- * Applies delta modifications to persistent config parameters for models running sampling templates.
+ * Updates an existing inference preset in the database.
  *
- * @param id - Unique record ID constraint.
- * @param updates - Shallow configurations for parsing and structuring inference settings.
+ * @param id - Identifier of the inference preset to update.
+ * @param updates - Partial inference preset fields to merge into the existing row.
+ * @returns A promise that resolves once the preset row has been updated.
  */
 export async function updateInferencePreset(
   id: string,
@@ -371,18 +413,20 @@ export async function updateInferencePreset(
 }
 
 /**
- * Hard-deletes custom user inference settings, ensuring system default bounds are unharmed.
+ * Deletes a mutable inference preset.
  *
- * @param id - Global unique identifier mapping to the model.
+ * @param id - Identifier of the inference preset to remove.
+ * @returns A promise that resolves once the delete statement has completed.
  */
 export async function deleteInferencePreset(id: string): Promise<void> {
   getDb().prepare("DELETE FROM inference_presets WHERE id = ? AND is_default = 0").run(id);
 }
 
 /**
- * Generates custom system-prompt persistent presets mapping across multiple models natively.
+ * Persists a new system prompt preset to the database.
  *
- * @param preset - Structure for mapping metadata contexts internally.
+ * @param preset - System prompt preset to persist.
+ * @returns A promise that resolves once the preset row has been inserted.
  */
 export async function createSystemPreset(preset: SystemPromptPreset): Promise<void> {
   const db = getDb();
@@ -397,10 +441,11 @@ export async function createSystemPreset(preset: SystemPromptPreset): Promise<vo
 }
 
 /**
- * Synchronizes variable inputs against standard template prompts globally.
+ * Updates an existing system prompt preset in the database.
  *
- * @param id - System template mapped identity constraint string.
- * @param updates - Parameter contents overriding root mappings.
+ * @param id - Identifier of the system prompt preset to update.
+ * @param updates - Partial system preset fields to merge into the existing row.
+ * @returns A promise that resolves once the preset row has been updated.
  */
 export async function updateSystemPreset(
   id: string,
@@ -427,18 +472,20 @@ export async function updateSystemPreset(
 }
 
 /**
- * Scrub explicitly custom prompt boundaries across the UI configurations safely.
+ * Deletes a system prompt preset.
  *
- * @param id - Persisted prompt metadata ID record key.
+ * @param id - Identifier of the system prompt preset to remove.
+ * @returns A promise that resolves once the delete statement has completed.
  */
 export async function deleteSystemPreset(id: string): Promise<void> {
   getDb().prepare("DELETE FROM system_presets WHERE id = ?").run(id);
 }
 
 /**
- * Executes automatic schema setup matching hardware contexts mapping specifically against all detected valid models internally to seed default presets.
+ * Ensures each discovered model has default load and inference presets derived from GGUF metadata.
  *
- * @param models - Map list mapping discovered active ModelEntry nodes.
+ * @param models - Models discovered during the current model scan.
+ * @returns A promise that resolves once any missing default presets have been created.
  */
 export async function ensureModelDefaultPresets(
   models: import("../../shared/types").ModelEntry[],

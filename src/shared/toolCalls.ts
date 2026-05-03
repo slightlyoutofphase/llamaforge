@@ -20,6 +20,12 @@ export interface ParsedToolCall {
   };
 }
 
+/**
+ * Verifies that an unknown JSON value matches the stored tool-call payload shape.
+ *
+ * @param value - Arbitrary parsed JSON value.
+ * @returns `true` when the value conforms to {@link ParsedToolCall}.
+ */
 function isParsedToolCall(value: unknown): value is ParsedToolCall {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as {

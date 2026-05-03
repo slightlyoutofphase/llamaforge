@@ -13,10 +13,23 @@ import { initDb, resetDb } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
 import { createRouter } from "./router";
 
+/**
+ * Resolves the Bun server listen port from persisted settings.
+ *
+ * @param settings - Persisted application settings loaded from the database.
+ * @returns The configured Bun server port, or the default LlamaForge port when unset.
+ */
 function resolveServerPort(settings: Awaited<ReturnType<typeof loadSettings>>): number {
   return settings.serverPort ?? 11435;
 }
 
+/**
+ * Maps Bun listen failures to user-facing startup errors.
+ *
+ * @param port - Port the Bun server attempted to bind.
+ * @param err - Raw error thrown by Bun while binding the HTTP server.
+ * @returns A normalized error suitable for surfacing in logs or startup failures.
+ */
 function describeBindFailure(port: number, err: unknown): Error {
   const message = err instanceof Error ? err.message : String(err);
   if (message.includes("EADDRINUSE") || /address.+in use/i.test(message)) {
@@ -27,6 +40,18 @@ function describeBindFailure(port: number, err: unknown): Error {
   return err instanceof Error ? err : new Error(message);
 }
 
+/**
+ * Starts the Bun HTTP and WebSocket server for the LlamaForge backend.
+ *
+ * @param options - Startup options controlling optional recurring maintenance tasks.
+ * @returns The active Bun server instance.
+ * @throws {Error} If the database initialization, router setup, or server bind fails.
+ * @example
+ * ```ts
+ * const server = await startServer({ scheduleRecurringCleanup: false });
+ * console.log(server.port);
+ * ```
+ */
 export async function startServer(options: { scheduleRecurringCleanup?: boolean } = {}) {
   await initDb();
   const settings = await loadSettings();
@@ -47,6 +72,11 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
 
   // Cleanup orphaned files once at startup and periodically thereafter.
   const { cleanupOrphanedAttachments } = await import("./persistence/cleanup");
+  /**
+   * Runs attachment cleanup once and logs any non-fatal cleanup failure.
+   *
+   * @returns A promise that resolves once the cleanup attempt finishes.
+   */
   const scheduleCleanup = async () => {
     try {
       await cleanupOrphanedAttachments();
@@ -100,6 +130,11 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
   }
 
   let shutdownInProgress = false;
+  /**
+   * Shuts down the Bun server, active llama-server process, and database cleanly.
+   *
+   * @returns No return value.
+   */
   const cleanup = () => {
     if (shutdownInProgress) return;
     shutdownInProgress = true;

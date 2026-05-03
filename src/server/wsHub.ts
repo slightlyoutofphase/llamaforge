@@ -18,6 +18,11 @@ const PING_INTERVAL_MS = 30_000;
 const STALE_THRESHOLD_MS = 65_000;
 let pingInterval: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * Starts the periodic heartbeat loop used to detect stale WebSocket clients.
+ *
+ * @returns No return value.
+ */
 function startHeartbeat(): void {
   if (pingInterval) return;
   pingInterval = setInterval(() => {
@@ -45,6 +50,11 @@ function startHeartbeat(): void {
   }, PING_INTERVAL_MS);
 }
 
+/**
+ * Stops the heartbeat timer when there are no active WebSocket clients left.
+ *
+ * @returns No return value.
+ */
 function stopHeartbeatIfEmpty(): void {
   if (connections.size === 0 && pingInterval) {
     clearInterval(pingInterval);
@@ -56,6 +66,7 @@ function stopHeartbeatIfEmpty(): void {
  * Adds a new WebSocket connection to the broadcast registry.
  *
  * @param ws - The newly opened {@link ServerWebSocket}.
+ * @returns No return value.
  */
 export function addConnection(ws: ServerWebSocket<unknown>): void {
   connections.add(ws);
@@ -71,6 +82,7 @@ export function addConnection(ws: ServerWebSocket<unknown>): void {
  * Removes a WebSocket connection from the broadcast registry.
  *
  * @param ws - The {@link ServerWebSocket} that has closed.
+ * @returns No return value.
  */
 export function removeConnection(ws: ServerWebSocket<unknown>): void {
   connections.delete(ws);
@@ -81,6 +93,7 @@ export function removeConnection(ws: ServerWebSocket<unknown>): void {
  * Records a pong response from a WebSocket client, updating its last-seen time.
  *
  * @param ws - The {@link ServerWebSocket} that responded to a ping.
+ * @returns No return value.
  */
 export function recordPong(ws: ServerWebSocket<unknown>): void {
   lastPongTimes.set(ws, Date.now());
@@ -90,6 +103,7 @@ export function recordPong(ws: ServerWebSocket<unknown>): void {
  * Broadcasts a standard WebSocket frame to all connected clients.
  *
  * @param frame - The {@link WsFrame} to stringify and send.
+ * @returns No return value.
  */
 export function broadcast(frame: WsFrame): void {
   const data = JSON.stringify(frame);
@@ -107,6 +121,7 @@ export function broadcast(frame: WsFrame): void {
  * Broadcasts the current model server status to all clients.
  *
  * @param status - The new {@link LlamaServerStatus}.
+ * @returns No return value.
  */
 export function broadcastStatus(status: LlamaServerStatus): void {
   broadcast({ type: "server_status", status });
@@ -116,7 +131,8 @@ export function broadcastStatus(status: LlamaServerStatus): void {
  * Broadcasts a system log message to all clients.
  *
  * @param level - The severity level of the log.
- * @param body - The text content of the log message.
+ * @param message - The text content of the log message.
+ * @returns No return value.
  */
 export function broadcastLog(level: string, message: string): void {
   const normalizedLevel: Extract<WsFrame, { type: "log" }>["level"] =
@@ -140,6 +156,8 @@ export function broadcastLog(level: string, message: string): void {
 /**
  * Removes all active WebSocket connections and clears the log buffer.
  * Primarily used for ensuring isolation between automated tests.
+ *
+ * @returns No return value.
  */
 export function clearConnections(): void {
   connections.clear();

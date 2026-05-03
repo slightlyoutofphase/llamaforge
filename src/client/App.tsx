@@ -57,6 +57,11 @@ export default function App() {
   const navigate = useNavigate();
   const activeTab = location.pathname.startsWith("/chat") ? "chat" : "models";
 
+  /**
+   * Opens the chat workspace, creating a new chat when no active chat exists yet.
+   *
+   * @returns A promise that resolves once navigation has been handled.
+   */
   const handleOpenChatWorkspace = async () => {
     if (currentChatId) {
       navigate({ to: "/chat/$chatId", params: { chatId: currentChatId } });
@@ -124,6 +129,12 @@ export default function App() {
   }, [settings]);
 
   useEffect(() => {
+    /**
+     * Handles the console toggle keyboard shortcut.
+     *
+     * @param e - Global keyboard event.
+     * @returns No return value.
+     */
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "`") {
         e.preventDefault();
@@ -135,6 +146,11 @@ export default function App() {
   }, [toggleConsole]);
 
   useEffect(() => {
+    /**
+     * Invalidates cached preset queries after backend preset updates are broadcast.
+     *
+     * @returns No return value.
+     */
     const handlePresetsInvalidate = () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.presetsLoad() });
       queryClient.invalidateQueries({ queryKey: queryKeys.presetsInference() });
@@ -144,6 +160,11 @@ export default function App() {
       window.removeEventListener("llamaforge:presets-invalidate", handlePresetsInvalidate);
   }, [queryClient]);
 
+  /**
+   * Selects the currently active right-side panel content.
+   *
+   * @returns The React element to render in the right-side panel.
+   */
   const renderRightPanel = () => {
     if (rightPanelView === "settings") return <SettingsPanel />;
     if (rightPanelView === "inferencePreset") return <InferencePresetEditor />;

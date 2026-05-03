@@ -55,6 +55,13 @@ export type ToolApprovalDecision = {
 const pendingApprovals = new Map<string, PendingToolApproval>();
 let toolApprovalTimeoutMs = 120_000;
 
+/**
+ * Resolves and removes a pending tool approval entry.
+ *
+ * @param toolCallId - Unique tool-call identifier waiting for a user decision.
+ * @param decision - Final decision that should resolve the pending approval promise.
+ * @returns `true` when a pending approval was found and settled.
+ */
 function settlePendingApproval(toolCallId: string, decision: ToolApprovalDecision): boolean {
   const pending = pendingApprovals.get(toolCallId);
   if (!pending) {
@@ -71,6 +78,7 @@ function settlePendingApproval(toolCallId: string, decision: ToolApprovalDecisio
  * Overrides the default tool approval timeout for tests.
  *
  * @param timeoutMs - Timeout in milliseconds.
+ * @returns No return value.
  * @internal
  */
 export function __setToolApprovalTimeoutMs(timeoutMs: number): void {
@@ -99,7 +107,9 @@ export function waitForToolApproval(
 /**
  * Cancels all pending tool approvals for a specific chat or all chats.
  *
- * @param chatId - Optional chat ID to filter by.
+ * @param chatId - Optional chat ID used to limit which pending approvals are cancelled.
+ * @param reason - Cancellation reason propagated back to the suspended generation.
+ * @returns No return value.
  */
 export function cancelPendingApprovals(
   chatId?: string,
@@ -120,6 +130,7 @@ export function cancelPendingApprovals(
  * @param toolCallId - Explicit lookup identifier mapped to pending interaction.
  * @param approved - Action explicitly sanctioned by the user natively.
  * @param editedArguments - Parameter string mapped for execution bypass/override.
+ * @returns No return value.
  */
 export function resolveToolApproval(
   toolCallId: string,

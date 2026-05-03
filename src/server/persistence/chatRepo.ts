@@ -21,6 +21,13 @@ type ChatMessageRow = Omit<ChatMessage, "metrics"> & {
   metricsJson?: string | null;
 };
 
+/**
+ * Normalizes persisted tool-call JSON before it is returned to callers or re-saved.
+ *
+ * @param toolCallsJson - Raw tool-call JSON payload from persistence.
+ * @param context - Context string used for warning logs when invalid payloads are stripped.
+ * @returns Sanitized tool-call JSON, or `undefined` when the payload is absent or invalid.
+ */
 function normalizeToolCallsJson(
   toolCallsJson: string | null | undefined,
   context: string,
@@ -34,8 +41,10 @@ function normalizeToolCallsJson(
 }
 
 /**
- * S6 fix: Computes the next message position for a chat using MAX(position) + 1.
- * Prevents position gaps and collisions after deletions or branching.
+ * Computes the next message position for a chat using `MAX(position) + 1`.
+ *
+ * @param chatId - Chat whose next message position should be calculated.
+ * @returns Next available position for a message in the chat.
  */
 export function getNextPosition(chatId: string): number {
   const db = getDb();
@@ -48,6 +57,12 @@ export function getNextPosition(chatId: string): number {
   return (row?.max_pos ?? -1) + 1;
 }
 
+/**
+ * Resolves a persisted attachment path back to an absolute path under the app data root.
+ *
+ * @param relativePath - Attachment path stored in the database.
+ * @returns Absolute attachment path, or `null` when the stored path is unsafe.
+ */
 function resolveAttachmentPath(relativePath: string): string | null {
   if (!relativePath || typeof relativePath !== "string") return null;
   if (path.isAbsolute(relativePath)) return null;
@@ -60,15 +75,33 @@ function resolveAttachmentPath(relativePath: string): string | null {
   return absPath;
 }
 
+/**
+ * Sanitizes an attachment filename for safe filesystem reuse during chat export and branching.
+ *
+ * @param fileName - Raw attachment filename.
+ * @returns Basename-safe filename containing only portable characters.
+ */
 function sanitizeFileName(fileName: string): string {
   const base = path.basename(fileName || "");
   return base.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
+/**
+ * Checks whether a value is one of the valid persisted chat message roles.
+ *
+ * @param value - Unknown role candidate.
+ * @returns `true` when the value matches a supported chat message role.
+ */
 function isValidMessageRole(value: unknown): value is "system" | "user" | "assistant" | "tool" {
   return value === "system" || value === "user" || value === "assistant" || value === "tool";
 }
 
+/**
+ * Parses optional message metrics stored alongside an assistant message.
+ *
+ * @param metricsJson - JSON payload stored in the `metrics_json` column.
+ * @returns Parsed message metrics, or `undefined` when the payload is absent or invalid.
+ */
 function parseMessageMetrics(metricsJson: string | null | undefined): MessageMetrics | undefined {
   if (!metricsJson) return undefined;
 
@@ -98,6 +131,12 @@ function parseMessageMetrics(metricsJson: string | null | undefined): MessageMet
   return undefined;
 }
 
+/**
+ * Hydrates a raw message row from SQLite into the public chat message shape.
+ *
+ * @param row - Raw message row returned from SQLite.
+ * @returns Hydrated chat message with parsed metrics and sanitized tool-call JSON.
+ */
 function hydrateChatMessage(row: ChatMessageRow): ChatMessage {
   const metrics = parseMessageMetrics(row.metricsJson);
   const { metricsJson: _metricsJson, toolCallsJson: _toolCallsJson, ...message } = row;
@@ -110,6 +149,13 @@ function hydrateChatMessage(row: ChatMessageRow): ChatMessage {
   };
 }
 
+/**
+ * Validates the outer structure of an imported chat payload before persistence.
+ *
+ * @param parsed - Parsed JSON payload supplied for chat import.
+ * @returns No return value.
+ * @throws {Error} If the payload or any message/attachment entry is invalid.
+ */
 function assertImportPayload(parsed: any) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     logError("[chatRepo] Invalid imported chat payload: not an object", { parsed });
@@ -208,6 +254,8 @@ export async function createChat(
  * Retrieves a list of chat sessions, optionally filtered by name.
  *
  * @param search - Optional query string to filter chats by name (case-insensitive search).
+ * @param limit - Maximum number of chats to return.
+ * @param offset - Number of chats to skip before returning results.
  * @returns A promise that resolves to an array of {@link ChatSession} basic metadata.
  */
 export async function getChats(
@@ -243,6 +291,8 @@ export async function getChats(
  * Retrieves a single chat session including its full message history and attachments.
  *
  * @param id - The unique UUID of the chat session.
+ * @param messageLimit - Optional maximum number of messages to load.
+ * @param messageOffset - Optional offset applied when paginating messages.
  * @returns A promise that resolves to the {@link ChatSession} or null if not found.
  */
 export async function getChat(
@@ -376,6 +426,7 @@ export async function updateChat(id: string, updates: Partial<ChatSession>): Pro
  * Deletes a chat session and all its associated messages and attachments.
  *
  * @param id - The unique UUID of the chat session to delete.
+ * @returns A promise that resolves once the chat row and any attachment files have been removed.
  */
 export async function deleteChat(id: string): Promise<void> {
   const db = getDb();
@@ -432,6 +483,7 @@ export async function deleteChat(id: string): Promise<void> {
  * Appends a new message to a chat session.
  *
  * @param message - The {@link ChatMessage} object to persist.
+ * @returns A promise that resolves once the message row and chat timestamp are written.
  */
 export async function addMessage(message: ChatMessage): Promise<void> {
   const db = getDb();
@@ -463,6 +515,7 @@ export async function addMessage(message: ChatMessage): Promise<void> {
  * @param content - Parsed content (with thinking tags removed if applicable).
  * @param rawContent - Original raw output from the model.
  * @param thinkingContent - Optional extracted thinking trace content.
+ * @returns A promise that resolves once the message row and parent chat timestamp are updated.
  */
 export async function updateMessage(
   id: string,
@@ -484,6 +537,7 @@ export async function updateMessage(
  *
  * @param chatId - UUID of the chat session.
  * @param position - The position index. Messages with position > this value will be removed.
+ * @returns A promise that resolves once the target messages and attachment files are removed.
  */
 export async function deleteMessagesAfter(chatId: string, position: number): Promise<void> {
   const db = getDb();
@@ -514,6 +568,7 @@ export async function deleteMessagesAfter(chatId: string, position: number): Pro
  *
  * @param chatId - UUID of the chat session.
  * @param messageId - UUID of the message to delete.
+ * @returns A promise that resolves once the target messages and attachment files are removed.
  */
 export async function deleteMessageAndSubsequent(chatId: string, messageId: string): Promise<void> {
   const db = getDb();
@@ -591,6 +646,7 @@ export async function getMetadataForPath(filePath: string): Promise<GgufDisplayM
  * @param filePath - The full absolute path to the local GGUF file.
  * @param mtime - The current modified time of the GGUF file (to invalidate cache appropriately).
  * @param metadata - The loaded and processed metadata variables mapping to standard properties.
+ * @returns A promise that resolves once the cache row has been written.
  */
 export async function setCachedGgufMetadata(
   filePath: string,

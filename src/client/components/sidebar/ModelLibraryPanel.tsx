@@ -56,6 +56,12 @@ export function ModelLibraryPanel() {
   const defaultLoadPreset = loadPresets?.find((p) => p.isDefault) || loadPresets?.[0];
   const requestInFlight = isGenerating || isWaitingForToolApproval;
 
+  /**
+   * Loads the selected model using the chosen preset after multimodal compatibility checks.
+   *
+   * @param preset - Load preset to apply to the selected model.
+   * @returns No return value.
+   */
   const handleLoad = (preset: LoadPreset) => {
     if (!selectedModel || requestInFlight) return;
 
@@ -99,6 +105,11 @@ export function ModelLibraryPanel() {
     loadModel(request);
   };
 
+  /**
+   * Creates a replacement chat before switching to a model that is incompatible with current attachments.
+   *
+   * @returns A promise that resolves once the replacement chat flow completes.
+   */
   const handleStartNewChat = async () => {
     if (isCreatingChat || createChatLockRef.current) return;
     createChatLockRef.current = true;

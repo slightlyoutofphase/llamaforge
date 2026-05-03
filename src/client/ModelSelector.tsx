@@ -46,6 +46,12 @@ export function ModelSelector() {
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const createChatLockRef = useRef(false);
 
+  /**
+   * Validates multimodal compatibility and submits a model-load request when the model can be used safely.
+   *
+   * @param model - Candidate model selected from the registry.
+   * @returns A promise that resolves once the guard or load workflow completes.
+   */
   const handleLoadGuard = async (model: ModelEntry) => {
     if (serverStatus !== "idle" || isGenerating) return;
 
@@ -135,6 +141,11 @@ export function ModelSelector() {
     }
   };
 
+  /**
+   * Creates a replacement chat before switching to a model that cannot handle current attachments.
+   *
+   * @returns A promise that resolves once the replacement chat and guarded load flow complete.
+   */
   const handleStartNewChat = async () => {
     if (isCreatingChat || createChatLockRef.current) return;
     createChatLockRef.current = true;

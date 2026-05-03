@@ -45,10 +45,22 @@ export function SystemPresetEditor() {
 
   if (!localState) return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
 
+  /**
+   * Updates a single system preset field within local editor state.
+   *
+   * @param k - Field name to update.
+   * @param v - New field value.
+   * @returns No return value.
+   */
   const updateField = <K extends keyof SystemPromptPreset>(k: K, v: SystemPromptPreset[K]) => {
     setLocalState((prev) => (prev ? { ...prev, [k]: v } : null));
   };
 
+  /**
+   * Applies the current system preset to the active chat and closes the editor.
+   *
+   * @returns A promise that resolves once the chat has been updated and reloaded.
+   */
   const handleApplyToChat = async () => {
     if (!currentChatId || !localState.id) return;
     await updateChatMut.mutateAsync({
@@ -59,11 +71,21 @@ export function SystemPresetEditor() {
     setRightPanelView(null);
   };
 
+  /**
+   * Persists the currently edited system prompt preset.
+   *
+   * @returns No return value.
+   */
   const handleSave = () => {
     if (!localState.id) return;
     updateMut.mutate({ id: localState.id, updates: localState });
   };
 
+  /**
+   * Duplicates the current system prompt preset and opens the clone for editing.
+   *
+   * @returns No return value.
+   */
   const handleDuplicate = () => {
     if (!localState) return;
     const newPreset: SystemPromptPreset = {
@@ -77,6 +99,11 @@ export function SystemPresetEditor() {
     setRightPanelView("systemPreset", newPreset.id);
   };
 
+  /**
+   * Creates a new empty system prompt preset.
+   *
+   * @returns No return value.
+   */
   const handleNew = () => {
     const newPreset: SystemPromptPreset = {
       id: crypto.randomUUID(),
@@ -89,6 +116,11 @@ export function SystemPresetEditor() {
     setRightPanelView("systemPreset", newPreset.id);
   };
 
+  /**
+   * Deletes the currently selected system prompt preset.
+   *
+   * @returns No return value.
+   */
   const handleDelete = () => {
     if (!localState.id) return;
     deleteMut.mutate(localState.id);

@@ -15,31 +15,69 @@ export interface TokenEstimationOptions {
   buildPromptText?: ((messages: ChatMessage[]) => Promise<string>) | undefined;
 }
 
+/**
+ * Normalizes a context-window size to a positive integer fallback value.
+ *
+ * @param ctxSize - Requested context window size.
+ * @returns A valid context size suitable for overflow calculations.
+ */
 function normalizeCtxSize(ctxSize: number): number {
   return Number.isFinite(ctxSize) && ctxSize > 0 ? Math.floor(ctxSize) : DEFAULT_CTX_SIZE;
 }
 
+/**
+ * Normalizes a requested max-token budget to a positive integer fallback value.
+ *
+ * @param maxTokens - Requested generation token budget.
+ * @returns A normalized reserved-token count.
+ */
 function normalizeMaxTokens(maxTokens: number): number {
   return Number.isFinite(maxTokens) && maxTokens > 0
     ? Math.floor(maxTokens)
     : DEFAULT_RESERVED_TOKENS;
 }
 
+/**
+ * Builds a cache key for a single message tokenization input.
+ *
+ * @param message - Chat message contributing to the prompt.
+ * @returns A cache key that uniquely identifies the message content and attachment types.
+ */
 function buildMessageKey(message: ChatMessage): string {
   // M1 fix: include message ID to prevent key collisions across different message sets
   const attachments = (message.attachments || []).map((a) => `${a.mimeType}`).join("|");
   return `${message.id ?? "_"}:${message.role}:${message.content}:${attachments}`;
 }
 
+/**
+ * Builds a cache key for an ordered message list.
+ *
+ * @param messages - Prompt messages whose token count should be cached.
+ * @param port - Optional llama-server port used for tokenization.
+ * @returns A cache key representing the full message array.
+ */
 function buildMessagesKey(messages: ChatMessage[], port?: number): string {
   // M1 fix: include array length as an additional discriminator
   return `n=${messages.length}|${messages.map((m) => buildMessageKey(m)).join("||")}|port:${port ?? 0}`;
 }
 
+/**
+ * Builds a cache key for a fully serialized prompt payload.
+ *
+ * @param serializedPrompt - Prompt body sent to the tokenizer.
+ * @param port - Optional llama-server port used for tokenization.
+ * @returns A cache key for prompt-level token counts.
+ */
 function buildSerializedPromptKey(serializedPrompt: string, port?: number): string {
   return `payload:${port ?? 0}:${serializedPrompt}`;
 }
 
+/**
+ * Serializes a message list into a stable text payload for heuristic token counting.
+ *
+ * @param messages - Prompt messages to serialize.
+ * @returns JSON text representing the message content relevant to prompt budgeting.
+ */
 function serializeMessagesForPromptBudget(messages: ChatMessage[]): string {
   return JSON.stringify(
     messages.map((message) => ({
@@ -51,6 +89,12 @@ function serializeMessagesForPromptBudget(messages: ChatMessage[]): string {
   );
 }
 
+/**
+ * Estimates the fixed token overhead contributed by image and audio attachments.
+ *
+ * @param messages - Prompt messages whose attachments should be counted.
+ * @returns Estimated attachment token overhead.
+ */
 function estimateAttachmentMediaTokens(messages: ChatMessage[]): number {
   let attachmentTokens = 0;
   for (const message of messages) {
@@ -66,6 +110,13 @@ function estimateAttachmentMediaTokens(messages: ChatMessage[]): number {
   return attachmentTokens;
 }
 
+/**
+ * Fetches an exact or heuristic token count for arbitrary prompt text.
+ *
+ * @param text - Serialized prompt text to tokenize.
+ * @param port - Optional llama-server port exposing the `/tokenize` endpoint.
+ * @returns Token count for the serialized prompt text.
+ */
 async function fetchTokenCount(text: string, port?: number): Promise<number> {
   if (!port) return Math.ceil(text.length / 3.5);
 
@@ -87,6 +138,11 @@ async function fetchTokenCount(text: string, port?: number): Promise<number> {
 
 /**
  * Calculates current token usage for a list of messages.
+ *
+ * @param msgs - Prompt messages to estimate.
+ * @param port - Optional llama-server port used for exact tokenization.
+ * @param options - Optional prompt serialization override matching the real request body.
+ * @returns Total estimated prompt tokens including attachment overhead.
  */
 export async function getTokens(
   msgs: ChatMessage[],
@@ -138,6 +194,14 @@ export async function getTokens(
   return total;
 }
 
+/**
+ * Calculates token usage for a prompt using the exact serialized request payload when available.
+ *
+ * @param messages - Prompt messages to estimate.
+ * @param port - Optional llama-server port used for exact tokenization.
+ * @param options - Token estimation options containing the prompt serializer.
+ * @returns Total estimated prompt tokens including attachment overhead.
+ */
 async function getPromptTokens(
   messages: ChatMessage[],
   port?: number,
@@ -169,14 +233,33 @@ async function getPromptTokens(
   return total;
 }
 
+/**
+ * Clones a chat message shallowly so overflow truncation can mutate a safe copy.
+ *
+ * @param message - Source message to clone.
+ * @returns A shallow clone of the message and its attachment list.
+ */
 function cloneMessage(message: ChatMessage): ChatMessage {
   return { ...message, attachments: message.attachments ? [...message.attachments] : undefined };
 }
 
+/**
+ * Computes the reserved completion-token budget that must remain free in the context window.
+ *
+ * @param maxTokens - Requested generation token budget.
+ * @returns Reserved prompt budget after enforcing the minimum floor.
+ */
 function getReservedTokens(maxTokens: number): number {
   return Math.max(MIN_RESERVED_TOKENS, normalizeMaxTokens(maxTokens));
 }
 
+/**
+ * Determines how many leading messages must be preserved during overflow truncation.
+ *
+ * @param messages - Prompt messages currently under consideration.
+ * @param roleSystemPrompt - Whether the first system message must be protected.
+ * @returns Number of prefix messages that truncation must preserve.
+ */
 function getProtectedPrefixLength(messages: ChatMessage[], roleSystemPrompt: boolean): number {
   let protectedCount = 0;
   if (roleSystemPrompt && messages[0]?.role === "system") {
@@ -186,7 +269,16 @@ function getProtectedPrefixLength(messages: ChatMessage[], roleSystemPrompt: boo
 }
 
 /**
- * Truncates message history based on context overflow policies.
+ * Truncates message history according to the configured context overflow policy.
+ *
+ * @param rawMessages - Full message history before overflow handling.
+ * @param overflowPolicy - Strategy used to drop or preserve messages.
+ * @param ctxSize - Active model context size.
+ * @param maxTokens - Reserved completion token budget.
+ * @param port - Optional llama-server port used for exact tokenization.
+ * @param roleSystemPrompt - Whether the leading system prompt must always be preserved.
+ * @param tokenOptions - Optional serializer matching the real inference request payload.
+ * @returns A truncated message list that fits within the prompt token budget.
  */
 export async function truncateMessages(
   rawMessages: ChatMessage[],

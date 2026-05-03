@@ -21,6 +21,13 @@ import { ToolCard } from "./ToolCard";
 const REMARK_PLUGINS = [remarkGfm, remarkMath];
 const REHYPE_PLUGINS = [rehypeHighlight, rehypeKatex];
 
+/**
+ * Compares two message metric payloads to avoid unnecessary rerenders.
+ *
+ * @param prev - Previous metrics object associated with the message.
+ * @param next - Next metrics object associated with the message.
+ * @returns `true` when both metric objects are effectively identical.
+ */
 function hasSameMetrics(prev: ChatMessage["metrics"], next: ChatMessage["metrics"]): boolean {
   if (prev === next) return true;
   if (!prev || !next) return !prev && !next;
@@ -35,6 +42,13 @@ function hasSameMetrics(prev: ChatMessage["metrics"], next: ChatMessage["metrics
   );
 }
 
+/**
+ * Compares two attachment lists to determine whether the rendered attachments changed.
+ *
+ * @param prev - Previous attachment list for the message.
+ * @param next - Next attachment list for the message.
+ * @returns `true` when both attachment lists contain the same attachment metadata.
+ */
 function hasSameAttachments(
   prev: ChatMessage["attachments"],
   next: ChatMessage["attachments"],
@@ -57,6 +71,12 @@ function hasSameAttachments(
   });
 }
 
+/**
+ * Formats token throughput values for the assistant metrics footer.
+ *
+ * @param tokensPerSecond - Throughput value reported by the backend.
+ * @returns A human-readable tokens-per-second string.
+ */
 function formatRate(tokensPerSecond: number): string {
   return `${tokensPerSecond.toFixed(tokensPerSecond >= 100 ? 0 : 1)} tokens/sec`;
 }
@@ -91,6 +111,12 @@ interface MessageBubbleProps {
  * @returns React functional component.
  */
 export const MessageBubble = React.memo(
+  /**
+   * Renders a single chat message bubble, its attachments, and any tool-call affordances.
+   *
+   * @param props - Message bubble props controlling content, style, and message actions.
+   * @returns The rendered message bubble element.
+   */
   function MessageBubble({
     message,
     bubbleStyle = "bubble",
@@ -139,10 +165,20 @@ export const MessageBubble = React.memo(
       }
     }, [isEditing]);
 
+    /**
+     * Copies the visible message content to the clipboard.
+     *
+     * @returns No return value.
+     */
     const handleCopy = () => {
       navigator.clipboard.writeText(message.content);
     };
 
+    /**
+     * Persists an edited message when the edited content changed.
+     *
+     * @returns No return value.
+     */
     const saveEdit = () => {
       if (editContent.trim() !== message.content) {
         onEdit(message.id, editContent);

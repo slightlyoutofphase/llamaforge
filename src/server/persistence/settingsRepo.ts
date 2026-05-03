@@ -29,16 +29,38 @@ const MAX_PORT = 65535;
 
 export class InvalidSettingsError extends Error {}
 
+/**
+ * Clamps a numeric value to an inclusive integer range.
+ *
+ * @param value - Raw numeric value to clamp.
+ * @param min - Minimum allowed integer.
+ * @param max - Maximum allowed integer.
+ * @returns Clamped integer value.
+ */
 function clampInteger(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
+/**
+ * Normalizes an optional port value against the allowed TCP port range.
+ *
+ * @param value - Raw port candidate.
+ * @param fallback - Fallback port used when the input is absent or invalid.
+ * @returns A valid port number, or the fallback when normalization fails.
+ */
 function normalizeOptionalPort(value: unknown, fallback: number | undefined): number | undefined {
   if (value === undefined) return fallback;
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return clampInteger(value, MIN_PORT, MAX_PORT);
 }
 
+/**
+ * Normalizes a positive numeric setting value.
+ *
+ * @param value - Raw numeric candidate.
+ * @param fallback - Fallback value used when the candidate is invalid.
+ * @returns A valid positive number.
+ */
 function normalizePositiveNumber(value: unknown, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return fallback;
@@ -46,6 +68,12 @@ function normalizePositiveNumber(value: unknown, fallback: number): number {
   return value;
 }
 
+/**
+ * Merges persisted settings with defaults and applies value normalization rules.
+ *
+ * @param raw - Partial settings payload loaded from persistence or request input.
+ * @returns Fully normalized application settings.
+ */
 function normalizeSettings(raw: Partial<AppSettings>): AppSettings {
   const merged = { ...DEFAULT_SETTINGS, ...raw } as AppSettings;
   const normalizedServerPort = normalizeOptionalPort(raw.serverPort, DEFAULT_SETTINGS.serverPort);
@@ -82,6 +110,15 @@ function normalizeSettings(raw: Partial<AppSettings>): AppSettings {
     : { ...normalizedSettings, serverPort: normalizedServerPort };
 }
 
+/**
+ * Validates that a settings field contains a finite number within the configured bounds.
+ *
+ * @param name - Settings field name used in validation errors.
+ * @param value - Raw value to validate.
+ * @param options - Numeric validation constraints.
+ * @returns No return value.
+ * @throws {InvalidSettingsError} If the value is missing, non-finite, or outside the allowed range.
+ */
 function assertFiniteNumber(
   name: string,
   value: unknown,
@@ -101,6 +138,13 @@ function assertFiniteNumber(
   }
 }
 
+/**
+ * Validates a fully merged settings object before persistence.
+ *
+ * @param settings - Settings object after defaults and normalization are applied.
+ * @returns No return value.
+ * @throws {InvalidSettingsError} If the merged settings contain invalid numeric or port-range values.
+ */
 function validateMergedSettings(settings: AppSettings): void {
   if (settings.serverPort !== undefined) {
     assertFiniteNumber("serverPort", settings.serverPort, {
@@ -127,19 +171,24 @@ function validateMergedSettings(settings: AppSettings): void {
   }
 }
 
-/**
- * Loads application settings from the database.
- *
- * @returns A promise resolving to the {@link AppSettings} object. Returns defaults if no settings are persisted.
- */
 // S4 fix: in-memory settings cache to avoid DB read on every API call
 let _cachedSettings: AppSettings | null = null;
 let _cachedSettingsGeneration: number | null = null;
 
+/**
+ * Determines whether the process should reuse the in-memory settings cache.
+ *
+ * @returns `true` when settings caching is enabled for the current runtime.
+ */
 function shouldUseSettingsCache(): boolean {
   return Bun.env.NODE_ENV !== "test";
 }
 
+/**
+ * Loads application settings from the database, falling back to defaults when necessary.
+ *
+ * @returns A promise resolving to the normalized application settings.
+ */
 export async function loadSettings(): Promise<AppSettings> {
   const dbGeneration = getDbGeneration();
   if (shouldUseSettingsCache() && _cachedSettings && _cachedSettingsGeneration === dbGeneration) {
@@ -185,6 +234,13 @@ export async function loadSettings(): Promise<AppSettings> {
 
 let settingsLock = Promise.resolve();
 
+/**
+ * Ensures that settings update payloads are plain JSON objects.
+ *
+ * @param value - Unknown settings update payload.
+ * @returns No return value.
+ * @throws {Error} If the payload is not a plain object.
+ */
 function assertPlainObject(value: unknown): asserts value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("Settings updates must be an object.");
@@ -195,10 +251,16 @@ function assertPlainObject(value: unknown): asserts value is Record<string, unkn
  * Persists application settings to the database.
  *
  * @param updates - Partial object containing settings fields to update.
+ * @returns A promise that resolves once the settings row has been written and caches updated.
  */
 export async function saveSettings(updates: Partial<AppSettings>): Promise<void> {
   assertPlainObject(updates);
 
+  /**
+   * Serializes settings writes so overlapping updates always merge against the latest stored state.
+   *
+   * @returns A promise that resolves once the current settings update has been persisted.
+   */
   const run = async () => {
     // S3 fix (settingsLock): catch and reset the lock to prevent cascading failures
     try {

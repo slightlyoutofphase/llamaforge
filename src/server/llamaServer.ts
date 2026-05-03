@@ -24,6 +24,12 @@ const BOOT_LOG_CAPACITY = 1000;
 let bootLogBuffer: string[] = [];
 let bootLogWriteIndex = 0;
 
+/**
+ * Appends a line to the in-memory boot log ring buffer.
+ *
+ * @param line - Log line emitted while llama-server is starting.
+ * @returns No return value.
+ */
 function pushBootLog(line: string): void {
   if (bootLogBuffer.length < BOOT_LOG_CAPACITY) {
     bootLogBuffer.push(line);
@@ -33,6 +39,11 @@ function pushBootLog(line: string): void {
   bootLogWriteIndex = (bootLogWriteIndex + 1) % BOOT_LOG_CAPACITY;
 }
 
+/**
+ * Returns the current boot log buffer in chronological order.
+ *
+ * @returns Boot log lines ordered from oldest to newest.
+ */
 function getBootLogs(): string[] {
   if (bootLogBuffer.length < BOOT_LOG_CAPACITY) {
     return bootLogBuffer.slice();
@@ -41,6 +52,11 @@ function getBootLogs(): string[] {
   return [...bootLogBuffer.slice(bootLogWriteIndex), ...bootLogBuffer.slice(0, bootLogWriteIndex)];
 }
 
+/**
+ * Clears the buffered boot logs captured during model startup.
+ *
+ * @returns No return value.
+ */
 function clearBootLogs(): void {
   bootLogBuffer = [];
   bootLogWriteIndex = 0;
@@ -54,6 +70,11 @@ type ActiveReader = {
 // S9 fix: track active stream readers for cancellation on unload
 const activeReaders = new Set<ActiveReader>();
 
+/**
+ * Resets the currently loaded model state back to the idle server baseline.
+ *
+ * @returns Snapshot of the configuration that was active before the reset.
+ */
 function resetLoadedModelState(): ModelLoadConfig | null {
   const configSnapshot = currentConfig;
   proc = null;
@@ -64,6 +85,11 @@ function resetLoadedModelState(): ModelLoadConfig | null {
   return configSnapshot;
 }
 
+/**
+ * Cancels any active stdout and stderr readers attached to the llama-server process.
+ *
+ * @returns No return value.
+ */
 function cancelActiveLogReaders(): void {
   for (const reader of activeReaders) {
     try {
@@ -88,6 +114,7 @@ export function getProc() {
  * Updates the internal server status and broadcasts it to all connected clients.
  *
  * @param status - The new status to set.
+ * @returns No return value.
  */
 function setStatus(status: LlamaServerStatus): void {
   currentStatus = status;
@@ -225,14 +252,11 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
 }
 
 /**
- * Spawns llama-server with the given load configuration.
+ * Validates that the configured llama-server binary exists and is executable.
  *
- * @param config - Full model load configuration including all CLI flags.
- * @param llamaServerBin - Absolute path to the llama-server binary.
- * @param minPort - Minimum port range for searching free ports.
- * @param maxPort - Maximum port range for searching free ports.
- * @returns The port number on which the spawned server is listening.
- * @throws {Error} If the server fails to become ready within the timeout period.
+ * @param absolutePath - Absolute path to the llama-server executable.
+ * @returns A promise that resolves when the binary passes validation.
+ * @throws {Error} If the target path is missing, not a file, or not executable.
  */
 async function validateBinary(absolutePath: string): Promise<void> {
   logDebug("Validating binary", { path: absolutePath });
@@ -258,6 +282,7 @@ async function validateBinary(absolutePath: string): Promise<void> {
  * @param llamaServerBin - Absolute path to the `llama-server` executable.
  * @param minPort - Minimum port to consider when selecting a free server port.
  * @param maxPort - Maximum port to consider when selecting a free server port.
+ * @param thinkingTagOverride - Optional thinking-tag override associated with the selected load preset.
  * @returns The port number where the newly spawned server is listening.
  * @throws {Error} If the server binary cannot be validated, if the model fails to load,
  *         or if the server does not become ready within the configured timeout.
@@ -360,6 +385,13 @@ export async function loadModel(
   }
 }
 
+/**
+ * Polls the llama-server health endpoint until the spawned process becomes ready.
+ *
+ * @param target - Process instance that should still own the active server state.
+ * @param port - Port exposed by the candidate llama-server instance.
+ * @returns `true` when the health endpoint responds successfully before timeout.
+ */
 async function waitForHealthCheck(
   target: Subprocess<"ignore", "pipe", "pipe">,
   port: number,
@@ -384,6 +416,13 @@ async function waitForHealthCheck(
   return false;
 }
 
+/**
+ * Streams llama-server log output into the WebSocket log broadcast channel.
+ *
+ * @param stream - Process output stream to consume.
+ * @param defaultLevel - Log level used when the stream line does not contain structured metadata.
+ * @returns A promise that settles once the stream is fully consumed or cancelled.
+ */
 async function consumeLogs(
   stream: ReadableStream<Uint8Array> | null,
   defaultLevel: "server" | "info" | "warn" | "error" | "debug",
@@ -460,6 +499,11 @@ export async function unloadModel(): Promise<void> {
   await requestUnloadModel();
 }
 
+/**
+ * Requests model unload while coalescing concurrent unload attempts into a single promise.
+ *
+ * @returns A promise that resolves when the active process has been stopped and cleanup is complete.
+ */
 export function requestUnloadModel(): Promise<void> {
   if (unloadPromise) {
     return unloadPromise;
@@ -517,6 +561,7 @@ export function requestUnloadModel(): Promise<void> {
  * @param llamaServerBin - Absolute path to the llama-server binary.
  * @param minPort - Minimum port range for searching free ports.
  * @param maxPort - Maximum port range for searching free ports.
+ * @param thinkingTagOverride - Optional thinking-tag override associated with the selected load preset.
  * @returns The port number on which the new server is listening.
  * @throws {Error} If loading the new model fails.
  */

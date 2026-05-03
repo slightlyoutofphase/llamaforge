@@ -46,6 +46,12 @@ export function HardwareOptimizationModal({
     }
   }, [modelPath, mutate]);
 
+  /**
+   * Builds human-readable optimization notes for the suggested load configuration.
+   *
+   * @param config - Optimized partial load configuration returned by the backend.
+   * @returns Suggestion strings explaining the main optimization choices.
+   */
   const getSuggestions = (config: Partial<ModelLoadConfig>) => {
     const suggestions: string[] = [];
     if (config.gpuLayers !== undefined) {

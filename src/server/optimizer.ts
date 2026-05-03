@@ -7,6 +7,12 @@ import type { GgufDisplayMetadata, HardwareInfo, ModelLoadConfig } from "../shar
 
 type ConfirmedGpuBackend = "cuda" | "rocm" | "metal" | "vulkan";
 
+/**
+ * Determines whether a GPU backend represents a confirmed accelerator runtime.
+ *
+ * @param backend - Backend identifier reported by hardware probing.
+ * @returns `true` when the backend can safely be treated as GPU-accelerated.
+ */
 function isConfirmedGpuBackend(
   backend: HardwareInfo["gpus"][number]["backend"],
 ): backend is ConfirmedGpuBackend {

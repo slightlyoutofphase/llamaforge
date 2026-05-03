@@ -32,12 +32,20 @@ export let getHardwareInfoImpl = getHardwareInfo;
  * Overrides the runtime hardware probe implementation for test injection.
  *
  * @param override - Object containing a replacement `getHardwareInfo` implementation.
+ * @returns No return value.
  * @internal
  */
 export function __setHardwareProbe(override: { getHardwareInfo: typeof getHardwareInfo }) {
   getHardwareInfoImpl = override.getHardwareInfo;
 }
 
+/**
+ * Builds a JSON response with the standard API content type.
+ *
+ * @param body - Response payload to serialize.
+ * @param status - HTTP status code to apply.
+ * @returns JSON response object.
+ */
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -45,19 +53,45 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/**
+ * Builds a standard HTTP 400 response for invalid client input.
+ *
+ * @param message - Human-readable validation error.
+ * @returns JSON error response with status `400`.
+ */
 function badRequest(message: string): Response {
   return jsonResponse({ error: message }, 400);
 }
 
+/**
+ * Checks whether a value is a non-array object.
+ *
+ * @param value - Unknown value to validate.
+ * @returns `true` when the value is a plain object-like record.
+ */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Reads a string field from an object payload.
+ *
+ * @param record - Object payload containing request data.
+ * @param key - Field name to extract.
+ * @returns String field value, or `undefined` when the field is missing or not a string.
+ */
 function getStringField(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" ? value : undefined;
 }
 
+/**
+ * Parses an optional thinking-tag override payload from a request body.
+ *
+ * @param record - Request body payload.
+ * @returns Parsed thinking-tag override, or `undefined` when none was supplied.
+ * @throws {Error} If the override shape is invalid.
+ */
 function getThinkingTagOverride(record: Record<string, unknown>): ThinkingTagConfig | undefined {
   const rawValue = record["thinkingTagOverride"];
   if (rawValue === undefined) {
@@ -86,6 +120,12 @@ function getThinkingTagOverride(record: Record<string, unknown>): ThinkingTagCon
   };
 }
 
+/**
+ * Determines whether a multipart form entry is a browser `File` object.
+ *
+ * @param value - Multipart form value.
+ * @returns `true` when the value behaves like a `File`.
+ */
 function isRequestFile(value: unknown): value is File {
   return (
     typeof value === "object" &&
@@ -103,21 +143,45 @@ const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
 
 // S5 fix: removed debounce and background logic because it broke UI immediate availability
 
+/**
+ * Checks whether an HTTP method is safe for static file serving.
+ *
+ * @param method - Incoming request method.
+ * @returns `true` for static asset-safe methods.
+ */
 function isStaticMethod(method: string): boolean {
   return method === "GET" || method === "HEAD";
 }
 
+/**
+ * Determines whether a pathname looks like a static asset request.
+ *
+ * @param pathname - URL pathname to inspect.
+ * @returns `true` when the pathname points to an asset-like resource.
+ */
 function isAssetLikePath(pathname: string): boolean {
   if (pathname === "/") return false;
   if (pathname.startsWith("/assets/")) return true;
   return path.posix.basename(pathname).includes(".");
 }
 
+/**
+ * Determines whether the client prefers an HTML document response.
+ *
+ * @param req - Incoming HTTP request.
+ * @returns `true` when the request accepts HTML content.
+ */
 function wantsHtmlDocument(req: Request): boolean {
   const accept = req.headers.get("accept")?.toLowerCase() ?? "";
   return accept.includes("text/html") || accept.includes("application/xhtml+xml");
 }
 
+/**
+ * Resolves a client attachment route parameter to a safe absolute file path.
+ *
+ * @param attachPath - Attachment path segment from the request URL.
+ * @returns Absolute attachment path, or `null` when the path is unsafe.
+ */
 function normalizeAttachmentPath(attachPath: string): string | null {
   if (!attachPath || typeof attachPath !== "string") return null;
   if (path.isAbsolute(attachPath)) return null;
@@ -149,6 +213,12 @@ export function createRouter(_settings: AppSettings) {
   let cachedModels: { modelsPath: string; models: ModelEntry[] } | null = null;
   let modelsRefreshPromise: Promise<ModelEntry[]> | null = null;
 
+  /**
+   * Hydrates raw scanned model entries with any metadata already cached in persistence.
+   *
+   * @param rawModels - Raw model entries returned by the filesystem scan.
+   * @returns Models enriched with cached metadata when available.
+   */
   const readCachedModelMetadata = async (rawModels: ModelEntry[]): Promise<ModelEntry[]> => {
     const { getMetadataForPath } = await import("./persistence/chatRepo");
     return Promise.all(
@@ -159,6 +229,13 @@ export function createRouter(_settings: AppSettings) {
     );
   };
 
+  /**
+   * Refreshes the cached model list, optionally populating metadata and default presets.
+   *
+   * @param modelsPath - Root models directory to scan.
+   * @param withSideEffects - Whether to populate metadata and emit preset updates.
+   * @returns Refreshed model list for the configured models directory.
+   */
   const refreshModels = async (
     modelsPath: string,
     withSideEffects: boolean,
@@ -202,6 +279,13 @@ export function createRouter(_settings: AppSettings) {
     return refreshPromise;
   };
 
+  /**
+   * Returns the current model snapshot, reusing cached or in-flight scans when possible.
+   *
+   * @param modelsPath - Root models directory to scan.
+   * @param forceRefresh - Whether to ignore cached models and rescan immediately.
+   * @returns Current model snapshot for the requested models directory.
+   */
   const getModelsSnapshot = async (
     modelsPath: string,
     forceRefresh = false,
@@ -216,6 +300,13 @@ export function createRouter(_settings: AppSettings) {
   };
 
   return {
+    /**
+     * Handles all HTTP requests routed through the Bun backend.
+     *
+     * @param req - Incoming HTTP request.
+     * @param server - Bun server instance used for WebSocket upgrades.
+     * @returns Response to send to the client, or `undefined` when a WebSocket upgrade succeeds.
+     */
     async fetch(req: Request, server: any): Promise<Response | undefined> {
       const url = new URL(req.url);
       const { logInfo } = await import("./logger");
@@ -863,6 +954,13 @@ export function createRouter(_settings: AppSettings) {
       return new Response("Not Found", { status: 404 });
     },
     websocket: {
+      /**
+       * Handles inbound WebSocket control frames from the client.
+       *
+       * @param _ws - WebSocket connection that sent the message.
+       * @param message - Raw WebSocket message payload.
+       * @returns No return value.
+       */
       message(_ws: ServerWebSocket<unknown>, message: string | Buffer) {
         try {
           const frame = JSON.parse(message.toString());
@@ -878,13 +976,31 @@ export function createRouter(_settings: AppSettings) {
           }
         } catch (_e) {}
       },
+      /**
+       * Registers a newly opened WebSocket connection.
+       *
+       * @param ws - Open WebSocket connection.
+       * @returns No return value.
+       */
       open(ws: ServerWebSocket<unknown>) {
         addConnection(ws);
       },
+      /**
+       * Records heartbeat activity from a connected WebSocket client.
+       *
+       * @param ws - WebSocket connection that responded to a ping.
+       * @returns No return value.
+       */
       pong(ws: ServerWebSocket<unknown>) {
         // M4 fix: record pong time for heartbeat staleness detection
         recordPong(ws);
       },
+      /**
+       * Cleans up a closing WebSocket connection and cancels pending approvals tied to disconnected clients.
+       *
+       * @param ws - WebSocket connection that closed.
+       * @returns No return value.
+       */
       close(ws: ServerWebSocket<unknown>) {
         removeConnection(ws);
         import("./tools").then(({ cancelPendingApprovals }) => {

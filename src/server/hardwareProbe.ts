@@ -190,6 +190,13 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
   };
 }
 
+/**
+ * Executes a system command and returns its standard output as text.
+ *
+ * @param command - Executable path and arguments to launch.
+ * @returns Captured standard output text.
+ * @throws {Error} If the command exits non-zero or the executable cannot be found.
+ */
 async function execPromise(command: string[]): Promise<string> {
   try {
     const proc = spawn(command, { stdout: "pipe", stderr: "pipe" });

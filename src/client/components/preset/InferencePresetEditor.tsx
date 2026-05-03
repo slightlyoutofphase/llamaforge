@@ -40,15 +40,32 @@ export function InferencePresetEditor() {
 
   if (!localState) return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
 
+  /**
+   * Updates a single inference preset field within local editor state.
+   *
+   * @param k - Field name to update.
+   * @param v - New field value.
+   * @returns No return value.
+   */
   const updateField = <K extends keyof InferencePreset>(k: K, v: InferencePreset[K]) => {
     setLocalState((prev) => (prev ? { ...prev, [k]: v } : null));
   };
 
+  /**
+   * Persists the currently edited inference preset.
+   *
+   * @returns No return value.
+   */
   const handleSave = () => {
     if (!localState.id) return;
     updateMut.mutate({ id: localState.id, updates: localState });
   };
 
+  /**
+   * Duplicates the current inference preset and opens the clone for editing.
+   *
+   * @returns No return value.
+   */
   const handleDuplicate = () => {
     if (!localState) return;
     const newPreset: InferencePreset = {
@@ -63,6 +80,11 @@ export function InferencePresetEditor() {
     setRightPanelView("inferencePreset", newPreset.id);
   };
 
+  /**
+   * Creates a brand-new inference preset with default sampling values.
+   *
+   * @returns No return value.
+   */
   const handleNew = () => {
     const newPreset: InferencePreset = {
       id: crypto.randomUUID(),
@@ -104,6 +126,11 @@ export function InferencePresetEditor() {
     setRightPanelView("inferencePreset", newPreset.id);
   };
 
+  /**
+   * Deletes the currently selected inference preset when it is mutable.
+   *
+   * @returns No return value.
+   */
   const handleDelete = () => {
     if (!localState.id || localState.isDefault) return;
     deleteMut.mutate(localState.id);

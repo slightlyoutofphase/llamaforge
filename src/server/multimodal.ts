@@ -28,6 +28,12 @@ const _PDF_CACHE_MAX_SIZE = 50;
 // M8 fix: max PDF file size for text extraction (50MB) to prevent OOM on low-memory machines
 const MAX_PDF_EXTRACTION_BYTES = 50 * 1024 * 1024;
 
+/**
+ * Normalizes an attachment path stored in persistence into a safe POSIX-relative path.
+ *
+ * @param relativePath - Attachment path as stored in the database.
+ * @returns A normalized relative path, or `null` when the path is unsafe.
+ */
 function normalizeStoredAttachmentPath(relativePath: string): string | null {
   if (!relativePath || typeof relativePath !== "string") return null;
   if (path.isAbsolute(relativePath)) return null;
@@ -39,6 +45,12 @@ function normalizeStoredAttachmentPath(relativePath: string): string | null {
   return normalized;
 }
 
+/**
+ * Resolves a stored attachment path back to an absolute filesystem path under the app root.
+ *
+ * @param relativePath - Persisted attachment path relative to `.llamaforge`.
+ * @returns The absolute attachment path, or `null` when the path escapes the app root.
+ */
 function resolveStoredAttachmentPath(relativePath: string): string | null {
   const normalized = normalizeStoredAttachmentPath(relativePath);
   if (!normalized) return null;
@@ -49,6 +61,12 @@ function resolveStoredAttachmentPath(relativePath: string): string | null {
   return absPath;
 }
 
+/**
+ * Converts a stored attachment path into the `file://` URL form accepted by llama-server media loading.
+ *
+ * @param relativePath - Persisted attachment path relative to `.llamaforge`.
+ * @returns A relative `file://` URL, or `null` when the stored path is unsafe.
+ */
 function toLocalMediaUrl(relativePath: string): string | null {
   const normalized = normalizeStoredAttachmentPath(relativePath);
   return normalized ? `file://${normalized}` : null;
@@ -69,6 +87,12 @@ export interface ProcessedAttachment extends Attachment {
   extractedTextWasTruncated?: boolean;
 }
 
+/**
+ * Applies the per-attachment extraction length cap to attachment text.
+ *
+ * @param text - Raw extracted attachment text.
+ * @returns Normalized extraction text together with truncation metadata.
+ */
 function clampExtractedText(text: string): ResolvedAttachmentText {
   const normalized = text.replace(/\r\n/g, "\n").replace(/\0/g, "");
   const originalLength = normalized.length;
@@ -87,6 +111,13 @@ function clampExtractedText(text: string): ResolvedAttachmentText {
   };
 }
 
+/**
+ * Stores normalized extracted text metadata on a processed attachment.
+ *
+ * @param attachment - Attachment object that should receive extraction metadata.
+ * @param extractedText - Raw extracted text prior to clamping.
+ * @returns No return value.
+ */
 function assignExtractedText(attachment: ProcessedAttachment, extractedText: string): void {
   const clamped = clampExtractedText(extractedText);
   attachment.extractedText = clamped.text;
@@ -94,6 +125,16 @@ function assignExtractedText(attachment: ProcessedAttachment, extractedText: str
   attachment.extractedTextWasTruncated = clamped.truncated;
 }
 
+/**
+ * Wraps extracted attachment text in the textual block format appended to prompts.
+ *
+ * @param fileName - Original attachment filename.
+ * @param body - Extracted text body to embed.
+ * @param truncated - Whether the embedded text was truncated.
+ * @param includedLength - Number of characters included in the prompt.
+ * @param originalLength - Original extracted character count before truncation.
+ * @returns A formatted attachment block ready to append to the prompt text.
+ */
 function formatAttachmentTextBlock(
   fileName: string,
   body: string,
@@ -167,6 +208,7 @@ export function mergeExtractedAttachmentText(
  * @param mimeType - Document MIME type.
  * @param buffer - File contents.
  * @returns A promise resolving to the {@link ProcessedAttachment}.
+ * @throws {Error} If the file cannot be persisted or the attachment metadata cannot be stored.
  */
 export async function processUpload(
   chatId: string,
@@ -273,10 +315,22 @@ export async function buildContentParts(
   const parts: any[] = [];
   const extractedTextAttachments: ProcessedAttachment[] = [];
 
+  /**
+   * Checks whether attachment text has already been embedded into the stored message body.
+   *
+   * @param attachment - Attachment whose extracted-text marker should be checked.
+   * @returns `true` when the message text already contains this attachment block.
+   */
   const alreadyEmbeddedAttachmentText = (attachment: Attachment): boolean => {
     return text.includes(`--- Attached file: ${attachment.fileName} ---`);
   };
 
+  /**
+   * Resolves extracted prompt text for a persisted attachment when available.
+   *
+   * @param attachment - Attachment to inspect or lazily re-read from disk.
+   * @returns Extraction text metadata, or `undefined` when no text should be embedded.
+   */
   async function resolveAttachmentText(
     attachment: Attachment,
   ): Promise<ResolvedAttachmentText | undefined> {

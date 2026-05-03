@@ -14,11 +14,26 @@ let _dbPath: string | null = null;
 let _vacuumInterval: ReturnType<typeof setInterval> | null = null;
 let _dbGeneration = 0;
 
+/**
+ * Checks whether a SQLite table currently exposes a given column.
+ *
+ * @param db - Database instance to inspect.
+ * @param tableName - Table whose schema should be queried.
+ * @param columnName - Column name expected in the target table.
+ * @returns `true` when the table contains the requested column.
+ */
 function hasColumn(db: Database, tableName: string, columnName: string): boolean {
   const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${tableName})`).all();
   return columns.some((column) => column.name === columnName);
 }
 
+/**
+ * Checks whether a SQLite table exists in the current database.
+ *
+ * @param db - Database instance to inspect.
+ * @param tableName - Table name to look up.
+ * @returns `true` when the table exists.
+ */
 function hasTable(db: Database, tableName: string): boolean {
   const table = db
     .query<
@@ -29,6 +44,11 @@ function hasTable(db: Database, tableName: string): boolean {
   return Boolean(table?.name);
 }
 
+/**
+ * Resolves the per-user application data directory used by LlamaForge.
+ *
+ * @returns Absolute path to the `.llamaforge` data directory, creating it when needed.
+ */
 export function getAppDataDir(): string {
   const appData = join(os.homedir(), ".llamaforge");
   if (!fs.existsSync(appData)) {
@@ -37,6 +57,12 @@ export function getAppDataDir(): string {
   return appData;
 }
 
+/**
+ * Resolves the effective SQLite database path for the current process.
+ *
+ * @param path - Optional explicit database path override.
+ * @returns Absolute on-disk path, or `":memory:"` for ephemeral databases.
+ */
 function resolveDbPath(path?: string): string {
   if (path === ":memory:") {
     return path;
@@ -49,6 +75,8 @@ function resolveDbPath(path?: string): string {
 
 /**
  * Closes and clears the current singleton database instance.
+ *
+ * @returns No return value.
  */
 export function resetDb(): void {
   _dbGeneration += 1;
@@ -67,6 +95,8 @@ export function resetDb(): void {
 /**
  * Returns a monotonically increasing token for the active database lifecycle.
  * Consumers can use this to invalidate process-local caches when the DB resets.
+ *
+ * @returns Current database lifecycle generation.
  */
 export function getDbGeneration(): number {
   return _dbGeneration;
@@ -186,6 +216,7 @@ export function getDb(path?: string): Database {
  * Validates and initialises the database schema without caching the singleton instance.
  *
  * @param db - The {@link Database} instance to initialise.
+ * @returns No return value.
  */
 export function initDbSchema(db: Database): void {
   // Chat sessions
@@ -301,6 +332,7 @@ export function initDbSchema(db: Database): void {
  * Initialises all database tables with `IF NOT EXISTS` guards and seeds default presets.
  *
  * @param path - Optional explicit database path (e.g., `":memory:"` for automated tests).
+ * @returns A promise that resolves once schema creation and default seeding are complete.
  */
 export async function initDb(path?: string): Promise<void> {
   if (path === ":memory:") {

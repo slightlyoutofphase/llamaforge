@@ -17,6 +17,12 @@ const IGNORED_COMPANION_TOKENS = new Set(["model", "mmproj", "mmproject", "proje
 const QUANTIZATION_TOKEN_PATTERN =
   /^(?:q\d(?:_\d)?|iq\d.*|f16|f32|bf16|fp16|fp32|int\d+|mxfp4|qwen|k|m|s|l|xl)$/i;
 
+/**
+ * Builds a normalized token key used to match main GGUF files with mmproj companions.
+ *
+ * @param filePath - Absolute path to a GGUF or mmproj file.
+ * @returns A normalized token key derived from the filename.
+ */
 function buildCompanionKey(filePath: string): string {
   return path
     .parse(filePath)
@@ -28,6 +34,13 @@ function buildCompanionKey(filePath: string): string {
     .join("-");
 }
 
+/**
+ * Finds the best mmproj companion file for a primary GGUF model.
+ *
+ * @param primaryPath - Absolute path to the primary model file.
+ * @param mmprojFiles - Candidate multimodal projection files discovered during the scan.
+ * @returns The matching mmproj file path, or `undefined` when no unique match exists.
+ */
 function findMatchingMmproj(primaryPath: string, mmprojFiles: string[]): string | undefined {
   const primaryKey = buildCompanionKey(primaryPath);
   if (!primaryKey) {
@@ -77,9 +90,11 @@ export interface ScanOptions {
 /**
  * Recursively walks a directory to find GGUF and multimodal projection files.
  *
- * @param dir - starting directory.
- * @param depth - current recursion depth.
- * @returns list of absolute file paths.
+ * @param dir - Directory to scan.
+ * @param depth - Current recursion depth.
+ * @param state - Mutable traversal state tracking how many entries have been inspected.
+ * @param options - Effective scan limits controlling recursion depth and entry count.
+ * @returns Absolute file paths for candidate GGUF and mmproj files.
  * @internal
  */
 async function walkDir(
@@ -121,6 +136,7 @@ async function walkDir(
  * Scans the provided directory path for models, partitioned by publisher and model name.
  *
  * @param rootPath - Absolute path to the models directory.
+ * @param options - Optional overrides for recursion depth and scan entry limits.
  * @returns Array of {@link ModelEntry} discovered in the path.
  * @example
  * ```typescript

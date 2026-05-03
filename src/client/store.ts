@@ -165,15 +165,34 @@ let activeChatLoadRequestId = 0;
 let latestRequestedChatId: string | null = null;
 let activeChatLoadController: AbortController | null = null;
 
+/**
+ * Appends a log line while enforcing the in-memory log buffer size limit.
+ *
+ * @param logs - Existing UI log lines.
+ * @param line - New formatted log line to append.
+ * @returns A trimmed log buffer containing the new line.
+ */
 function appendLogLine(logs: string[], line: string): string[] {
   return [...logs.slice(-(MAX_LOG_LINES - 1)), line];
 }
 
+/**
+ * Checks whether an incoming WebSocket frame includes a concrete chat identifier.
+ *
+ * @param frame - Incoming WebSocket frame from the backend.
+ * @returns `true` when the frame contains a non-empty `chatId` field.
+ */
 function frameHasChatId(frame: WsFrame): frame is WsFrame & { chatId: string } {
   const chatIdValue = (frame as { chatId?: string }).chatId;
   return typeof chatIdValue === "string" && chatIdValue.length > 0;
 }
 
+/**
+ * Queues a chat-scoped WebSocket frame until that chat becomes active in the UI.
+ *
+ * @param frame - WebSocket frame to buffer for later replay.
+ * @returns No return value.
+ */
 function bufferChatFrame(frame: WsFrame) {
   if (!frameHasChatId(frame)) return;
   const queued = pendingChatFrames.get(frame.chatId) || [];
@@ -181,6 +200,13 @@ function bufferChatFrame(frame: WsFrame) {
   pendingChatFrames.set(frame.chatId, queued);
 }
 
+/**
+ * Replays buffered WebSocket frames into the active chat state after a chat loads.
+ *
+ * @param chatId - Chat whose buffered frames should be applied.
+ * @param messages - Current message list for that chat.
+ * @returns Updated messages together with generation and tool-approval state derived from the buffered frames.
+ */
 function applyPendingChatFrames(
   chatId: string,
   messages: ChatMessage[],
@@ -250,6 +276,13 @@ function applyPendingChatFrames(
   };
 }
 
+/**
+ * Determines whether an async chat load result still belongs to the latest requested chat.
+ *
+ * @param requestId - Monotonic request identifier captured when the load began.
+ * @param chatId - Chat identifier associated with the load operation.
+ * @returns `true` when the load result still matches the most recent requested chat.
+ */
 function isCurrentChatLoadRequest(requestId: number, chatId: string): boolean {
   return requestId === activeChatLoadRequestId && latestRequestedChatId === chatId;
 }

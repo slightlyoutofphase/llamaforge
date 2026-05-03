@@ -122,6 +122,8 @@ export async function deleteInferencePreset(id: string): Promise<void> {
  * Fetches all chat sessions from the backend, optionally filtered.
  *
  * @param q - Search query string.
+ * @param limit - Maximum number of chats to return.
+ * @param offset - Number of chats to skip before returning results.
  * @returns A promise resolving to an array of {@link ChatSession}.
  * @throws {Error} If the fetch fails.
  */

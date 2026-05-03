@@ -25,6 +25,12 @@ const NUMERIC_DEFAULTS: NumericDraftState = {
   serverPort: "11435",
 };
 
+/**
+ * Builds the editable string drafts used by numeric settings inputs.
+ *
+ * @param settings - Persisted settings values used to seed the input controls.
+ * @returns A normalized set of string values for the numeric draft fields.
+ */
 function createNumericDrafts(settings?: Partial<AppSettings>): NumericDraftState {
   return {
     llamaPortRangeMin: String(settings?.llamaPortRangeMin ?? NUMERIC_DEFAULTS.llamaPortRangeMin),
@@ -61,6 +67,13 @@ export function SettingsPanel() {
     }
   }, [settings]);
 
+  /**
+   * Updates a draft integer field and mirrors valid values into persisted settings state.
+   *
+   * @param key - Integer settings field being edited.
+   * @param rawValue - Raw string value from the input control.
+   * @returns No return value.
+   */
   const updateIntegerDraft = (
     key: "llamaPortRangeMin" | "llamaPortRangeMax" | "serverPort",
     rawValue: string,
@@ -91,6 +104,12 @@ export function SettingsPanel() {
     });
   };
 
+  /**
+   * Updates the request-timeout draft field and mirrors valid values into persisted settings state.
+   *
+   * @param rawValue - Raw string value from the timeout input.
+   * @returns No return value.
+   */
   const updateTimeoutDraft = (rawValue: string) => {
     setNumericDrafts((prev) => ({ ...prev, requestTimeoutSeconds: rawValue }));
     const trimmed = rawValue.trim();

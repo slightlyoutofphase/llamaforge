@@ -38,6 +38,9 @@ import { MessageBubble } from "./MessageBubble";
  * S12 fix: Lightweight inline display for tool execution results.
  * Renders as a collapsible card attached to the parent assistant message,
  * so tool outputs are visible without appearing as standalone message bubbles.
+ *
+ * @param props - Wrapper props containing the tool result message to display.
+ * @returns Inline tool result card.
  */
 function ToolResultInline({ message }: { message: import("@shared/types.js").ChatMessage }) {
   const [showResult, setShowResult] = useState(false);
@@ -113,6 +116,12 @@ export function ChatView() {
 
   // S10 fix: close dropdowns when clicking outside
   useEffect(() => {
+    /**
+     * Closes preset dropdown menus when the user clicks outside their containers.
+     *
+     * @param e - Mouse event raised on the document.
+     * @returns No return value.
+     */
     const handleClickOutside = (e: MouseEvent) => {
       if (
         showInfSwitch &&
@@ -197,6 +206,11 @@ export function ChatView() {
 
   const requestInFlight = isGenerating || isWaitingForToolApproval;
 
+  /**
+   * Tracks whether the chat scroller is still close enough to the bottom for auto-scroll.
+   *
+   * @returns No return value.
+   */
   const handleScroll = () => {
     if (!scrollContainerRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
@@ -427,6 +441,13 @@ export function ChatView() {
     }
   }, []);
 
+  /**
+   * Applies a new inference or system preset to the current chat.
+   *
+   * @param type - Preset category to update.
+   * @param presetId - Identifier of the selected preset.
+   * @returns No return value.
+   */
   const updatePreset = (type: "inference" | "system", presetId: string) => {
     if (!currentChatId) {
       setError("No active chat available for preset update.");

@@ -14,16 +14,34 @@ interface PendingAttachment {
   previewUrl: string | null;
 }
 
+/**
+ * Creates a local preview URL for attachments that can be rendered inline.
+ *
+ * @param file - Attachment selected by the user.
+ * @returns An object URL for image attachments, or `null` when no preview should be shown.
+ */
 function createPreviewUrl(file: File): string | null {
   return file.type.startsWith("image/") ? URL.createObjectURL(file) : null;
 }
 
+/**
+ * Releases a previously allocated attachment preview URL.
+ *
+ * @param previewUrl - Object URL created for an attachment preview.
+ * @returns No return value.
+ */
 function revokePreviewUrl(previewUrl: string | null) {
   if (previewUrl) {
     URL.revokeObjectURL(previewUrl);
   }
 }
 
+/**
+ * Clones a file so the pending attachment list can be safely reused after submission.
+ *
+ * @param file - File selected from the browser file picker or drag-and-drop area.
+ * @returns A new `File` instance containing the original file contents and metadata.
+ */
 async function cloneFile(file: File): Promise<File> {
   const buffer = await file.arrayBuffer();
   return new File([buffer], file.name, {
@@ -100,6 +118,11 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     },
   });
 
+  /**
+   * Sends the current text and pending attachments to the parent chat view.
+   *
+   * @returns A promise that resolves once the send workflow completes.
+   */
   const handleSend = async () => {
     if ((!inputContent.trim() && files.length === 0) || isGenerating) return;
 
@@ -115,6 +138,12 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     setFiles([]);
   };
 
+  /**
+   * Submits the current message when the user presses Enter without Shift.
+   *
+   * @param e - Textarea keyboard event.
+   * @returns No return value.
+   */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();

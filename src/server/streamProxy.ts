@@ -81,6 +81,13 @@ type ChatCompletionRequestBody = {
 
 const activeGenerations = new Map<string, GenerationSession>();
 
+/**
+ * Converts raw llama.cpp timing metrics into the message metrics stored on assistant turns.
+ *
+ * @param timings - Timing payload reported by llama-server.
+ * @param promptTokensCount - Prompt token count used for the generation request.
+ * @returns Message-level metrics suitable for persistence and UI display.
+ */
 function buildMessageMetrics(
   timings: import("@shared/types.js").LlamaTimings,
   promptTokensCount: number,
@@ -95,6 +102,14 @@ function buildMessageMetrics(
   };
 }
 
+/**
+ * Logs a structured stream-proxy failure with optional contextual metadata.
+ *
+ * @param context - High-level stage where the error occurred.
+ * @param err - Underlying error or failure payload.
+ * @param details - Optional structured metadata describing the failed operation.
+ * @returns No return value.
+ */
 function logStreamProxyError(context: string, err: unknown, details?: Record<string, unknown>) {
   logError(
     "[streamProxy] Error in",
@@ -108,6 +123,7 @@ function logStreamProxyError(context: string, err: unknown, details?: Record<str
  * Terminate an active generation.
  *
  * @param idOrChatId - The generation session ID or chat ID.
+ * @returns No return value.
  */
 export function abortGeneration(idOrChatId: string) {
   const exact = activeGenerations.get(idOrChatId);
@@ -127,6 +143,12 @@ export function abortGeneration(idOrChatId: string) {
   }
 }
 
+/**
+ * Maps a tool-approval cancellation reason to a user-facing assistant message.
+ *
+ * @param reason - Tool approval termination reason returned by the approval subsystem.
+ * @returns Human-readable text describing why tool execution could not continue.
+ */
 function getToolApprovalFailureMessage(reason?: string): string {
   if (reason === "timeout") return "Tool approval timed out.";
   if (reason === "disconnected") return "Tool approval cancelled because the client disconnected.";
@@ -138,6 +160,8 @@ function getToolApprovalFailureMessage(reason?: string): string {
 /**
  * Returns the set of chat IDs that currently have active generations in progress.
  * Used by cleanup.ts to avoid deleting attachment files that may be actively read.
+ *
+ * @returns A set containing the chat IDs of all active generations.
  */
 export function getActiveGenerationChatIds(): Set<string> {
   const chatIds = new Set<string>();
@@ -375,6 +399,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       : undefined;
   const { buildContentParts } = await import("./multimodal");
 
+  /**
+   * Converts persisted chat messages into the OpenAI-compatible message payload sent to llama-server.
+   *
+   * @param messages - Chat history after overflow handling.
+   * @returns OpenAI-style chat completion messages.
+   */
   const buildApiMessages = async (messages: ChatMessage[]): Promise<ChatCompletionMessage[]> => {
     const apiMessages: ChatCompletionMessage[] = [];
 
@@ -437,6 +467,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     return apiMessages;
   };
 
+  /**
+   * Serializes the exact inference payload used for token-budget estimation.
+   *
+   * @param messages - Chat history after overflow handling.
+   * @returns JSON text matching the request payload shape used for prompt tokenization.
+   */
   const buildPromptText = async (messages: ChatMessage[]): Promise<string> =>
     JSON.stringify({
       messages: await buildApiMessages(messages),
@@ -538,6 +574,11 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const timeoutMs = (settings.requestTimeoutSeconds || 60) * 1000;
   let inactivityTimer: ReturnType<typeof setTimeout>;
 
+  /**
+   * Rearms the inactivity timeout that protects long-running streaming generations.
+   *
+   * @returns No return value.
+   */
   const resetInactivityTimer = () => {
     clearTimeout(inactivityTimer);
     inactivityTimer = setTimeout(() => {
@@ -570,6 +611,11 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     );
   }
 
+  /**
+   * Removes the placeholder assistant row when generation fails before any content is written.
+   *
+   * @returns No return value.
+   */
   const cleanupEmptyAssistantMessage = () => {
     if (isContinue) return;
 

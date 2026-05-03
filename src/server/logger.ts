@@ -64,6 +64,12 @@ export function shouldEmitLog(level: EmittedLogLevel): boolean {
   return EMITTED_LEVEL_PRIORITY[level] <= LOG_LEVEL_PRIORITY[configuredLogLevel];
 }
 
+/**
+ * Serializes extra logger arguments into the string forwarded to WebSocket clients.
+ *
+ * @param args - Additional values supplied to the logger call.
+ * @returns A space-prefixed string containing the serialized arguments.
+ */
 function formatArgs(args: unknown[]): string {
   if (args.length === 0) return "";
   return ` ${args.map((arg) => (typeof arg === "object" ? JSON.stringify(arg) : String(arg))).join(" ")}`;

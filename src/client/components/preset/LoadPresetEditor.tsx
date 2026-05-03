@@ -32,13 +32,24 @@ const GEMMA4_THINKING_TAG_CONFIG: ThinkingTagConfig = {
   enableToken: "<|think|>",
 };
 
+/**
+ * Selects the default thinking-tag configuration for a model architecture.
+ *
+ * @param architecture - GGUF architecture name associated with the selected model.
+ * @returns The default thinking-tag override for that model family.
+ */
 function detectThinkingTagOverride(architecture?: string): ThinkingTagConfig {
   return architecture?.toLowerCase() === "gemma4"
     ? GEMMA4_THINKING_TAG_CONFIG
     : DEFAULT_THINKING_TAG_CONFIG;
 }
 
-// Simple accordion component
+/**
+ * Renders a collapsible section used to group preset editor controls.
+ *
+ * @param props - Accordion props including the title, child content, and default open state.
+ * @returns The rendered accordion section.
+ */
 function Accordion({
   title,
   children,
@@ -98,16 +109,36 @@ export function LoadPresetEditor() {
   const defaultTemplate = matchingModel?.metadata?.chatTemplate || "";
   const displayTemplate = localState.chatTemplateOverride ?? defaultTemplate;
 
+  /**
+   * Updates a top-level load preset field within local editor state.
+   *
+   * @param k - Field name to update.
+   * @param v - New field value.
+   * @returns No return value.
+   */
   const updatePresetField = <K extends keyof LoadPreset>(k: K, v: LoadPreset[K]) => {
     setLocalState((prev) => (prev ? { ...prev, [k]: v } : null));
   };
 
+  /**
+   * Updates a nested load configuration field within local editor state.
+   *
+   * @param k - Load config field name to update.
+   * @param v - New load config value.
+   * @returns No return value.
+   */
   const updateConfigField = <K extends keyof ModelLoadConfig>(k: K, v: ModelLoadConfig[K]) => {
     setLocalState((prev) =>
       prev ? { ...prev, config: { ...(prev.config as ModelLoadConfig), [k]: v } } : null,
     );
   };
 
+  /**
+   * Applies the optimizer's suggested configuration values to the current preset.
+   *
+   * @param optimizedConfig - Partial load configuration returned by the hardware optimizer.
+   * @returns No return value.
+   */
   const handleApplyOptimization = (optimizedConfig: Partial<ModelLoadConfig>) => {
     setLocalState((prev) => {
       if (!prev?.config) return prev;
@@ -122,11 +153,21 @@ export function LoadPresetEditor() {
     setShowOptimization(false);
   };
 
+  /**
+   * Persists the currently edited load preset.
+   *
+   * @returns No return value.
+   */
   const handleSave = () => {
     if (!localState.id) return;
     updateMut.mutate({ id: localState.id, updates: localState });
   };
 
+  /**
+   * Duplicates the current load preset and opens the clone for editing.
+   *
+   * @returns No return value.
+   */
   const handleDuplicate = () => {
     if (!localState) return;
     const newPreset: LoadPreset = {
@@ -142,6 +183,11 @@ export function LoadPresetEditor() {
     setRightPanelView("loadPreset", newPreset.id);
   };
 
+  /**
+   * Creates a new load preset seeded with baseline llama-server defaults.
+   *
+   * @returns No return value.
+   */
   const handleNew = () => {
     const newPreset: LoadPreset = {
       id: crypto.randomUUID(),
@@ -182,6 +228,11 @@ export function LoadPresetEditor() {
     setRightPanelView("loadPreset", newPreset.id);
   };
 
+  /**
+   * Deletes the currently selected mutable load preset.
+   *
+   * @returns No return value.
+   */
   const handleDelete = () => {
     if (!localState.id || localState.isReadonly) return;
     deleteMut.mutate(localState.id);

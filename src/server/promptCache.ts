@@ -23,6 +23,7 @@ const stats = new Map<string, PromptCacheStats>();
  *
  * @param chatId - The unique ID of the chat session.
  * @param timings - The performance timings returned by the model server.
+ * @returns No return value.
  */
 export function updatePromptCacheStats(chatId: string, timings: LlamaTimings): void {
   const existing = stats.get(chatId) ?? { totalEvaluated: 0, totalCached: 0 };
@@ -59,6 +60,7 @@ export function getPromptCacheStats(chatId: string): PromptCacheStats | undefine
  * Called when a chat is deleted to avoid tracking stats for non-existent chats.
  *
  * @param chatId - The unique ID of the chat session to evict stats for.
+ * @returns No return value.
  */
 export function evictPromptCacheStats(chatId: string): void {
   stats.delete(chatId);

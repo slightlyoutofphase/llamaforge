@@ -48,6 +48,11 @@ export function ConsoleLog() {
     const viewport = viewportRef.current;
     if (!viewport) return;
 
+    /**
+     * Measures the current log viewport height for virtualized row calculations.
+     *
+     * @returns No return value.
+     */
     const updateViewportHeight = () => {
       setViewportHeight(viewport.clientHeight);
     };

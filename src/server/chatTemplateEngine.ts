@@ -29,6 +29,11 @@ export const DEFAULT_THINKING_CONFIG: ThinkingTagConfig = {
 /**
  * Robustly parses content into target final text and thinking trace without stateful chunks.
  * Safeguards against partial trailing tags to prevent flashing.
+ *
+ * @param raw - Raw assistant output accumulated so far.
+ * @param openTag - Opening delimiter for thinking content.
+ * @param closeTag - Closing delimiter for thinking content.
+ * @returns Split content containing visible text, captured thinking text, and the active parsing state.
  */
 export function parseThinkTags(raw: string, openTag: string, closeTag: string) {
   let content = "";

@@ -56,6 +56,11 @@ export function ChatSidebar() {
 
   // S2 fix: listen for autoname events from the Zustand store and refresh sidebar
   useEffect(() => {
+    /**
+     * Invalidates the chat list after autoname updates are broadcast.
+     *
+     * @returns No return value.
+     */
     const handler = () => {
       qc.invalidateQueries({ queryKey: ["chats"] });
     };
@@ -63,6 +68,11 @@ export function ChatSidebar() {
     return () => window.removeEventListener("llamaforge:chats-invalidate", handler);
   }, [qc]);
 
+  /**
+   * Creates a new chat and navigates to it.
+   *
+   * @returns A promise that resolves once the create flow completes.
+   */
   const handleCreateChat = async () => {
     if (createLockRef.current || createMut.isPending) return;
     createLockRef.current = true;
@@ -78,6 +88,14 @@ export function ChatSidebar() {
     }
   };
 
+  /**
+   * Enters inline rename mode for a chat row.
+   *
+   * @param id - Chat identifier being renamed.
+   * @param name - Current chat name.
+   * @param e - Mouse event from the rename button.
+   * @returns No return value.
+   */
   const handleStartRename = (id: string, name: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -85,6 +103,13 @@ export function ChatSidebar() {
     setEditValue(name);
   };
 
+  /**
+   * Saves an inline chat rename.
+   *
+   * @param id - Chat identifier being renamed.
+   * @param e - Mouse event from the save button.
+   * @returns A promise that resolves once the rename mutation completes.
+   */
   const handleSaveRename = async (id: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -92,6 +117,13 @@ export function ChatSidebar() {
     setEditingId(null);
   };
 
+  /**
+   * Deletes a chat after user confirmation and redirects when the active chat is removed.
+   *
+   * @param id - Chat identifier to delete.
+   * @param e - Mouse event from the delete button.
+   * @returns A promise that resolves once the delete flow completes.
+   */
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -118,17 +150,37 @@ export function ChatSidebar() {
     }
   };
 
+  /**
+   * Opens a specific chat in the main workspace.
+   *
+   * @param targetChatId - Chat identifier to open.
+   * @returns No return value.
+   */
   const handleOpenChat = (targetChatId: string) => {
     clearUnreadChat(targetChatId);
     navigate({ to: "/chat/$chatId", params: { chatId: targetChatId } });
   };
 
+  /**
+   * Navigates to the parent chat for a branch row.
+   *
+   * @param parentChatId - Parent chat identifier.
+   * @param e - Mouse event from the parent-chat button.
+   * @returns No return value.
+   */
   const handleOpenParentChat = (parentChatId: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     handleOpenChat(parentChatId);
   };
 
+  /**
+   * Exports a single chat as JSON.
+   *
+   * @param id - Chat identifier to export.
+   * @param e - Mouse event from the export button.
+   * @returns A promise that resolves once the export download has been triggered.
+   */
   const handleExport = async (id: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -148,6 +200,11 @@ export function ChatSidebar() {
     }
   };
 
+  /**
+   * Exports the currently active chat as JSON.
+   *
+   * @returns A promise that resolves once the export download has been triggered.
+   */
   const handleExportCurrentChat = async () => {
     if (!currentChatId) return;
     const res = await fetch(`/api/chats/${currentChatId}/export`, {

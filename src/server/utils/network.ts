@@ -12,6 +12,12 @@ import net from "node:net";
  * @throws Error if no ports are available in the range.
  */
 export async function findFreePort(minPort: number, maxPort: number): Promise<number> {
+  /**
+   * Tests whether a single TCP port can be bound on the loopback interface.
+   *
+   * @param port - Candidate port to probe.
+   * @returns A promise resolving to `true` when the port is currently free.
+   */
   const isPortFree = (port: number): Promise<boolean> => {
     return new Promise((resolve) => {
       const server = net.createServer();
