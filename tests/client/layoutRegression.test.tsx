@@ -14,6 +14,18 @@ let ModelSelector: typeof import("../../src/client/ModelSelector").ModelSelector
 let ModelLibraryPanel: typeof import("../../src/client/components/sidebar/ModelLibraryPanel").ModelLibraryPanel;
 let originalFetch: typeof global.fetch;
 
+mock.module("@tanstack/react-router", () => ({
+  useLocation: () => ({ pathname: "/" }),
+  useParams: () => ({}),
+  Link: ({ children, className, to, ...props }: any) => (
+    <a href={to} className={className} {...props}>
+      {children}
+    </a>
+  ),
+  Outlet: () => <div data-testid="registry-outlet">Registry content</div>,
+  useNavigate: () => mock(),
+}));
+
 const mockPresets = [
   {
     id: "preset-1",
@@ -55,20 +67,6 @@ const queryClient = new QueryClient({
 
 describe("Layout regression tests", () => {
   beforeAll(async () => {
-    mock.restore();
-
-    mock.module("@tanstack/react-router", () => ({
-      useLocation: () => ({ pathname: "/" }),
-      useParams: () => ({}),
-      Link: ({ children, className, to, ...props }: any) => (
-        <a href={to} className={className} {...props}>
-          {children}
-        </a>
-      ),
-      Outlet: () => <div data-testid="registry-outlet">Registry content</div>,
-      useNavigate: () => mock(),
-    }));
-
     originalFetch = global.fetch;
     global.fetch = mock((input) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -121,6 +119,20 @@ describe("Layout regression tests", () => {
     fireEvent.click(screen.getByTitle("Settings"));
     expect(screen.queryByTestId("settings-panel")).toBeNull();
     expect(screen.getByTestId("registry-outlet")).toBeTruthy();
+  });
+
+  it("renders routed content inside a shrinkable flex column for scrollable views", () => {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <App />
+      </QueryClientProvider>,
+    );
+
+    const outletHost = screen.getByTestId("registry-outlet").parentElement;
+    expect(outletHost).toBeTruthy();
+    expect(outletHost?.className).toContain("flex");
+    expect(outletHost?.className).toContain("flex-col");
+    expect(outletHost?.className).toContain("min-h-0");
   });
 
   it("renders ModelSelector with a responsive shrink container and long path wrapping styles", () => {

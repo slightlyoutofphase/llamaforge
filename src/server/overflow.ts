@@ -3,12 +3,17 @@
  * Strategies for handling context window overflow by truncating or sliding message history.
  */
 
-import type { ChatMessage } from "@shared/types.js";
+import type { ChatMessage } from "../shared/types";
 
 const tokenCountCache = new Map<string, number>();
 const DEFAULT_CTX_SIZE = 4096;
 const DEFAULT_RESERVED_TOKENS = 512;
 const MIN_RESERVED_TOKENS = 128;
+
+export interface TokenEstimationOptions {
+  /** Optional builder for a serialized prompt payload matching the real request shape. */
+  buildPromptText?: ((messages: ChatMessage[]) => Promise<string>) | undefined;
+}
 
 function normalizeCtxSize(ctxSize: number): number {
   return Number.isFinite(ctxSize) && ctxSize > 0 ? Math.floor(ctxSize) : DEFAULT_CTX_SIZE;
@@ -29,6 +34,36 @@ function buildMessageKey(message: ChatMessage): string {
 function buildMessagesKey(messages: ChatMessage[], port?: number): string {
   // M1 fix: include array length as an additional discriminator
   return `n=${messages.length}|${messages.map((m) => buildMessageKey(m)).join("||")}|port:${port ?? 0}`;
+}
+
+function buildSerializedPromptKey(serializedPrompt: string, port?: number): string {
+  return `payload:${port ?? 0}:${serializedPrompt}`;
+}
+
+function serializeMessagesForPromptBudget(messages: ChatMessage[]): string {
+  return JSON.stringify(
+    messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+      toolCallId: message.toolCallId,
+      toolCallsJson: message.toolCallsJson,
+    })),
+  );
+}
+
+function estimateAttachmentMediaTokens(messages: ChatMessage[]): number {
+  let attachmentTokens = 0;
+  for (const message of messages) {
+    if (!message.attachments) continue;
+    for (const attachment of message.attachments) {
+      if (attachment.mimeType.startsWith("image/")) {
+        attachmentTokens += 560;
+      } else if (attachment.mimeType.startsWith("audio/")) {
+        attachmentTokens += 256;
+      }
+    }
+  }
+  return attachmentTokens;
 }
 
 async function fetchTokenCount(text: string, port?: number): Promise<number> {
@@ -53,29 +88,42 @@ async function fetchTokenCount(text: string, port?: number): Promise<number> {
 /**
  * Calculates current token usage for a list of messages.
  */
-export async function getTokens(msgs: ChatMessage[], port?: number): Promise<number> {
+export async function getTokens(
+  msgs: ChatMessage[],
+  port?: number,
+  options?: TokenEstimationOptions,
+): Promise<number> {
+  if (options?.buildPromptText) {
+    return getPromptTokens(msgs, port, options);
+  }
+
   const cacheKey = buildMessagesKey(msgs, port);
   const cached = tokenCountCache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  let contentTokens = 0;
-  for (const message of msgs) {
-    contentTokens += await fetchTokenCount(message.content, port);
+  const start = Date.now();
+  const serializedPrompt = serializeMessagesForPromptBudget(msgs);
+  const serializedCacheKey = buildSerializedPromptKey(serializedPrompt, port);
+  const serializedCached = tokenCountCache.get(serializedCacheKey);
+  const contentTokens =
+    serializedCached !== undefined
+      ? serializedCached
+      : await fetchTokenCount(serializedPrompt, port);
+
+  const duration = Date.now() - start;
+  if (duration > 100) {
+    const { logDebug } = await import("./logger");
+    logDebug("Tokenization completed", {
+      durationMs: duration,
+      messageCount: msgs.length,
+      totalTokens: contentTokens,
+    });
   }
 
-  let attachmentTokens = 0;
-  for (const message of msgs) {
-    if (!message.attachments) continue;
-    for (const attachment of message.attachments) {
-      if (attachment.mimeType.startsWith("image/")) {
-        attachmentTokens += 560;
-      } else if (attachment.mimeType.startsWith("audio/")) {
-        attachmentTokens += 256;
-      }
-    }
-  }
+  const attachmentTokens = estimateAttachmentMediaTokens(msgs);
 
   const total = contentTokens + attachmentTokens;
+  tokenCountCache.set(serializedCacheKey, contentTokens);
   tokenCountCache.set(cacheKey, total);
   // S7 fix: evict oldest 25% instead of clearing everything to prevent thrashing
   if (tokenCountCache.size > 500) {
@@ -90,6 +138,37 @@ export async function getTokens(msgs: ChatMessage[], port?: number): Promise<num
   return total;
 }
 
+async function getPromptTokens(
+  messages: ChatMessage[],
+  port?: number,
+  options?: TokenEstimationOptions,
+): Promise<number> {
+  if (!options?.buildPromptText) {
+    return getTokens(messages, port);
+  }
+
+  const serializedPrompt = await options.buildPromptText(messages);
+  const serializedCacheKey = buildSerializedPromptKey(serializedPrompt, port);
+  const cached = tokenCountCache.get(serializedCacheKey);
+  const contentTokens =
+    cached !== undefined ? cached : await fetchTokenCount(serializedPrompt, port);
+  const total = contentTokens + estimateAttachmentMediaTokens(messages);
+
+  tokenCountCache.set(serializedCacheKey, contentTokens);
+  tokenCountCache.set(buildMessagesKey(messages, port), total);
+  if (tokenCountCache.size > 500) {
+    const evictCount = Math.floor(tokenCountCache.size * 0.25);
+    let removed = 0;
+    for (const key of tokenCountCache.keys()) {
+      if (removed >= evictCount) break;
+      tokenCountCache.delete(key);
+      removed++;
+    }
+  }
+
+  return total;
+}
+
 function cloneMessage(message: ChatMessage): ChatMessage {
   return { ...message, attachments: message.attachments ? [...message.attachments] : undefined };
 }
@@ -100,7 +179,7 @@ function getReservedTokens(maxTokens: number): number {
 
 function getProtectedPrefixLength(messages: ChatMessage[], roleSystemPrompt: boolean): number {
   let protectedCount = 0;
-  if (roleSystemPrompt && messages.length > 0 && messages[0].role === "system") {
+  if (roleSystemPrompt && messages[0]?.role === "system") {
     protectedCount = 1;
   }
   return protectedCount;
@@ -116,6 +195,7 @@ export async function truncateMessages(
   maxTokens: number,
   port?: number,
   roleSystemPrompt: boolean = true,
+  tokenOptions?: TokenEstimationOptions,
 ): Promise<ChatMessage[]> {
   if (overflowPolicy === "StopAtLimit") return rawMessages;
 
@@ -125,11 +205,7 @@ export async function truncateMessages(
   const maxPromptTokens = normalizedCtxSize - reservedTokens;
   if (maxPromptTokens <= 0) return messages;
 
-  const getMessageTokens = async (message: ChatMessage) => {
-    return await getTokens([message], port);
-  };
-
-  let currentTokens = await getTokens(messages, port);
+  let currentTokens = await getPromptTokens(messages, port, tokenOptions);
   if (currentTokens <= maxPromptTokens) return messages;
 
   const protectedPrefix = getProtectedPrefixLength(messages, roleSystemPrompt);
@@ -142,24 +218,28 @@ export async function truncateMessages(
     const preserveUntil = firstUserIndex !== -1 ? firstUserIndex + 1 : protectedPrefix;
     while (currentTokens > maxPromptTokens && messages.length > preserveUntil + keepLastCount) {
       const removed = messages.splice(preserveUntil, 1)[0];
-      currentTokens -= await getMessageTokens(removed);
+      if (!removed) break;
+      currentTokens = await getPromptTokens(messages, port, tokenOptions);
     }
   } else {
     while (currentTokens > maxPromptTokens && messages.length > protectedPrefix + keepLastCount) {
       const removed = messages.splice(protectedPrefix, 1)[0];
-      currentTokens -= await getMessageTokens(removed);
+      if (!removed) break;
+      currentTokens = await getPromptTokens(messages, port, tokenOptions);
     }
   }
 
   const hardProtectedIndex = protectedPrefix;
   while (currentTokens > maxPromptTokens && messages.length > hardProtectedIndex + keepLastCount) {
     const removed = messages.splice(hardProtectedIndex, 1)[0];
-    currentTokens -= await getMessageTokens(removed);
+    if (!removed) break;
+    currentTokens = await getPromptTokens(messages, port, tokenOptions);
   }
 
-  if (currentTokens > maxPromptTokens && messages.length > 0) {
-    const last = { ...messages[messages.length - 1] };
-    const lastTokens = await getMessageTokens(last);
+  const lastMessage = messages.at(-1);
+  if (currentTokens > maxPromptTokens && lastMessage) {
+    const last = cloneMessage(lastMessage);
+    const lastTokens = await getPromptTokens([last], port, tokenOptions);
     if (lastTokens > maxPromptTokens && last.content.length > 100) {
       const keepCount = Math.max(
         64,

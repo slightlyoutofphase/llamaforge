@@ -3,7 +3,7 @@
  * Tests for the chat repository persistence layer.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import {
   addMessage,
   createBranch,
@@ -51,6 +51,24 @@ describe("chatRepo", () => {
     expect(deleted).toBeNull();
   });
 
+  it("lists chats by creation date instead of last update time", async () => {
+    const nowSpy = spyOn(Date, "now");
+    let now = 1000;
+    nowSpy.mockImplementation(() => now++);
+
+    try {
+      const first = await createChat("First Chat");
+      const second = await createChat("Second Chat");
+      await updateChat(first.id, { name: "First Chat Renamed" });
+
+      const chats = await getChats();
+      expect(chats[0]?.id).toBe(second.id);
+      expect(chats[1]?.id).toBe(first.id);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("adds and retrieves messages", async () => {
     const chat = await createChat("Message Test");
     await addMessage({
@@ -61,11 +79,20 @@ describe("chatRepo", () => {
       rawContent: "Hello",
       position: 0,
       createdAt: Date.now(),
+      metrics: {
+        predictedTokens: 32,
+        tokensPerSecond: 21.5,
+        promptTokens: 128,
+        promptTokensPerSecond: 450.2,
+        cachedPromptTokens: 64,
+        evaluatedPromptTokens: 80,
+      },
     });
 
     const retrieved = await getChat(chat.id);
     expect(retrieved?.messages?.length).toBe(1);
     expect(retrieved?.messages?.[0]?.content).toBe("Hello");
+    expect(retrieved?.messages?.[0]?.metrics?.tokensPerSecond).toBe(21.5);
   });
 
   it("updates and deletes messages", async () => {
@@ -132,6 +159,39 @@ describe("chatRepo", () => {
     expect(importedChat?.name).toContain("Exchange");
     expect(importedChat?.messages?.length).toBe(1);
     expect(importedChat?.messages?.[0].content).toBe("Export test");
+  });
+
+  it("rejects imported tool messages without a toolCallId", async () => {
+    const invalidImport = JSON.stringify({
+      name: "Broken Tool Chat",
+      messages: [
+        {
+          role: "tool",
+          content: "{}",
+        },
+      ],
+    });
+
+    await expect(importChat(invalidImport)).rejects.toThrow("toolCallId");
+  });
+
+  it("strips malformed assistant toolCallsJson during import instead of failing the chat", async () => {
+    const importedId = await importChat(
+      JSON.stringify({
+        name: "Malformed Tool Calls",
+        messages: [
+          {
+            role: "assistant",
+            content: "Still import this",
+            toolCallsJson: "{not valid json",
+          },
+        ],
+      }),
+    );
+
+    const importedChat = await getChat(importedId);
+    expect(importedChat?.messages?.[0]?.content).toBe("Still import this");
+    expect(importedChat?.messages?.[0]?.toolCallsJson).toBeUndefined();
   });
 
   it("exports a chat to markdown", async () => {

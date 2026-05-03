@@ -6,9 +6,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { createChat, getChat } from "../../src/server/persistence/chatRepo";
-import { initDb, resetDb } from "../../src/server/persistence/db";
+import { addMessage, createChat, getChat, updateChat } from "../../src/server/persistence/chatRepo";
+import { getDb, initDb, resetDb } from "../../src/server/persistence/db";
+import { createInferencePreset } from "../../src/server/persistence/presetRepo";
+import { saveSettings } from "../../src/server/persistence/settingsRepo";
 import { proxyCompletion } from "../../src/server/streamProxy";
+import { cancelPendingApprovals, resolveToolApproval } from "../../src/server/tools";
+
+let mockPdfText = "PDF text";
 
 // Mock the llamaServer
 mock.module("../../src/server/llamaServer", () => ({
@@ -33,6 +38,17 @@ mock.module("node:fs/promises", () => ({
   writeFile: async () => {},
   readFile: async (_path: string) => Buffer.from("abc"),
   access: async () => {},
+}));
+
+mock.module("pdfjs-dist", () => ({
+  getDocument: () => ({
+    promise: Promise.resolve({
+      numPages: 1,
+      getPage: async () => ({
+        getTextContent: async () => ({ items: [{ str: mockPdfText }] }),
+      }),
+    }),
+  }),
 }));
 
 /**
@@ -94,6 +110,7 @@ describe("streamProxy", () => {
   });
 
   afterEach(() => {
+    cancelPendingApprovals();
     resetDb();
   });
 
@@ -220,6 +237,45 @@ describe("streamProxy", () => {
     expect(assistantMsg).toBeDefined();
     expect(assistantMsg?.role).toBe("assistant");
     expect(assistantMsg?.content).toBe("Reply!");
+    expect(assistantMsg?.metrics?.predictedTokens).toBe(5);
+    expect(assistantMsg?.metrics?.tokensPerSecond).toBe(50);
+  });
+
+  it("ignores malformed persisted toolCallsJson when preparing a follow-up request", async () => {
+    const stream = buildSSEStream([chatDelta("Recovered"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Malformed Tool Calls History");
+    getDb()
+      .prepare(
+        `INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json, metrics_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "bad-tool-json",
+        chat.id,
+        "assistant",
+        "Broken metadata should not crash history assembly",
+        "Broken metadata should not crash history assembly",
+        null,
+        0,
+        Date.now(),
+        null,
+        "{bad json",
+        null,
+      );
+
+    await proxyCompletion({ chatId: chat.id, content: "continue", attachments: [] });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(capturedBody.messages).toBeInstanceOf(Array);
+    expect(capturedBody.messages[0]?.tool_calls).toBeUndefined();
   });
 
   it("extracts thinking blocks from streaming content", async () => {
@@ -282,9 +338,115 @@ describe("streamProxy", () => {
     // With image attachments, content should be multimodal parts array
     expect(Array.isArray(userMsg.content)).toBe(true);
     expect(userMsg.content[0].type).toBe("image_url");
-    expect(userMsg.content[0].image_url.url).toMatch(/^file:\/\/\/.+\.png$/);
+    expect(userMsg.content[0].image_url.url).toMatch(/^file:\/\/attachments\/.+\.png$/);
     expect(userMsg.content[1].type).toBe("text");
     expect(userMsg.content[1].text).toContain("Look at this");
+  });
+
+  it("stores bounded summaries for large text attachments", async () => {
+    const stream = buildSSEStream([chatDelta("summarized"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Large Text Attachment Test");
+    const file = new File(["A".repeat(30000)], "large.txt", { type: "text/plain" });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "Summarize the attachment",
+      attachments: [file],
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    const reloaded = await getChat(chat.id);
+    const userMsg = reloaded?.messages?.find((message) => message.role === "user");
+    const payloadUserMsg = capturedBody.messages.find((message: any) => message.role === "user");
+
+    expect(userMsg).toBeDefined();
+    expect(userMsg?.content.length).toBeLessThan(13000);
+    expect(userMsg?.content).toContain(
+      "Attachment text truncated: kept 12000 of 30000 characters.",
+    );
+    expect(payloadUserMsg.content.length).toBeLessThan(13000);
+    expect(payloadUserMsg.content).not.toContain("A".repeat(15000));
+  });
+
+  it("stores bounded summaries for large PDF attachments", async () => {
+    mockPdfText = "P".repeat(30000);
+    const stream = buildSSEStream([chatDelta("pdf summarized"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Large PDF Attachment Test");
+    const file = new File(["fake pdf bytes"], "large.pdf", { type: "application/pdf" });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "Summarize the PDF",
+      attachments: [file],
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    const reloaded = await getChat(chat.id);
+    const userMsg = reloaded?.messages?.find((message) => message.role === "user");
+    const payloadUserMsg = capturedBody.messages.find((message: any) => message.role === "user");
+
+    expect(userMsg).toBeDefined();
+    expect(userMsg?.rawContent.length).toBeLessThan(13000);
+    expect(userMsg?.rawContent).toContain(
+      "Attachment text truncated: kept 12000 of 30001 characters.",
+    );
+    expect(payloadUserMsg.content.length).toBeLessThan(13000);
+    expect(payloadUserMsg.content).not.toContain("P".repeat(15000));
+
+    mockPdfText = "PDF text";
+  });
+
+  it("times out stalled streams before the first chunk and removes the empty assistant row", async () => {
+    await saveSettings({ requestTimeoutSeconds: 0.02 });
+
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal;
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: () =>
+              new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
+                if (signal.aborted) {
+                  reject(new DOMException("Aborted", "AbortError"));
+                  return;
+                }
+
+                signal.addEventListener(
+                  "abort",
+                  () => reject(new DOMException("Aborted", "AbortError")),
+                  { once: true },
+                );
+              }),
+            cancel: async () => {},
+          }),
+        },
+      } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Timeout Test");
+    await proxyCompletion({ chatId: chat.id, content: "hello", attachments: [] });
+
+    await new Promise((r) => setTimeout(r, 120));
+
+    const reloaded = await getChat(chat.id);
+    expect(reloaded?.messages?.filter((message) => message.role === "assistant")).toHaveLength(0);
+    expect(reloaded?.messages?.filter((message) => message.role === "user")).toHaveLength(1);
   });
 
   it("handles max_tokens stop reason from chat completions format", async () => {
@@ -372,6 +534,315 @@ describe("streamProxy", () => {
 
     await new Promise((r) => setTimeout(r, 200));
     // If we got here without a crash, the tool call accumulation worked
+  });
+
+  it("stops cleanly when a tool approval is rejected", async () => {
+    const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/tokenize")) {
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 }) as any;
+      }
+
+      const stream = buildSSEStream([
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "tc_reject",
+                    function: { name: "calculate", arguments: '{"expression":' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "", function: { name: "", arguments: '"2+2"}' } }],
+              },
+            },
+          ],
+        },
+        chatStop("tool_calls"),
+      ]);
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Tool Reject Test");
+    const inferencePresetId = "tool-reject-preset";
+    await createInferencePreset({
+      id: inferencePresetId,
+      name: "Tool Reject Preset",
+      isDefault: false,
+      temperature: 0.8,
+      topK: 40,
+      topP: 0.95,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      repeatLastN: 64,
+      typicalP: 1.0,
+      presencePenalty: 0.0,
+      frequencyPenalty: 0.0,
+      mirostat: 0,
+      mirostatTau: 5.0,
+      mirostatEta: 0.1,
+      dynaTempRange: 0.0,
+      dynaTempExponent: 1.0,
+      seed: -1,
+      maxTokens: -1,
+      stopStrings: [],
+      toolCallsEnabled: true,
+      tools: [
+        {
+          name: "calculate",
+          description: "Evaluate a mathematical expression.",
+          parameters: {
+            type: "object",
+            properties: {
+              expression: { type: "string" },
+            },
+            required: ["expression"],
+          },
+        },
+      ],
+      structuredOutput: undefined,
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "reject the tool",
+      attachments: [],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    resolveToolApproval("tc_reject", false);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const reloaded = await getChat(chat.id);
+    expect(reloaded?.messages?.filter((message) => message.role === "tool")).toHaveLength(0);
+    const assistantMsg = reloaded?.messages?.find((message) => message.role === "assistant");
+    expect(assistantMsg?.toolCallsJson).toContain("tc_reject");
+  });
+
+  it("caps recursive tool-call re-entry depth", async () => {
+    let chatCompletionFetchCount = 0;
+    const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/tokenize")) {
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 }) as any;
+      }
+
+      chatCompletionFetchCount += 1;
+      const toolCallId = `tc_${chatCompletionFetchCount}`;
+      const stream = buildSSEStream([
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: toolCallId,
+                    function: { name: "calculate", arguments: '{"expression":' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [{ index: 0, id: "", function: { name: "", arguments: '"2+2"}' } }],
+              },
+            },
+          ],
+        },
+        chatStop("tool_calls"),
+      ]);
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Tool Recursion Cap Test");
+    const inferencePresetId = "tool-recursion-preset";
+    await createInferencePreset({
+      id: inferencePresetId,
+      name: "Tool Recursion Preset",
+      isDefault: false,
+      temperature: 0.8,
+      topK: 40,
+      topP: 0.95,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      repeatLastN: 64,
+      typicalP: 1.0,
+      presencePenalty: 0.0,
+      frequencyPenalty: 0.0,
+      mirostat: 0,
+      mirostatTau: 5.0,
+      mirostatEta: 0.1,
+      dynaTempRange: 0.0,
+      dynaTempExponent: 1.0,
+      seed: -1,
+      maxTokens: -1,
+      stopStrings: [],
+      toolCallsEnabled: true,
+      tools: [
+        {
+          name: "calculate",
+          description: "Evaluate a mathematical expression.",
+          parameters: {
+            type: "object",
+            properties: {
+              expression: { type: "string" },
+            },
+            required: ["expression"],
+          },
+        },
+      ],
+      structuredOutput: undefined,
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "calculate forever",
+      attachments: [],
+    });
+
+    for (let approvalIndex = 1; approvalIndex <= 6; approvalIndex++) {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      resolveToolApproval(`tc_${approvalIndex}`, true, '{"expression":"2+2"}');
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(chatCompletionFetchCount).toBe(6);
+  });
+
+  it("truncates history using tool and schema overhead without per-message tokenization loops", async () => {
+    let tokenizeFetchCount = 0;
+    const stream = buildSSEStream([chatDelta("trimmed"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/tokenize")) {
+        tokenizeFetchCount += 1;
+        const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+        const tokenCount = Math.max(1, Math.ceil((body.content?.length ?? 0) / 4));
+        return new Response(JSON.stringify({ tokens: new Array(tokenCount).fill(1) }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }) as any;
+      }
+
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Payload Budget Test");
+    await addMessage({
+      id: Bun.randomUUIDv7(),
+      chatId: chat.id,
+      role: "assistant",
+      content: "OLD ".repeat(300),
+      rawContent: "OLD ".repeat(300),
+      position: 0,
+      createdAt: Date.now(),
+    });
+
+    const inferencePresetId = "payload-budget-preset";
+    await createInferencePreset({
+      id: inferencePresetId,
+      name: "Payload Budget Preset",
+      isDefault: false,
+      temperature: 0.8,
+      topK: 40,
+      topP: 0.95,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      repeatLastN: 64,
+      typicalP: 1.0,
+      presencePenalty: 0.0,
+      frequencyPenalty: 0.0,
+      mirostat: 0,
+      mirostatTau: 5.0,
+      mirostatEta: 0.1,
+      dynaTempRange: 0.0,
+      dynaTempExponent: 1.0,
+      seed: -1,
+      maxTokens: 3400,
+      stopStrings: [],
+      toolCallsEnabled: true,
+      tools: [
+        {
+          name: "payload_tool",
+          description: "T".repeat(1000),
+          parameters: {
+            type: "object",
+            properties: {
+              value: { type: "string" },
+            },
+            required: ["value"],
+          },
+        },
+      ],
+      structuredOutput: {
+        enabled: true,
+        schema: {
+          type: "object",
+          properties: {
+            result: { type: "string", description: "S".repeat(700) },
+          },
+          required: ["result"],
+        },
+        grammar: undefined,
+      },
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "latest question",
+      attachments: [],
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    const contentStrings = capturedBody.messages
+      .map((message: any) =>
+        typeof message.content === "string" ? message.content : JSON.stringify(message.content),
+      )
+      .join("\n");
+
+    expect(contentStrings).not.toContain("OLD OLD OLD");
+    expect(contentStrings).toContain("latest question");
+    expect(capturedBody.tools).toHaveLength(1);
+    expect(capturedBody.response_format?.json_schema?.properties?.result?.description).toContain(
+      "S",
+    );
+    expect(tokenizeFetchCount).toBeLessThanOrEqual(2);
   });
 
   it("handles error responses from the model server gracefully", async () => {

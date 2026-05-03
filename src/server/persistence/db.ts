@@ -12,6 +12,22 @@ import { logError, logInfo, logWarn } from "../logger";
 let _db: Database | null = null;
 let _dbPath: string | null = null;
 let _vacuumInterval: ReturnType<typeof setInterval> | null = null;
+let _dbGeneration = 0;
+
+function hasColumn(db: Database, tableName: string, columnName: string): boolean {
+  const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${tableName})`).all();
+  return columns.some((column) => column.name === columnName);
+}
+
+function hasTable(db: Database, tableName: string): boolean {
+  const table = db
+    .query<
+      { name: string },
+      [string]
+    >("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+    .get(tableName);
+  return Boolean(table?.name);
+}
 
 export function getAppDataDir(): string {
   const appData = join(os.homedir(), ".llamaforge");
@@ -35,6 +51,7 @@ function resolveDbPath(path?: string): string {
  * Closes and clears the current singleton database instance.
  */
 export function resetDb(): void {
+  _dbGeneration += 1;
   // S3 fix: clear the incremental vacuum interval to prevent leaks
   if (_vacuumInterval !== null) {
     clearInterval(_vacuumInterval);
@@ -45,6 +62,14 @@ export function resetDb(): void {
     _db = null;
     _dbPath = null;
   }
+}
+
+/**
+ * Returns a monotonically increasing token for the active database lifecycle.
+ * Consumers can use this to invalidate process-local caches when the DB resets.
+ */
+export function getDbGeneration(): number {
+  return _dbGeneration;
 }
 
 /**
@@ -116,10 +141,15 @@ export function getDb(path?: string): Database {
   );
 
   const currentVersion = _db.query<any, []>("PRAGMA user_version").get().user_version;
-  const LATEST_DB_VERSION = 1;
+  const LATEST_DB_VERSION = 2;
   const MIGRATIONS: Array<(d: Database) => void> = [
     (_d: Database) => {
       // v0 -> v1: initial schema creation is handled by initDbSchema.
+    },
+    (d: Database) => {
+      if (hasTable(d, "messages") && !hasColumn(d, "messages", "metrics_json")) {
+        d.run("ALTER TABLE messages ADD COLUMN metrics_json TEXT");
+      }
     },
   ];
 
@@ -136,7 +166,8 @@ export function getDb(path?: string): Database {
     try {
       _db.exec("BEGIN TRANSACTION;");
       for (let i = currentVersion; i < LATEST_DB_VERSION; i++) {
-        if (MIGRATIONS[i]) MIGRATIONS[i](_db);
+        const migration = MIGRATIONS[i];
+        if (migration) migration(_db);
       }
       _db.exec(`PRAGMA user_version = ${LATEST_DB_VERSION};`);
       _db.exec("COMMIT;");
@@ -184,7 +215,8 @@ export function initDbSchema(db: Database): void {
       position        INTEGER NOT NULL,
       created_at      INTEGER NOT NULL,
       tool_call_id    TEXT,
-      tool_calls_json TEXT
+      tool_calls_json TEXT,
+      metrics_json    TEXT
     );
   `);
 
@@ -341,20 +373,22 @@ export async function initDb(path?: string): Promise<void> {
       is_default: 1,
       is_readonly: 1,
       config_json: JSON.stringify({
-        contextSize: 4096,
-        contextShift: false,
-        gpuLayers: 0,
-        threads: 4,
-        batchSize: 512,
-        microBatchSize: 512,
-        ropeScaling: "none",
-        ropeFreqBase: 0,
-        ropeFreqScale: 1,
-        kvCacheTypeK: "f16",
-        kvCacheTypeV: "f16",
-        mlock: true,
-        noMmap: false,
-        flashAttention: true,
+        config: {
+          contextSize: 4096,
+          contextShift: false,
+          gpuLayers: 0,
+          threads: 4,
+          batchSize: 512,
+          microBatchSize: 512,
+          ropeScaling: "none",
+          ropeFreqBase: 0,
+          ropeFreqScale: 1,
+          kvCacheTypeK: "f16",
+          kvCacheTypeV: "f16",
+          mlock: true,
+          noMmap: false,
+          flashAttn: "on",
+        },
       }),
       created_at: Date.now(),
       updated_at: Date.now(),

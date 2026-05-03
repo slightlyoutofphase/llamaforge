@@ -3,11 +3,11 @@
  * Provides an inline model selector for choosing and loading models.
  */
 
-import type { ModelEntry, ModelLoadConfig } from "@shared/types.js";
+import type { LoadModelRequest, ModelEntry, ModelLoadConfig } from "../shared/types";
 import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { ChevronDown, Cpu, Database, Loader2, Play, Square } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MultimodalGuardModal } from "./components/sidebar/MultimodalGuardModal";
 import { logError } from "./logger";
 import { useCreateChat, useLoadPresets } from "./queries";
@@ -41,11 +41,12 @@ export function ModelSelector() {
   const [guardModal, setGuardModal] = useState<{
     reason: "vision" | "audio" | "both";
     messages: any[];
-    configToLoad: ModelLoadConfig;
+    configToLoad: LoadModelRequest;
   } | null>(null);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const createChatLockRef = useRef(false);
 
-  const handleLoadGuard = (model: ModelEntry) => {
+  const handleLoadGuard = async (model: ModelEntry) => {
     if (serverStatus !== "idle" || isGenerating) return;
 
     // Try finding exact match by user selection, then exact match by modelPath, then default.
@@ -87,9 +88,19 @@ export function ModelSelector() {
     // Always override the path to the selected model
     config.modelPath = model.primaryPath;
 
-    // Map template override
-    if (preset?.chatTemplateOverride) {
-      config.chatTemplateFile = preset.chatTemplateOverride;
+    const request: LoadModelRequest = {
+      ...config,
+      ...(preset?.id ? { presetId: preset.id } : {}),
+      ...(preset?.thinkingTagOverride ? { thinkingTagOverride: preset.thinkingTagOverride } : {}),
+    };
+
+    const defaultTemplate = model.metadata?.chatTemplate;
+    if (
+      preset?.chatTemplateOverride &&
+      preset.chatTemplateOverride.length > 0 &&
+      preset.chatTemplateOverride !== defaultTemplate
+    ) {
+      request.chatTemplateFile = preset.chatTemplateOverride;
     }
 
     // Check for multimodal incompatibility
@@ -107,22 +118,26 @@ export function ModelSelector() {
       setGuardModal({
         reason: "both",
         messages: [...visionMsgs, ...audioMsgs],
-        configToLoad: config,
+        configToLoad: request,
       });
       return;
     } else if (!hasVision && visionMsgs.length > 0) {
-      setGuardModal({ reason: "vision", messages: visionMsgs, configToLoad: config });
+      setGuardModal({ reason: "vision", messages: visionMsgs, configToLoad: request });
       return;
     } else if (!hasAudio && audioMsgs.length > 0) {
-      setGuardModal({ reason: "audio", messages: audioMsgs, configToLoad: config });
+      setGuardModal({ reason: "audio", messages: audioMsgs, configToLoad: request });
       return;
     }
 
-    loadModel(config);
+    const success = await loadModel(request);
+    if (success) {
+      // Just keep them on the registry, the card will show 'ACTIVE'
+    }
   };
 
   const handleStartNewChat = async () => {
-    if (isCreatingChat) return;
+    if (isCreatingChat || createChatLockRef.current) return;
+    createChatLockRef.current = true;
     setIsCreatingChat(true);
     try {
       const chat = await createChatMut.mutateAsync({ name: "New Chat (Model Switch)" });
@@ -135,6 +150,7 @@ export function ModelSelector() {
     } catch (error) {
       logError("New chat creation failed:", error);
     } finally {
+      createChatLockRef.current = false;
       setIsCreatingChat(false);
       setGuardModal(null);
     }

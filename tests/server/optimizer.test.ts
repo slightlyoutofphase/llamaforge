@@ -58,6 +58,25 @@ describe("optimizer", () => {
     expect(config.threads).toBe(8); // Math.min(16-1, 8)
   });
 
+  it("stays conservative for unconfirmed WMI-only GPU entries", () => {
+    const descriptiveOnlyGpu: HardwareInfo = {
+      ...mockHardware,
+      gpus: [
+        {
+          name: "NVIDIA GeForce RTX 4090",
+          vramBytes: 24 * 1024 * 1024 * 1024,
+          backend: "unknown",
+        },
+      ],
+    };
+
+    const config = optimizeLoadConfig(descriptiveOnlyGpu, mockMeta);
+    expect(config.gpuLayers).toBe(0);
+    expect(config.flashAttn).toBe("off");
+    expect(config.batchSize).toBe(512);
+    expect(config.microBatchSize).toBe(128);
+  });
+
   it("handles Grouped Query Attention architectures successfully saving VRAM", () => {
     const gqaMeta: GgufDisplayMetadata = {
       ...mockMeta,

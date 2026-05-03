@@ -3,7 +3,7 @@
  * GGUF metadata parsing using @huggingface/gguf.
  */
 import { gguf } from "@huggingface/gguf";
-import type { GgufDisplayMetadata } from "@shared/types.js";
+import type { GgufDisplayMetadata } from "../shared/types";
 
 const QUANT_NAMES: Record<number, string> = {
   0: "F32",

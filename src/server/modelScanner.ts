@@ -5,7 +5,7 @@
  */
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { ModelEntry } from "@shared/types.js";
+import type { ModelEntry } from "../shared/types";
 import { parseGgufMetadata } from "./ggufReader";
 import { logError, logInfo, logWarn } from "./logger";
 import { cachedGgufMetadata, setCachedGgufMetadata } from "./persistence/chatRepo";
@@ -13,6 +13,56 @@ import { cachedGgufMetadata, setCachedGgufMetadata } from "./persistence/chatRep
 const EXCLUDED_DIRS = new Set(["node_modules", "dist", "build", ".git", ".next", "venv", "target"]);
 const DEFAULT_SCAN_MAX_DEPTH = 20;
 const DEFAULT_SCAN_MAX_ENTRIES = 10000;
+const IGNORED_COMPANION_TOKENS = new Set(["model", "mmproj", "mmproject", "projector", "clip"]);
+const QUANTIZATION_TOKEN_PATTERN =
+  /^(?:q\d(?:_\d)?|iq\d.*|f16|f32|bf16|fp16|fp32|int\d+|mxfp4|qwen|k|m|s|l|xl)$/i;
+
+function buildCompanionKey(filePath: string): string {
+  return path
+    .parse(filePath)
+    .name.toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 0)
+    .filter((token) => !IGNORED_COMPANION_TOKENS.has(token))
+    .filter((token) => !QUANTIZATION_TOKEN_PATTERN.test(token))
+    .join("-");
+}
+
+function findMatchingMmproj(primaryPath: string, mmprojFiles: string[]): string | undefined {
+  const primaryKey = buildCompanionKey(primaryPath);
+  if (!primaryKey) {
+    return undefined;
+  }
+
+  const sameDirMatches = mmprojFiles.filter(
+    (candidate) =>
+      path.dirname(candidate) === path.dirname(primaryPath) &&
+      buildCompanionKey(candidate) === primaryKey,
+  );
+  if (sameDirMatches.length === 1) {
+    return sameDirMatches[0];
+  }
+  if (sameDirMatches.length > 1) {
+    logWarn(
+      `Ambiguous mmproj companions for ${primaryPath}: ${sameDirMatches.join(", ")}. Leaving mmProjPath unset.`,
+    );
+    return undefined;
+  }
+
+  const globalMatches = mmprojFiles.filter(
+    (candidate) => buildCompanionKey(candidate) === primaryKey,
+  );
+  if (globalMatches.length === 1) {
+    return globalMatches[0];
+  }
+  if (globalMatches.length > 1) {
+    logWarn(
+      `Ambiguous mmproj companions for ${primaryPath}: ${globalMatches.join(", ")}. Leaving mmProjPath unset.`,
+    );
+  }
+
+  return undefined;
+}
 
 /**
  * Options controlling recursive model scan execution.
@@ -43,7 +93,8 @@ async function walkDir(
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
-      if (state.count >= options.maxEntries) break;
+      state.count++;
+      if (state.count > options.maxEntries) break;
       if (entry.name.startsWith(".")) continue;
       if (entry.isDirectory() && EXCLUDED_DIRS.has(entry.name)) continue;
       const res = path.resolve(dir, entry.name);
@@ -53,7 +104,6 @@ async function walkDir(
         const lower = entry.name.toLowerCase();
         if (lower.endsWith(".gguf") || lower.includes("mmproj")) {
           files.push(res);
-          state.count++;
         }
       }
     }
@@ -82,12 +132,15 @@ export async function scanModels(
   options: ScanOptions = {},
 ): Promise<ModelEntry[]> {
   const entries: ModelEntry[] = [];
+  const env = process.env as NodeJS.ProcessEnv & {
+    MODEL_SCAN_MAX_DEPTH?: string;
+    MODEL_SCAN_MAX_ENTRIES?: string;
+  };
+  const envMaxDepth = Number(env.MODEL_SCAN_MAX_DEPTH);
+  const envMaxEntries = Number(env.MODEL_SCAN_MAX_ENTRIES);
   const resolvedOptions: Required<ScanOptions> = {
-    maxDepth:
-      options.maxDepth ?? (Number(process.env.MODEL_SCAN_MAX_DEPTH) || DEFAULT_SCAN_MAX_DEPTH),
-    maxEntries:
-      options.maxEntries ??
-      (Number(process.env.MODEL_SCAN_MAX_ENTRIES) || DEFAULT_SCAN_MAX_ENTRIES),
+    maxDepth: options.maxDepth ?? (envMaxDepth || DEFAULT_SCAN_MAX_DEPTH),
+    maxEntries: options.maxEntries ?? (envMaxEntries || DEFAULT_SCAN_MAX_ENTRIES),
   };
 
   logInfo(`Scanning models at: ${rootPath}`);
@@ -117,30 +170,14 @@ export async function scanModels(
 
       if (pathParts.length >= 3) {
         // format: publisher/model/file.gguf
-        publisher = pathParts[0];
-        modelName = pathParts[1];
+        publisher = pathParts[0] || publisher;
+        modelName = pathParts[1] || modelName;
       } else if (pathParts.length === 2) {
         // format: model/file.gguf
-        modelName = pathParts[0];
+        modelName = pathParts[0] || modelName;
       }
 
-      const primaryBase = path.parse(primaryPath).name.toLowerCase();
-      const primaryDir = path.dirname(primaryPath);
-      let mmProjPath: string | undefined;
-
-      // 1. Try to find matching mmproj by filename prefix in the same or nearby folders
-      const matchingMmproj = mmprojFiles.find((mf) =>
-        path.parse(mf).name.toLowerCase().startsWith(primaryBase),
-      );
-      if (matchingMmproj) {
-        mmProjPath = matchingMmproj;
-      } else {
-        // 2. Try to find ANY mmproj in the same directory
-        const sameDirMmproj = mmprojFiles.find((mf) => path.dirname(mf) === primaryDir);
-        if (sameDirMmproj) {
-          mmProjPath = sameDirMmproj;
-        }
-      }
+      const mmProjPath = findMatchingMmproj(primaryPath, mmprojFiles);
 
       entries.push({
         publisher,

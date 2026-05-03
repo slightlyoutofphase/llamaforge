@@ -52,11 +52,11 @@ describe("SettingsPanel", () => {
     expect(screen.getByDisplayValue("/home/user/models")).toBeDefined();
     expect((screen.getByLabelText("Autoname Chats") as HTMLInputElement).checked).toBe(true);
 
-    const fontSizeInput = screen.getByLabelText("Font Size (px)");
+    const fontSizeInput = screen.getByRole("slider");
     expect((fontSizeInput as HTMLInputElement).value).toBe("16");
   });
 
-  it("handles input changes and save button interaction", async () => {
+  it("handles input changes and auto-saves after debounce", async () => {
     await act(async () => {
       render(<SettingsPanel />);
     });
@@ -64,15 +64,9 @@ describe("SettingsPanel", () => {
     const llamaInput = await screen.findByDisplayValue("/usr/bin/llama-server");
     await act(async () => {
       fireEvent.change(llamaInput, { target: { value: "/new/path" } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
     });
     expect((llamaInput as HTMLInputElement).value).toBe("/new/path");
-
-    const saveBtn = screen.getByText("Save Settings");
-    expect(saveBtn).toBeDefined();
-
-    await act(async () => {
-      fireEvent.click(saveBtn);
-    });
 
     expect(updateSettingsMutate).toHaveBeenCalledWith(
       expect.objectContaining({ llamaServerPath: "/new/path" }),
@@ -80,7 +74,7 @@ describe("SettingsPanel", () => {
     );
   });
 
-  it("refreshes the model list after saving settings", async () => {
+  it("refreshes the model list after saving a new models path", async () => {
     const fetchModelsSpy = mock().mockResolvedValue(undefined);
     useAppStore.setState({ fetchModels: fetchModelsSpy });
 
@@ -91,10 +85,7 @@ describe("SettingsPanel", () => {
     const modelsInput = await screen.findByDisplayValue("/home/user/models");
     await act(async () => {
       fireEvent.change(modelsInput, { target: { value: "/new/models" } });
-    });
-
-    await act(async () => {
-      fireEvent.click(screen.getByText("Save Settings"));
+      await new Promise((resolve) => setTimeout(resolve, 300));
     });
 
     expect(updateSettingsMutate).toHaveBeenCalledWith(
@@ -102,5 +93,48 @@ describe("SettingsPanel", () => {
       expect.anything(),
     );
     expect(fetchModelsSpy).toHaveBeenCalled();
+  });
+
+  it("does not rescan models for unrelated settings changes", async () => {
+    const fetchModelsSpy = mock().mockResolvedValue(undefined);
+    useAppStore.setState({ fetchModels: fetchModelsSpy });
+
+    await act(async () => {
+      render(<SettingsPanel />);
+    });
+
+    const llamaInput = await screen.findByDisplayValue("/usr/bin/llama-server");
+    await act(async () => {
+      fireEvent.change(llamaInput, { target: { value: "/different/path" } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+
+    expect(fetchModelsSpy).not.toHaveBeenCalled();
+  });
+
+  it("keeps freeform numeric fields local until they become valid numbers", async () => {
+    await act(async () => {
+      render(<SettingsPanel />);
+    });
+
+    const serverPortInput = screen.getByLabelText("Bun Server Port") as HTMLInputElement;
+
+    await act(async () => {
+      fireEvent.change(serverPortInput, { target: { value: "" } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+
+    expect(serverPortInput.value).toBe("");
+    expect(updateSettingsMutate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.change(serverPortInput, { target: { value: "12001" } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+
+    expect(updateSettingsMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ serverPort: 12001 }),
+      expect.anything(),
+    );
   });
 });

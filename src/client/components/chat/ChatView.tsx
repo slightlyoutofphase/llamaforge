@@ -5,18 +5,30 @@
  */
 
 import { useNavigate, useParams } from "@tanstack/react-router";
-import { Check, ChevronDown, ChevronUp, Cpu, FileText, Settings2, Terminal } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Cpu,
+  FileText,
+  MessageSquare,
+  Settings2,
+  Terminal,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { parseToolCallsJson } from "@shared/toolCalls.js";
 import { logError } from "../../logger";
 import {
   useBranchChat,
   useContinueChat,
   useInferencePresets,
   useRegenerateChat,
+  useSettings,
   useSystemPresets,
   useUpdateChat,
   useUpdateMessage,
 } from "../../queries";
+import { request } from "../../http";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { InputBar } from "./InputBar";
@@ -73,6 +85,7 @@ export function ChatView() {
   const {
     messages,
     isGenerating,
+    isWaitingForToolApproval,
     generationStats,
     serverStatus,
     currentChatId,
@@ -86,6 +99,7 @@ export function ChatView() {
     isConnected,
     totalMessages,
     loadMoreMessages,
+    unloadChat,
   } = useAppStore();
   const { setRightPanelView } = useUiStore();
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -120,6 +134,7 @@ export function ChatView() {
   }, [showInfSwitch, showSysSwitch]);
 
   const { data: infPresets } = useInferencePresets();
+  const { data: settings } = useSettings();
   const { data: sysPresets } = useSystemPresets();
 
   const branchMutation = useBranchChat();
@@ -151,17 +166,22 @@ export function ChatView() {
       : undefined) ||
     infPresets?.find((p) => p.isDefault);
   const activeSysPreset = sysPresets?.find((p) => p.id === currentChatMetadata?.systemPresetId);
+  const bubbleStyle = settings?.chatBubbleStyle ?? "bubble";
 
   useEffect(() => {
-    const targetChatId = chatId === "default" ? "default-chat" : chatId;
-    if (!targetChatId && !currentChatId) {
-      loadChat("default-chat");
+    // S12 fix: only load if we have a real target chat ID from the route.
+    // If we're on a virtual path or the home page, don't try to load anything from the server.
+    if (!chatId || chatId === "default" || chatId === "default-chat") {
+      if (currentChatId) {
+        unloadChat();
+      }
       return;
     }
-    if (targetChatId && targetChatId !== currentChatId) {
-      loadChat(targetChatId);
+
+    if (chatId !== currentChatId) {
+      loadChat(chatId);
     }
-  }, [chatId, currentChatId, loadChat]);
+  }, [chatId, currentChatId, loadChat, unloadChat]);
 
   useEffect(() => {
     if (
@@ -174,6 +194,8 @@ export function ChatView() {
       navigate({ to: "/chat/$chatId", params: { chatId: currentChatId }, replace: true });
     }
   }, [currentChatId, chatId, navigate]);
+
+  const requestInFlight = isGenerating || isWaitingForToolApproval;
 
   const handleScroll = () => {
     if (!scrollContainerRef.current) return;
@@ -229,13 +251,13 @@ export function ChatView() {
               messageId,
               content: newContent,
             });
-            const res = await fetch(`/api/chats/${currentChatId}/regenerate`, {
+            const res = await request(`/api/chats/${currentChatId}/regenerate`, {
               method: "POST",
             });
             if (!res.ok) throw new Error("Regeneration failed");
             await loadChat(currentChatId);
           } else {
-            const res = await fetch(`/api/chats/${currentChatId}/branch-and-edit`, {
+            const res = await request(`/api/chats/${currentChatId}/branch-and-edit`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ messageId, newContent }),
@@ -310,7 +332,7 @@ export function ChatView() {
 
       try {
         if (msgIndex < messages.length - 1) {
-          const res = await fetch(`/api/chats/${currentChatId}/branch-and-regenerate`, {
+          const res = await request(`/api/chats/${currentChatId}/branch-and-regenerate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ messageId: id }),
@@ -354,7 +376,7 @@ export function ChatView() {
 
       try {
         if (msgIndex < messages.length - 1) {
-          const res = await fetch(`/api/chats/${currentChatId}/branch-and-continue`, {
+          const res = await request(`/api/chats/${currentChatId}/branch-and-continue`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ messageId: id }),
@@ -392,7 +414,7 @@ export function ChatView() {
     if (!confirm("Delete this and all subsequent messages?")) return;
 
     try {
-      const res = await fetch(`/api/chats/${currentChatId}/messages/${id}`, {
+      const res = await request(`/api/chats/${currentChatId}/messages/${id}`, {
         method: "DELETE",
       });
       if (!res.ok) {
@@ -430,29 +452,50 @@ export function ChatView() {
   };
 
   if ((!currentChatId || !currentChatMetadata) && errorMessage) {
+    const isNotFound =
+      errorMessage.toLowerCase().includes("not found") || errorMessage.includes("404");
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-[var(--color-text-muted)] gap-4 p-8">
-        <div className="text-lg font-semibold">Unable to load workspace</div>
-        <div className="max-w-xl text-center text-sm">
-          {errorMessage || "An error occurred while loading the chat."}
+      <div className="flex-1 flex flex-col items-center justify-center text-[var(--color-text-muted)] gap-6 p-8 animate-in fade-in duration-500">
+        <div className="w-16 h-16 rounded-full bg-[var(--color-surface-elevated)] flex items-center justify-center mb-2">
+          <MessageSquare size={32} className="text-[var(--color-accent)] opacity-50" />
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setError(null);
-            loadChat(chatId || "default-chat");
-          }}
-          className="px-4 py-2 rounded-xl bg-[var(--color-accent)] text-white text-sm hover:bg-[var(--color-accent-dim)] transition-colors">
-          Retry
-        </button>
+        <div className="text-xl font-bold text-[var(--color-text-primary)]">
+          {isNotFound ? "Transmission Lost" : "Workspace Error"}
+        </div>
+        <div className="max-w-md text-center text-sm leading-relaxed opacity-80">
+          {isNotFound
+            ? "The chat session you're looking for either never existed or was purged from the archive."
+            : errorMessage}
+        </div>
+        <div className="flex gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              loadChat("default-chat");
+            }}
+            className="px-6 py-2.5 rounded-xl bg-[var(--color-accent)] text-white text-sm font-semibold hover:opacity-90 transition-all active:scale-95 shadow-lg shadow-[var(--color-accent)]/20">
+            Initialize New Chat
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setError(null);
+              navigate({ to: "/" });
+            }}
+            className="px-6 py-2.5 rounded-xl border border-[var(--color-border)] text-[var(--color-text-primary)] text-sm font-semibold hover:bg-[var(--color-surface-elevated)] transition-all">
+            Return to Registry
+          </button>
+        </div>
       </div>
     );
   }
 
-  if (!currentChatId || !currentChatMetadata) {
+  if (!currentChatId && chatId !== "default" && chatId !== "default-chat") {
     return (
-      <div className="flex-1 flex items-center justify-center text-[var(--color-text-muted)]">
-        Loading workspace...
+      <div className="flex-1 flex flex-col items-center justify-center text-[var(--color-text-muted)] gap-4">
+        <div className="w-8 h-8 border-4 border-[var(--color-accent)] border-t-transparent rounded-full animate-spin" />
+        <p className="text-xs uppercase tracking-widest font-mono">Synchronizing Workspace...</p>
       </div>
     );
   }
@@ -460,7 +503,7 @@ export function ChatView() {
   const active = serverStatus === "running" && isConnected;
 
   return (
-    <div className="flex-1 flex flex-col bg-[var(--color-bg)] overflow-hidden">
+    <div className="flex-1 min-h-0 flex flex-col bg-[var(--color-bg)] overflow-hidden">
       {/* Header Chips */}
       <div className="h-12 border-b border-[var(--color-border)] bg-[var(--color-surface)] flex items-center px-4 space-x-2 shrink-0 z-30 shadow-sm">
         <button
@@ -578,14 +621,41 @@ export function ChatView() {
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto p-6 scroll-smooth">
+        className="flex-1 min-h-0 overflow-y-auto p-6 scroll-smooth">
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-[var(--color-text-muted)] space-y-4">
-            <div className="text-4xl font-light mb-2">LlamaForge</div>
+          <div className="h-full flex flex-col items-center justify-center text-[var(--color-text-muted)] space-y-6 animate-in fade-in zoom-in duration-700">
+            <div className="text-5xl font-bold tracking-tighter text-[var(--color-text-primary)]">
+              LlamaForge
+            </div>
             {active ? (
-              <p className="text-sm">Model allocated. Ready for interface.</p>
+              <div className="flex flex-col items-center gap-4">
+                <div className="px-4 py-2 rounded-full bg-[var(--color-success)]/10 text-[var(--color-success)] text-xs font-bold uppercase tracking-widest border border-[var(--color-success)]/20">
+                  Core Online
+                </div>
+                <p className="text-sm opacity-70">Model allocated. Ready for transmission.</p>
+                <div className="mt-4 flex flex-col items-center gap-2">
+                  <div className="w-px h-12 bg-gradient-to-b from-[var(--color-accent)] to-transparent" />
+                  <span className="text-[10px] uppercase tracking-[0.2em] font-bold text-[var(--color-accent)]">
+                    Type below to begin
+                  </span>
+                </div>
+              </div>
             ) : (
-              <p className="text-sm">System idle. Allocate a model from the registry to begin.</p>
+              <div className="flex flex-col items-center gap-6">
+                <div className="px-4 py-2 rounded-full bg-[var(--color-warning)]/10 text-[var(--color-warning)] text-xs font-bold uppercase tracking-widest border border-[var(--color-warning)]/20">
+                  System Idle
+                </div>
+                <p className="text-sm opacity-70 max-w-xs text-center">
+                  The interface is currently dormant. Allocate a model from the registry to activate
+                  the workspace.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => navigate({ to: "/" })}
+                  className="px-6 py-2.5 rounded-xl bg-[var(--color-accent)] text-white text-sm font-semibold hover:opacity-90 transition-all active:scale-95 shadow-xl shadow-[var(--color-accent)]/20">
+                  Go to Model Registry
+                </button>
+              </div>
             )}
           </div>
         ) : (
@@ -614,21 +684,17 @@ export function ChatView() {
                     ? messages.filter(
                         (m) =>
                           m.role === "tool" &&
-                          msg.toolCallsJson &&
-                          (() => {
-                            try {
-                              return JSON.parse(msg.toolCallsJson).some(
-                                (tc: { id: string }) => tc.id === m.toolCallId,
-                              );
-                            } catch {
-                              return false;
-                            }
-                          })(),
+                          Boolean(
+                            parseToolCallsJson(msg.toolCallsJson)?.some(
+                              (tc) => tc.id === m.toolCallId,
+                            ),
+                          ),
                       )
                     : [];
                 return (
                   <div key={msg.id || i}>
                     <MessageBubble
+                      bubbleStyle={bubbleStyle}
                       message={msg}
                       isStreaming={isGenerating && i === arr.length - 1 && msg.role === "assistant"}
                       onEdit={handleEdit}
@@ -693,7 +759,7 @@ export function ChatView() {
         <div className="w-full max-w-4xl relative">
           <InputBar
             onSend={sendMessage}
-            isGenerating={isGenerating}
+            isGenerating={requestInFlight}
             isActive={active}
             onStop={stopGeneration}
           />

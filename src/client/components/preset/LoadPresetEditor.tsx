@@ -5,7 +5,7 @@
  */
 
 import { markdown } from "@codemirror/lang-markdown";
-import type { LoadPreset, ModelLoadConfig } from "@shared/types.js";
+import type { LoadPreset, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
 import CodeMirror from "@uiw/react-codemirror";
 import { ChevronDown, ChevronRight, Copy, Plus, Save, Trash2, X, Zap } from "lucide-react";
 import type React from "react";
@@ -19,6 +19,24 @@ import {
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { HardwareOptimizationModal } from "./HardwareOptimizationModal";
+
+const DEFAULT_THINKING_TAG_CONFIG: ThinkingTagConfig = {
+  openTag: "<think>",
+  closeTag: "</think>",
+  enableToken: undefined,
+};
+
+const GEMMA4_THINKING_TAG_CONFIG: ThinkingTagConfig = {
+  openTag: "<|channel>thought\n",
+  closeTag: "<channel|>",
+  enableToken: "<|think|>",
+};
+
+function detectThinkingTagOverride(architecture?: string): ThinkingTagConfig {
+  return architecture?.toLowerCase() === "gemma4"
+    ? GEMMA4_THINKING_TAG_CONFIG
+    : DEFAULT_THINKING_TAG_CONFIG;
+}
 
 // Simple accordion component
 function Accordion({
@@ -78,7 +96,7 @@ export function LoadPresetEditor() {
     (m) => m.primaryPath === localState.modelPath || m.primaryPath === localState.config?.modelPath,
   );
   const defaultTemplate = matchingModel?.metadata?.chatTemplate || "";
-  const displayTemplate = localState.chatTemplateOverride || defaultTemplate;
+  const displayTemplate = localState.chatTemplateOverride ?? defaultTemplate;
 
   const updatePresetField = <K extends keyof LoadPreset>(k: K, v: LoadPreset[K]) => {
     setLocalState((prev) => (prev ? { ...prev, [k]: v } : null));
@@ -153,7 +171,7 @@ export function LoadPresetEditor() {
         kvUnified: true,
         noKvOffload: false,
         cacheReuse: 0,
-        imageMaxTokens: 280,
+        imageMaxTokens: 560,
         logLevel: 3,
         seedOverride: -1,
       },
@@ -248,7 +266,10 @@ export function LoadPresetEditor() {
             id="modelPath"
             type="text"
             value={config.modelPath || ""}
-            onChange={(e) => updateConfigField("modelPath", e.target.value)}
+            onChange={(e) => {
+              updateConfigField("modelPath", e.target.value);
+              updatePresetField("modelPath", e.target.value);
+            }}
             disabled={isReadonly}
             className="w-full font-mono bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md disabled:opacity-50 text-xs"
           />
@@ -339,7 +360,7 @@ export function LoadPresetEditor() {
             </label>
             <select
               id="imageMaxTokens"
-              value={config.imageMaxTokens ?? 280}
+              value={config.imageMaxTokens ?? 560}
               onChange={(e) => updateConfigField("imageMaxTokens", parseInt(e.target.value, 10))}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm">
@@ -705,6 +726,106 @@ export function LoadPresetEditor() {
             />
           </div>
         </div>
+
+        <Accordion title="Thinking Tag Override">
+          <div className="space-y-2 text-xs">
+            <p className="text-[var(--color-text-muted)]">
+              Override how assistant thinking blocks are parsed for the active loaded model.
+            </p>
+            <div>
+              <label htmlFor="thinkingOpenTag" className="block font-medium mb-1">
+                Open Tag
+              </label>
+              <input
+                id="thinkingOpenTag"
+                type="text"
+                value={localState.thinkingTagOverride?.openTag ?? ""}
+                onChange={(e) =>
+                  updatePresetField("thinkingTagOverride", {
+                    openTag: e.target.value,
+                    closeTag:
+                      localState.thinkingTagOverride?.closeTag ??
+                      detectThinkingTagOverride(matchingModel?.metadata?.architecture).closeTag,
+                    enableToken: localState.thinkingTagOverride?.enableToken,
+                  })
+                }
+                disabled={isReadonly}
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
+                placeholder={
+                  detectThinkingTagOverride(matchingModel?.metadata?.architecture).openTag
+                }
+              />
+            </div>
+            <div>
+              <label htmlFor="thinkingCloseTag" className="block font-medium mb-1">
+                Close Tag
+              </label>
+              <input
+                id="thinkingCloseTag"
+                type="text"
+                value={localState.thinkingTagOverride?.closeTag ?? ""}
+                onChange={(e) =>
+                  updatePresetField("thinkingTagOverride", {
+                    openTag:
+                      localState.thinkingTagOverride?.openTag ??
+                      detectThinkingTagOverride(matchingModel?.metadata?.architecture).openTag,
+                    closeTag: e.target.value,
+                    enableToken: localState.thinkingTagOverride?.enableToken,
+                  })
+                }
+                disabled={isReadonly}
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
+                placeholder={
+                  detectThinkingTagOverride(matchingModel?.metadata?.architecture).closeTag
+                }
+              />
+            </div>
+            <div>
+              <label htmlFor="thinkingEnableToken" className="block font-medium mb-1">
+                Enable Token
+              </label>
+              <input
+                id="thinkingEnableToken"
+                type="text"
+                value={localState.thinkingTagOverride?.enableToken ?? ""}
+                onChange={(e) =>
+                  updatePresetField("thinkingTagOverride", {
+                    openTag:
+                      localState.thinkingTagOverride?.openTag ??
+                      detectThinkingTagOverride(matchingModel?.metadata?.architecture).openTag,
+                    closeTag:
+                      localState.thinkingTagOverride?.closeTag ??
+                      detectThinkingTagOverride(matchingModel?.metadata?.architecture).closeTag,
+                    enableToken: e.target.value || undefined,
+                  })
+                }
+                disabled={isReadonly}
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
+                placeholder={
+                  detectThinkingTagOverride(matchingModel?.metadata?.architecture).enableToken ??
+                  "Optional"
+                }
+              />
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[var(--color-text-muted)]">
+                Architecture: {matchingModel?.metadata?.architecture || "unknown"}
+              </span>
+              <button
+                type="button"
+                disabled={isReadonly}
+                onClick={() =>
+                  updatePresetField(
+                    "thinkingTagOverride",
+                    detectThinkingTagOverride(matchingModel?.metadata?.architecture),
+                  )
+                }
+                className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-accent)] disabled:opacity-50">
+                Detect from architecture
+              </button>
+            </div>
+          </div>
+        </Accordion>
       </div>
 
       <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] flex space-x-2">

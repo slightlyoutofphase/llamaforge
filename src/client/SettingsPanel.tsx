@@ -4,11 +4,37 @@
  */
 
 import type { AppSettings } from "@shared/types";
-import { Loader2, Save, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Loader2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { useSettings, useUpdateSettings } from "./queries";
 import { useAppStore } from "./store";
 import { useUiStore } from "./uiStore";
+
+type NumericDraftKey =
+  | "llamaPortRangeMin"
+  | "llamaPortRangeMax"
+  | "requestTimeoutSeconds"
+  | "serverPort";
+
+type NumericDraftState = Record<NumericDraftKey, string>;
+
+const NUMERIC_DEFAULTS: NumericDraftState = {
+  llamaPortRangeMin: "12000",
+  llamaPortRangeMax: "13000",
+  requestTimeoutSeconds: "60",
+  serverPort: "11435",
+};
+
+function createNumericDrafts(settings?: Partial<AppSettings>): NumericDraftState {
+  return {
+    llamaPortRangeMin: String(settings?.llamaPortRangeMin ?? NUMERIC_DEFAULTS.llamaPortRangeMin),
+    llamaPortRangeMax: String(settings?.llamaPortRangeMax ?? NUMERIC_DEFAULTS.llamaPortRangeMax),
+    requestTimeoutSeconds: String(
+      settings?.requestTimeoutSeconds ?? NUMERIC_DEFAULTS.requestTimeoutSeconds,
+    ),
+    serverPort: String(settings?.serverPort ?? NUMERIC_DEFAULTS.serverPort),
+  };
+}
 
 /**
  * Component for editing application settings.
@@ -22,20 +48,88 @@ export function SettingsPanel() {
   const updateMut = useUpdateSettings();
 
   const [localState, setLocalState] = useState<Partial<AppSettings>>({});
+  const [numericDrafts, setNumericDrafts] = useState<NumericDraftState>(NUMERIC_DEFAULTS);
+  const lastPersistedStateRef = useRef<Partial<AppSettings> | null>(null);
+  const hasHydratedRef = useRef(false);
 
   useEffect(() => {
     if (settings) {
       setLocalState(settings);
+      setNumericDrafts(createNumericDrafts(settings));
+      lastPersistedStateRef.current = settings;
+      hasHydratedRef.current = true;
     }
   }, [settings]);
 
-  const handleSave = () => {
-    updateMut.mutate(localState, {
-      onSuccess: () => {
-        useAppStore.getState().fetchModels();
-      },
+  const updateIntegerDraft = (
+    key: "llamaPortRangeMin" | "llamaPortRangeMax" | "serverPort",
+    rawValue: string,
+  ) => {
+    setNumericDrafts((prev) => ({ ...prev, [key]: rawValue }));
+    const trimmed = rawValue.trim();
+    if (!/^\d+$/.test(trimmed)) {
+      return;
+    }
+
+    const parsed = Number.parseInt(trimmed, 10);
+    if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
+      return;
+    }
+
+    setLocalState((prev) => {
+      if (key === "llamaPortRangeMin") {
+        const currentMax =
+          prev.llamaPortRangeMax ?? Number.parseInt(NUMERIC_DEFAULTS.llamaPortRangeMax, 10);
+        if (parsed > currentMax) return prev;
+      }
+      if (key === "llamaPortRangeMax") {
+        const currentMin =
+          prev.llamaPortRangeMin ?? Number.parseInt(NUMERIC_DEFAULTS.llamaPortRangeMin, 10);
+        if (parsed < currentMin) return prev;
+      }
+      return { ...prev, [key]: parsed };
     });
   };
+
+  const updateTimeoutDraft = (rawValue: string) => {
+    setNumericDrafts((prev) => ({ ...prev, requestTimeoutSeconds: rawValue }));
+    const trimmed = rawValue.trim();
+    if (!/^\d+(\.\d+)?$/.test(trimmed)) {
+      return;
+    }
+
+    const parsed = Number.parseFloat(trimmed);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return;
+    }
+
+    setLocalState((prev) => ({ ...prev, requestTimeoutSeconds: parsed }));
+  };
+
+  useEffect(() => {
+    if (!hasHydratedRef.current || !lastPersistedStateRef.current) {
+      return;
+    }
+
+    if (JSON.stringify(localState) === JSON.stringify(lastPersistedStateRef.current)) {
+      return;
+    }
+
+    const pendingState = localState;
+    const previousState = lastPersistedStateRef.current;
+    const timeoutId = window.setTimeout(() => {
+      updateMut.mutate(pendingState, {
+        onSuccess: () => {
+          if (previousState?.modelsPath !== pendingState.modelsPath) {
+            void useAppStore.getState().fetchModels();
+          }
+          lastPersistedStateRef.current = pendingState;
+        },
+      });
+    }, 250);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [localState, updateMut]);
 
   if (isLoading) {
     return (
@@ -91,6 +185,81 @@ export function SettingsPanel() {
               placeholder="~/.llamaforge/models"
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
             />
+          </div>
+          <div className="grid grid-cols-1 gap-3">
+            <div className="space-y-2">
+              <label htmlFor="nvidiaSmiPath" className="text-sm font-medium">
+                nvidia-smi Path (Optional)
+              </label>
+              <input
+                id="nvidiaSmiPath"
+                type="text"
+                value={localState.nvidiaSmiPath || ""}
+                onChange={(e) =>
+                  setLocalState((prev) => ({ ...prev, nvidiaSmiPath: e.target.value }))
+                }
+                placeholder="nvidia-smi"
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+              />
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="rocmSmiPath" className="text-sm font-medium">
+                rocm-smi Path (Optional)
+              </label>
+              <input
+                id="rocmSmiPath"
+                type="text"
+                value={localState.rocmSmiPath || ""}
+                onChange={(e) =>
+                  setLocalState((prev) => ({ ...prev, rocmSmiPath: e.target.value }))
+                }
+                placeholder="rocm-smi"
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+              />
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="sysctlPath" className="text-sm font-medium">
+                sysctl Path (Optional)
+              </label>
+              <input
+                id="sysctlPath"
+                type="text"
+                value={localState.sysctlPath || ""}
+                onChange={(e) => setLocalState((prev) => ({ ...prev, sysctlPath: e.target.value }))}
+                placeholder="sysctl"
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+              />
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="systemProfilerPath" className="text-sm font-medium">
+                system_profiler Path (Optional)
+              </label>
+              <input
+                id="systemProfilerPath"
+                type="text"
+                value={localState.systemProfilerPath || ""}
+                onChange={(e) =>
+                  setLocalState((prev) => ({ ...prev, systemProfilerPath: e.target.value }))
+                }
+                placeholder="system_profiler"
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+              />
+            </div>
+            <div className="space-y-2">
+              <label htmlFor="powershellPath" className="text-sm font-medium">
+                PowerShell Path (Optional)
+              </label>
+              <input
+                id="powershellPath"
+                type="text"
+                value={localState.powershellPath || ""}
+                onChange={(e) =>
+                  setLocalState((prev) => ({ ...prev, powershellPath: e.target.value }))
+                }
+                placeholder="powershell"
+                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+              />
+            </div>
           </div>
         </section>
 
@@ -264,17 +433,21 @@ export function SettingsPanel() {
             </select>
           </div>
           <div className="space-y-2">
-            <label htmlFor="fontSize" className="text-sm font-medium">
-              Font Size (px)
+            <label htmlFor="fontSize" className="text-sm font-medium flex justify-between">
+              <span>Font Size</span>
+              <span>{localState.fontSize || 14}px</span>
             </label>
             <input
               id="fontSize"
-              type="number"
+              type="range"
+              min="12"
+              max="18"
+              step="1"
               value={localState.fontSize || 14}
               onChange={(e) =>
                 setLocalState((prev) => ({ ...prev, fontSize: parseInt(e.target.value, 10) }))
               }
-              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm"
+              className="w-full"
             />
           </div>
           <div className="grid grid-cols-2 gap-2">
@@ -285,13 +458,8 @@ export function SettingsPanel() {
               <input
                 id="portMin"
                 type="number"
-                value={localState.llamaPortRangeMin || 8080}
-                onChange={(e) =>
-                  setLocalState((prev) => ({
-                    ...prev,
-                    llamaPortRangeMin: parseInt(e.target.value, 10),
-                  }))
-                }
+                value={numericDrafts.llamaPortRangeMin}
+                onChange={(e) => updateIntegerDraft("llamaPortRangeMin", e.target.value)}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm"
               />
             </div>
@@ -302,13 +470,8 @@ export function SettingsPanel() {
               <input
                 id="portMax"
                 type="number"
-                value={localState.llamaPortRangeMax || 8099}
-                onChange={(e) =>
-                  setLocalState((prev) => ({
-                    ...prev,
-                    llamaPortRangeMax: parseInt(e.target.value, 10),
-                  }))
-                }
+                value={numericDrafts.llamaPortRangeMax}
+                onChange={(e) => updateIntegerDraft("llamaPortRangeMax", e.target.value)}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm"
               />
             </div>
@@ -320,13 +483,8 @@ export function SettingsPanel() {
             <input
               id="timeout"
               type="number"
-              value={localState.requestTimeoutSeconds || 60}
-              onChange={(e) =>
-                setLocalState((prev) => ({
-                  ...prev,
-                  requestTimeoutSeconds: parseInt(e.target.value, 10),
-                }))
-              }
+              value={numericDrafts.requestTimeoutSeconds}
+              onChange={(e) => updateTimeoutDraft(e.target.value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm"
             />
           </div>
@@ -343,10 +501,8 @@ export function SettingsPanel() {
             <input
               id="serverPort"
               type="number"
-              value={localState.serverPort || 11435}
-              onChange={(e) =>
-                setLocalState((prev) => ({ ...prev, serverPort: parseInt(e.target.value, 10) }))
-              }
+              value={numericDrafts.serverPort}
+              onChange={(e) => updateIntegerDraft("serverPort", e.target.value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm font-mono focus:border-[var(--color-accent)] outline-none"
             />
             <p className="text-[10px] text-red-400 font-medium leading-tight">
@@ -357,19 +513,9 @@ export function SettingsPanel() {
         </section>
       </div>
 
-      <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)]">
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={updateMut.isPending}
-          className="flex items-center justify-center gap-2 w-full bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md transition-all disabled:opacity-50">
-          {updateMut.isPending ? (
-            <Loader2 className="animate-spin" size={16} />
-          ) : (
-            <Save size={16} />
-          )}
-          Save Settings
-        </button>
+      <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-xs text-[var(--color-text-muted)] flex items-center gap-2">
+        {updateMut.isPending ? <Loader2 className="animate-spin" size={14} /> : null}
+        <span>{updateMut.isPending ? "Saving settings..." : "Changes save automatically."}</span>
       </div>
     </div>
   );

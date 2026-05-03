@@ -4,9 +4,41 @@
  * Uses platform-specific system calls (nvidia-smi, sysctl, system_profiler) to determine resources.
  */
 
+import fs from "node:fs/promises";
 import os from "node:os";
-import type { GpuInfo, HardwareInfo } from "@shared/types.js";
+import type { GpuInfo, HardwareInfo } from "../shared/types";
 import { spawn } from "bun";
+import { loadSettings } from "./persistence/settingsRepo";
+
+/**
+ * Parses Windows WMI video controller output into descriptive-only GPU entries.
+ *
+ * WMI fallback data does not confirm CUDA/ROCm support, so these devices must not be
+ * treated as accelerator-capable backends by downstream optimizers.
+ *
+ * @param rawJson - JSON returned from `Get-CimInstance Win32_VideoController | ConvertTo-Json`.
+ * @returns Parsed GPU descriptions using the `unknown` backend.
+ * @internal
+ */
+export function __parseWindowsWmiVideoControllers(rawJson: string): GpuInfo[] {
+  const parsed = JSON.parse(rawJson);
+  const controllers = Array.isArray(parsed) ? parsed : [parsed];
+  const gpus: GpuInfo[] = [];
+
+  for (const controller of controllers) {
+    const name = controller?.Name;
+    const adapterRam = Number(controller?.AdapterRAM || 0);
+    if (typeof name === "string" && name.length > 0) {
+      gpus.push({
+        name,
+        vramBytes: adapterRam > 0 ? adapterRam : 0,
+        backend: "unknown",
+      });
+    }
+  }
+
+  return gpus;
+}
 
 /**
  * The minimum supported version constant for the external llama-server executable.
@@ -19,20 +51,29 @@ export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const;
  * @returns A promise resolving to a {@link HardwareInfo} object containing RAM, CPU, and GPU details.
  */
 export async function getHardwareInfo(): Promise<HardwareInfo> {
+  const settings = await loadSettings();
+  const commandPaths = {
+    nvidiaSmi: settings.nvidiaSmiPath || "nvidia-smi",
+    rocmSmi: settings.rocmSmiPath || "rocm-smi",
+    sysctl: settings.sysctlPath || "sysctl",
+    systemProfiler: settings.systemProfilerPath || "system_profiler",
+    powershell: settings.powershellPath || "powershell",
+  };
+
   let totalRamBytes = os.totalmem();
   try {
     if (process.platform === "linux") {
-      const meminfo = await execPromise(["cat", "/proc/meminfo"]);
+      const meminfo = await fs.readFile("/proc/meminfo", "utf-8");
       const match = meminfo.match(/MemTotal:\s+(\d+)\s+kB/);
       if (match?.[1]) {
         totalRamBytes = parseInt(match[1], 10) * 1024;
       }
     } else if (process.platform === "darwin") {
-      const hwmem = await execPromise(["sysctl", "-n", "hw.memsize"]);
+      const hwmem = await execPromise([commandPaths.sysctl, "-n", "hw.memsize"]);
       totalRamBytes = parseInt(hwmem.trim(), 10);
     } else if (process.platform === "win32") {
       const output = await execPromise([
-        "powershell",
+        commandPaths.powershell,
         "-NoProfile",
         "-Command",
         "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
@@ -54,7 +95,7 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
     let hasNvidia = false;
     try {
       const output = await execPromise([
-        "nvidia-smi",
+        commandPaths.nvidiaSmi,
         "--query-gpu=memory.total,name",
         "--format=csv,noheader",
       ]);
@@ -88,7 +129,7 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
     if (!hasNvidia) {
       // Try rocm-smi
       try {
-        const output = await execPromise(["rocm-smi", "--showmeminfo", "vram", "--json"]);
+        const output = await execPromise([commandPaths.rocmSmi, "--showmeminfo", "vram", "--json"]);
         const parsed = JSON.parse(output);
         for (const key of Object.keys(parsed)) {
           if (key.startsWith("card")) {
@@ -111,24 +152,12 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
     if (!hasNvidia && process.platform === "win32" && gpus.length === 0) {
       try {
         const psOutput = await execPromise([
-          "powershell",
+          commandPaths.powershell,
           "-NoProfile",
           "-Command",
           "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json",
         ]);
-        const parsed = JSON.parse(psOutput);
-        const controllers = Array.isArray(parsed) ? parsed : [parsed];
-        for (const controller of controllers) {
-          const name = controller?.Name;
-          const adapterRam = Number(controller?.AdapterRAM || 0);
-          if (typeof name === "string" && name.length > 0) {
-            gpus.push({
-              name,
-              vramBytes: adapterRam > 0 ? adapterRam : 0,
-              backend: "cuda",
-            });
-          }
-        }
+        gpus.push(...__parseWindowsWmiVideoControllers(psOutput));
       } catch {
         // Ignore Windows WMI fallback errors.
       }
@@ -136,9 +165,9 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
   } else if (process.platform === "darwin") {
     // Mac Metal unified memory
     try {
-      const output = await execPromise(["system_profiler", "SPDisplaysDataType"]);
+      const output = await execPromise([commandPaths.systemProfiler, "SPDisplaysDataType"]);
       const nameMatch = output.match(/Chipset Model:\s*(.+)/);
-      const name = nameMatch ? nameMatch[1]?.trim() : "Apple Metal GPU";
+      const name = nameMatch?.[1]?.trim() || "Apple Metal GPU";
       // MacOS normally allocates ~75% of RAM for Metal unified memory
       gpus.push({
         name,

@@ -4,9 +4,12 @@
  */
 
 import { X } from "lucide-react";
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { useAppStore } from "./store";
 import { useUiStore } from "./uiStore";
+
+const LOG_ROW_HEIGHT = 20;
+const LOG_OVERSCAN_ROWS = 12;
 
 /**
  * A slide-over panel displaying real-time server logs and generation stats.
@@ -18,14 +21,15 @@ export function ConsoleLog() {
   const logs = useAppStore((state) => state.logs);
   const [filter, setFilter] = useState("ALL");
   const [search, setSearch] = useState("");
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
 
   const deferredLogs = useDeferredValue(logs);
   const deferredSearch = useDeferredValue(search);
 
   const promptCacheStats = useAppStore((state) => state.promptCacheStats);
   const genStats = useAppStore((state) => state.generationStats);
-
-  if (!isConsoleVisible) return null;
 
   const filteredLogs = deferredLogs.filter((log) => {
     const text = typeof log === "string" ? log : JSON.stringify(log);
@@ -39,6 +43,34 @@ export function ConsoleLog() {
     }
     return true;
   });
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+
+    const updateViewportHeight = () => {
+      setViewportHeight(viewport.clientHeight);
+    };
+
+    updateViewportHeight();
+
+    if (typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      updateViewportHeight();
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
+  const effectiveViewportHeight = viewportHeight || 320;
+  const startIndex = Math.max(0, Math.floor(scrollTop / LOG_ROW_HEIGHT) - LOG_OVERSCAN_ROWS);
+  const visibleRowCount =
+    Math.ceil(effectiveViewportHeight / LOG_ROW_HEIGHT) + LOG_OVERSCAN_ROWS * 2;
+  const endIndex = Math.min(filteredLogs.length, startIndex + visibleRowCount);
+  const visibleLogs = filteredLogs.slice(startIndex, endIndex);
+
+  if (!isConsoleVisible) return null;
 
   return (
     <div className="absolute bottom-0 left-0 right-0 h-80 bg-[var(--color-bg)] border-t border-[var(--color-border)] shadow-[0_-10px_30px_rgba(0,0,0,0.5)] flex flex-col z-50">
@@ -75,19 +107,20 @@ export function ConsoleLog() {
 
         {promptCacheStats && (
           <div className="flex items-center space-x-4 text-[10px] font-mono text-[var(--color-text-secondary)] border-l border-[var(--color-border)] pl-4 h-5">
-            <div title="Total tokens evaluated across session">
-              EV:{" "}
+            <div title="Total prompt tokens processed across this session">
+              Prompt tokens processed:{" "}
               <span className="text-[var(--color-text-primary)]">
                 {promptCacheStats.totalEvaluated}
               </span>
             </div>
-            <div title="Total tokens retrieved from cache across session">
-              CH:{" "}
+            <div title="Total prompt tokens reused from cache across this session">
+              Prompt tokens reused from cache:{" "}
               <span className="text-[var(--color-success)]">{promptCacheStats.totalCached}</span>
             </div>
             {genStats && (
               <div className="bg-[var(--color-surface-elevated)] px-1 rounded text-[var(--color-accent)]">
-                Last: {genStats.tokensCached}/{genStats.tokensEvaluated || "?"} cached
+                Last request cache reuse: {genStats.tokensCached}/{genStats.tokensEvaluated || "?"}{" "}
+                prompt tokens
               </div>
             )}
           </div>
@@ -109,22 +142,31 @@ export function ConsoleLog() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto font-mono text-[11px] p-2 space-y-1 text-[var(--color-text-secondary)]">
+      <div
+        ref={viewportRef}
+        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        className="flex-1 overflow-y-auto font-mono text-[11px] p-2 text-[var(--color-text-secondary)]">
         {filteredLogs.length === 0 ? (
           <div className="text-center text-[var(--color-text-muted)] italic mt-4">
             No logs match criteria
           </div>
         ) : (
-          filteredLogs.map((log, i) => {
-            const logContent = typeof log === "string" ? log : JSON.stringify(log);
-            return (
-              <div
-                key={`${i}-${logContent.slice(0, 50)}`}
-                className="whitespace-pre-wrap break-all hover:bg-[var(--color-surface)] px-1 -mx-1 rounded">
-                {logContent}
-              </div>
-            );
-          })
+          <div className="relative" style={{ height: `${filteredLogs.length * LOG_ROW_HEIGHT}px` }}>
+            {visibleLogs.map((log, offset) => {
+              const rowIndex = startIndex + offset;
+              const logContent = typeof log === "string" ? log : JSON.stringify(log);
+              return (
+                <div
+                  key={`${rowIndex}-${logContent.slice(0, 50)}`}
+                  data-testid="console-log-row"
+                  title={logContent}
+                  className="absolute left-0 right-0 h-5 px-1 -mx-1 rounded hover:bg-[var(--color-surface)] overflow-hidden text-ellipsis whitespace-nowrap"
+                  style={{ top: `${rowIndex * LOG_ROW_HEIGHT}px` }}>
+                  {logContent}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>

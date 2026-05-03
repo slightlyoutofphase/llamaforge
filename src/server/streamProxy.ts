@@ -4,17 +4,26 @@
  * Handles thinking tag splitting and prompt cache bookkeeping.
  */
 
-import type { ChatMessage } from "@shared/types.js";
+import type { ChatMessage, MessageMetrics } from "../shared/types";
+import { parseToolCallsJson } from "@shared/toolCalls.js";
 import { triggerAutoname } from "./autoname";
 import { detectThinkingConfig, parseThinkTags } from "./chatTemplateEngine";
-import { getServerStatus } from "./llamaServer";
-import { logError, logWarn } from "./logger";
-import { processUpload } from "./multimodal";
+import { getActiveThinkingTagOverride, getServerStatus } from "./llamaServer";
+import { logDebug, logError, logInfo, logWarn } from "./logger";
+import {
+  mergeExtractedAttachmentText,
+  processUpload,
+  type ProcessedAttachment,
+} from "./multimodal";
 import { addMessage, getChat, getNextPosition, updateChat } from "./persistence/chatRepo";
 import { getInferencePresets, getSystemPresets } from "./persistence/presetRepo";
 import { loadSettings } from "./persistence/settingsRepo";
 import { updatePromptCacheStats } from "./promptCache";
 import { broadcast } from "./wsHub";
+import { truncateMessages, getTokens } from "./overflow";
+import { cancelPendingApprovals } from "./tools";
+import { getMetadataForPath } from "./persistence/chatRepo";
+import { getDb } from "./persistence/db";
 
 type GenerationSession = {
   chatId: string;
@@ -23,7 +32,68 @@ type GenerationSession = {
   startedAt: number;
 };
 
+const MAX_TOOL_RECURSION_DEPTH = 5;
+
+type ChatCompletionMessage = {
+  role: string;
+  content: unknown;
+  tool_calls?: unknown[];
+  tool_call_id?: string;
+  name?: string;
+};
+
+type ChatCompletionRequestBody = {
+  stream: boolean;
+  cache_prompt: boolean;
+  temperature: number;
+  top_k: number;
+  top_p: number;
+  min_p: number;
+  typical_p: number;
+  repeat_penalty: number;
+  repeat_last_n: number;
+  presence_penalty: number;
+  frequency_penalty: number;
+  mirostat: 0 | 1 | 2;
+  mirostat_tau: number;
+  mirostat_eta: number;
+  dynatemp_range: number;
+  dynatemp_exponent: number;
+  dry_multiplier: number;
+  dry_base: number;
+  dry_allowed_length: number;
+  dry_penalty_last_n: number;
+  dry_sequence_breakers: string[];
+  xtc_probability: number;
+  xtc_threshold: number;
+  seed?: number | undefined;
+  n_predict: number;
+  stop: string[];
+  messages: ChatCompletionMessage[];
+  tools?: { type: "function"; function: unknown }[];
+  response_format?: {
+    type: "json_schema";
+    json_schema: Record<string, unknown>;
+  };
+  chat_template_kwargs?: { enable_thinking: true };
+  reasoning_format?: "none";
+};
+
 const activeGenerations = new Map<string, GenerationSession>();
+
+function buildMessageMetrics(
+  timings: import("@shared/types.js").LlamaTimings,
+  promptTokensCount: number,
+): MessageMetrics {
+  return {
+    predictedTokens: timings.predicted_n || 0,
+    tokensPerSecond: timings.predicted_per_second || 0,
+    promptTokens: promptTokensCount,
+    promptTokensPerSecond: timings.prompt_per_second || 0,
+    cachedPromptTokens: timings.tokens_cached || 0,
+    evaluatedPromptTokens: timings.tokens_evaluated || 0,
+  };
+}
 
 function logStreamProxyError(context: string, err: unknown, details?: Record<string, unknown>) {
   logError(
@@ -43,6 +113,7 @@ export function abortGeneration(idOrChatId: string) {
   const exact = activeGenerations.get(idOrChatId);
   if (exact) {
     exact.controller.abort();
+    cancelPendingApprovals(exact.chatId, "cancelled");
     activeGenerations.delete(idOrChatId);
     return;
   }
@@ -50,9 +121,18 @@ export function abortGeneration(idOrChatId: string) {
   for (const [id, session] of activeGenerations.entries()) {
     if (session.chatId === idOrChatId) {
       session.controller.abort();
+      cancelPendingApprovals(session.chatId, "cancelled");
       activeGenerations.delete(id);
     }
   }
+}
+
+function getToolApprovalFailureMessage(reason?: string): string {
+  if (reason === "timeout") return "Tool approval timed out.";
+  if (reason === "disconnected") return "Tool approval cancelled because the client disconnected.";
+  if (reason === "unloaded") return "Tool approval cancelled because the model was unloaded.";
+  if (reason === "cancelled") return "Tool approval cancelled.";
+  return "Tool approval rejected.";
 }
 
 /**
@@ -85,6 +165,8 @@ export interface ProxyCompletionParams {
   isRegenerate?: boolean;
   /** Whether this request is triggered from an internal tool call recursion. */
   isToolRecurse?: boolean;
+  /** The current depth of internal tool-call recursion for this request chain. */
+  toolRecursionDepth?: number;
 }
 
 /**
@@ -102,6 +184,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     isContinue = false,
     isRegenerate = false,
     isToolRecurse = false,
+    toolRecursionDepth = 0,
   } = params;
 
   if (!isToolRecurse) {
@@ -114,12 +197,23 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   }
 
   const server = getServerStatus();
+  logDebug("Starting proxyCompletion", {
+    chatId,
+    isContinue,
+    isRegenerate,
+    serverStatus: server.status,
+  });
+
   if (server.status !== "running" || !server.port) {
+    logWarn("proxyCompletion blocked: server is not running");
     throw new Error("Llama-server is not running.");
   }
 
   const chat = await getChat(chatId);
-  if (!chat) throw new Error("Chat not found");
+  if (!chat) {
+    logError("proxyCompletion failed: chat not found", chatId);
+    throw new Error("Chat not found");
+  }
 
   const lastMessage = chat.messages?.[chat.messages.length - 1];
   if (isContinue) {
@@ -134,13 +228,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   }
   const assistantMessageId = isContinue && lastMessage ? lastMessage.id : Bun.randomUUIDv7();
   const userMessageId = Bun.randomUUIDv7();
-  const sysPresets = await getSystemPresets();
-  const infPresets = await getInferencePresets();
+  const [sysPresets, infPresets] = await Promise.all([getSystemPresets(), getInferencePresets()]);
 
   const sysPreset = sysPresets.find((p) => p.id === chat.systemPresetId);
   const infPreset = infPresets.find((p) => p.id === chat.inferencePresetId) || infPresets[0];
 
-  const processedAttachments: any[] = [];
+  const processedAttachments: ProcessedAttachment[] = [];
   let userMsg: ChatMessage | null = null;
   let userMessageInserted = false;
 
@@ -183,20 +276,14 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   }
 
   // Construct message content parts
-  let dbContent = newMessage;
-  for (const a of processedAttachments) {
-    if (a.extractedText) {
-      dbContent += `\n--- Attached file: ${a.fileName} ---\n${a.extractedText}\n--- End of file ---\n`;
-    }
-  }
+  const dbContent = mergeExtractedAttachmentText(newMessage, processedAttachments);
 
-  const { getMetadataForPath } = await import("./persistence/chatRepo");
   const modelMeta = server.config?.modelPath
     ? await getMetadataForPath(server.config.modelPath)
     : null;
   const thinkingConfig = detectThinkingConfig(
     modelMeta?.architecture,
-    infPreset?.thinkingTagOverride,
+    getActiveThinkingTagOverride(),
   );
   const thinkingEnabled = infPreset?.thinkingEnabled ?? true;
 
@@ -230,7 +317,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       userMsg.attachments = processedAttachments;
       rawMessages.push(userMsg);
 
-      const db = await import("./persistence/db").then((m) => m.getDb());
+      const db = getDb();
       db.prepare("UPDATE messages SET content = ?, raw_content = ? WHERE id = ?").run(
         dbContent,
         dbContent,
@@ -264,26 +351,120 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     stopStrings: [] as string[],
   };
   const overflowPolicy = safeInfPreset?.contextOverflowPolicy || "TruncateMiddle";
-  const { truncateMessages, getTokens } = await import("./overflow");
   const ctxSize = server.config?.contextSize || 4096;
+  const useTools = infPreset?.toolCallsEnabled && infPreset.tools && infPreset.tools.length > 0;
+  const requestTools = useTools
+    ? infPreset.tools.map((t) => ({
+        type: "function" as const,
+        function: t,
+      }))
+    : undefined;
+  const requestResponseFormat =
+    infPreset?.structuredOutput?.enabled && infPreset.structuredOutput.schema
+      ? {
+          type: "json_schema" as const,
+          json_schema: infPreset.structuredOutput.schema,
+        }
+      : undefined;
+  const requestThinkingConfig =
+    (infPreset?.thinkingEnabled ?? true)
+      ? {
+          chat_template_kwargs: { enable_thinking: true as const },
+          reasoning_format: "none" as const,
+        }
+      : undefined;
+  const { buildContentParts } = await import("./multimodal");
+
+  const buildApiMessages = async (messages: ChatMessage[]): Promise<ChatCompletionMessage[]> => {
+    const apiMessages: ChatCompletionMessage[] = [];
+
+    for (const m of messages) {
+      const mediaAtts =
+        m.attachments?.filter(
+          (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/"),
+        ) || [];
+
+      const hasMediaAttachments = mediaAtts.length > 0;
+      const contentParts = hasMediaAttachments
+        ? await buildContentParts(m.content, m.attachments || [], modelMeta || undefined)
+        : m.content;
+
+      let finalContent = contentParts;
+
+      const hasUnsupportedMedia = mediaAtts.some((a) => {
+        if (a.mimeType.startsWith("image/") && !modelMeta?.hasVisionEncoder) return true;
+        if (a.mimeType.startsWith("audio/") && !modelMeta?.hasAudioEncoder) return true;
+        return false;
+      });
+
+      if (hasUnsupportedMedia) {
+        const warning =
+          "[System info: Some multimodal attachments were removed because the current active model lacks encoders for them.]\n";
+        if (typeof finalContent === "string") {
+          finalContent = warning + finalContent;
+        } else if (Array.isArray(finalContent)) {
+          const textPart = finalContent.find((p) => p.type === "text");
+          if (textPart) {
+            textPart.text = warning + textPart.text;
+          } else {
+            finalContent.push({ type: "text", text: warning });
+          }
+        }
+      }
+
+      const apiMsg: ChatCompletionMessage = { role: m.role, content: finalContent };
+
+      const parsedToolCalls = parseToolCallsJson(m.toolCallsJson);
+      if (parsedToolCalls) {
+        apiMsg.tool_calls = parsedToolCalls;
+      }
+      if (m.toolCallId) {
+        apiMsg.tool_call_id = m.toolCallId;
+        const assistantMsg = messages.find(
+          (prev) =>
+            prev.role === "assistant" &&
+            parseToolCallsJson(prev.toolCallsJson)?.some((tc) => tc.id === m.toolCallId),
+        );
+        const tcs = parseToolCallsJson(assistantMsg?.toolCallsJson);
+        if (tcs) {
+          const matchingTc = tcs.find((tc: { id: string }) => tc.id === m.toolCallId);
+          if (matchingTc) apiMsg.name = matchingTc.function.name;
+        }
+      }
+      apiMessages.push(apiMsg);
+    }
+
+    return apiMessages;
+  };
+
+  const buildPromptText = async (messages: ChatMessage[]): Promise<string> =>
+    JSON.stringify({
+      messages: await buildApiMessages(messages),
+      ...(requestTools ? { tools: requestTools } : {}),
+      ...(requestResponseFormat ? { response_format: requestResponseFormat } : {}),
+      ...(requestThinkingConfig ?? {}),
+    });
+
+  logDebug("Truncating message history", { ctxSize, overflowPolicy });
   rawMessages = await truncateMessages(
     rawMessages,
     overflowPolicy,
     ctxSize,
-    safeInfPreset.maxTokens,
+    safeInfPreset.maxTokens || 4096,
     server.port,
+    true,
+    { buildPromptText },
   );
-  const promptTokensCount = await getTokens(rawMessages, server.port);
+  logDebug("Calculating prompt token count");
+  const promptTokensCount = await getTokens(rawMessages, server.port, { buildPromptText });
+  logInfo("Prompt prepared", { tokens: promptTokensCount, model: server.config?.modelPath });
   // --- End Overflow Policy ---
-
-  const useTools = infPreset?.toolCallsEnabled && infPreset.tools && infPreset.tools.length > 0;
   // Always use /v1/chat/completions — llama-server is launched with --jinja
   // and handles chat template rendering natively. The old /completion fallback
   // used a broken "{{ messages }}" Jinja template that serialized the messages
   // array as raw JSON, producing garbage output.
 
-  const endpoint = `http://127.0.0.1:${server.port}/v1/chat/completions`;
-  const requestBody: Record<string, unknown> = {
+  const requestBody: ChatCompletionRequestBody = {
     stream: true,
     cache_prompt: true,
     temperature: infPreset?.temperature ?? 0.8,
@@ -311,102 +492,41 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     seed: infPreset?.seed !== undefined && infPreset.seed !== -1 ? infPreset.seed : undefined,
     n_predict: infPreset?.maxTokens ?? -1,
     stop: infPreset?.stopStrings ?? [],
+    messages: await buildApiMessages(rawMessages),
   };
 
-  const { buildContentParts } = await import("./multimodal");
-
-  requestBody.messages = [];
-  for (const m of rawMessages) {
-    const mediaAtts =
-      m.attachments?.filter(
-        (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/"),
-      ) || [];
-
-    // For messages with media attachments, build multimodal content parts;
-    // for plain text messages, just use the text content string directly.
-    const hasMediaAttachments = mediaAtts.length > 0;
-    const contentParts = hasMediaAttachments
-      ? await buildContentParts(m.content, m.attachments || [], modelMeta || undefined)
-      : m.content;
-
-    let finalContent = contentParts;
-
-    // Multimodal warning for history
-    const hasUnsupportedMedia = mediaAtts.some((a) => {
-      if (a.mimeType.startsWith("image/") && !modelMeta?.hasVisionEncoder) return true;
-      if (a.mimeType.startsWith("audio/") && !modelMeta?.hasAudioEncoder) return true;
-      return false;
-    });
-
-    if (hasUnsupportedMedia) {
-      const warning =
-        "[System info: Some multimodal attachments were removed because the current active model lacks encoders for them.]\n";
-      if (typeof finalContent === "string") {
-        finalContent = warning + finalContent;
-      } else if (Array.isArray(finalContent)) {
-        const textPart = finalContent.find((p) => p.type === "text");
-        if (textPart) {
-          textPart.text = warning + textPart.text;
-        } else {
-          finalContent.push({ type: "text", text: warning });
-        }
-      }
-    }
-
-    const apiMsg: {
-      role: string;
-      content: any;
-      tool_calls?: any[];
-      tool_call_id?: string;
-      name?: string;
-    } = { role: m.role, content: finalContent };
-
-    if (m.toolCallsJson) {
-      try {
-        apiMsg.tool_calls = JSON.parse(m.toolCallsJson);
-      } catch (_e) {}
-    }
-    if (m.toolCallId) {
-      apiMsg.tool_call_id = m.toolCallId;
-      // Find function name for tool result
-      const assistantMsg = rawMessages.find(
-        (prev) =>
-          prev.role === "assistant" &&
-          prev.toolCallsJson &&
-          JSON.parse(prev.toolCallsJson).some((tc: { id: string }) => tc.id === m.toolCallId),
-      );
-      if (assistantMsg?.toolCallsJson) {
-        const tcs = JSON.parse(assistantMsg.toolCallsJson);
-        const matchingTc = tcs.find((tc: { id: string }) => tc.id === m.toolCallId);
-        if (matchingTc) apiMsg.name = matchingTc.function.name;
-      }
-    }
-    (requestBody.messages as any[]).push(apiMsg);
+  if (requestTools) {
+    requestBody.tools = requestTools;
   }
 
-  if (useTools) {
-    requestBody.tools = infPreset.tools.map((t) => ({
-      type: "function",
-      function: t,
-    }));
+  if (requestResponseFormat) {
+    requestBody.response_format = requestResponseFormat;
   }
 
-  if (infPreset?.structuredOutput?.enabled && infPreset.structuredOutput.schema) {
-    requestBody.response_format = {
-      type: "json_schema",
-      json_schema: infPreset.structuredOutput.schema,
-    };
+  if (requestThinkingConfig) {
+    requestBody.chat_template_kwargs = requestThinkingConfig.chat_template_kwargs;
+    requestBody.reasoning_format = requestThinkingConfig.reasoning_format;
   }
 
-  // Enable thinking tag handling via llama-server's native template kwargs
-  if (infPreset?.thinkingEnabled ?? true) {
-    requestBody.chat_template_kwargs = { enable_thinking: true };
-    // Use reasoning_format "none" so we get raw thinking tags we can parse ourselves
-    requestBody.reasoning_format = "none";
-  }
+  const endpoint = `http://127.0.0.1:${server.port}/v1/chat/completions`;
+  logDebug("Constructed inference request", {
+    endpoint,
+    promptTokensCount,
+    ctxSize,
+    messagesCount: requestBody.messages.length,
+  });
 
   const abortController = new AbortController();
   const generationId = Bun.randomUUIDv7();
+
+  logInfo("Initiating model inference", {
+    chatId,
+    endpoint,
+    messages: requestBody.messages.length,
+    maxTokens: requestBody.n_predict,
+    thinking: requestBody.chat_template_kwargs?.enable_thinking,
+  });
+
   activeGenerations.set(generationId, {
     chatId,
     controller: abortController,
@@ -432,8 +552,8 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     const db = await import("./persistence/db").then((m) => m.getDb());
     db.prepare(
       `
-        INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json, metrics_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      `,
     ).run(
       assistantMessageId,
@@ -446,8 +566,24 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       Date.now(),
       null,
       null,
+      null,
     );
   }
+
+  const cleanupEmptyAssistantMessage = () => {
+    if (isContinue) return;
+
+    try {
+      const row = getDb()
+        .query<{ content: string }, [string]>("SELECT content FROM messages WHERE id = ?")
+        .get(assistantMessageId);
+      if (row && row.content.length === 0) {
+        getDb().prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
+      }
+    } catch (cleanupErr) {
+      logError("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
+    }
+  };
 
   fetch(endpoint, {
     method: "POST",
@@ -456,6 +592,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     signal: abortController.signal,
   })
     .then(async (res) => {
+      // Keep the timeout armed between response headers and the first SSE chunk.
+      resetInactivityTimer();
+      logDebug("Model server response received", { status: res.status });
       if (!res.ok) {
         const errorBody = await res.text().catch(() => "");
         const err = new Error(
@@ -505,7 +644,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       try {
         while (true) {
           const { done, value } = await reader.read();
-          resetInactivityTimer();
+          clearTimeout(inactivityTimer);
 
           const chunk = value ? decoder.decode(value, { stream: true }) : "";
           streamBuffer += chunk;
@@ -593,9 +732,39 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                   assistantMessageId,
                 );
 
+              broadcast({
+                type: "tool_approval_state",
+                chatId,
+                messageId: assistantMessageId,
+                generationId,
+                pending: true,
+                toolCallId: toolCalls[0]?.id,
+                reason: "awaiting_user",
+              });
+
               for (const tc of toolCalls) {
-                const { approved, editedArguments } = await waitForToolApproval(chatId, tc.id);
+                const { approved, editedArguments, reason } = await waitForToolApproval(
+                  chatId,
+                  tc.id,
+                );
                 if (!approved) {
+                  broadcast({
+                    type: "tool_approval_state",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    pending: false,
+                    resumeGeneration: false,
+                    toolCallId: tc.id,
+                    reason: reason ?? "rejected",
+                  });
+                  broadcast({
+                    type: "error",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    message: getToolApprovalFailureMessage(reason),
+                  });
                   broadcast({
                     type: "stop",
                     chatId,
@@ -609,6 +778,19 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                   });
                   shouldStop = true;
                   break;
+                }
+
+                if (tc === toolCalls[toolCalls.length - 1]) {
+                  broadcast({
+                    type: "tool_approval_state",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    pending: false,
+                    resumeGeneration: true,
+                    toolCallId: tc.id,
+                    reason: "approved",
+                  });
                 }
 
                 const toolResult = await executeTool(
@@ -631,26 +813,51 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               }
 
               if (!shouldStop) {
-                broadcast({
-                  type: "stop",
-                  chatId,
-                  messageId: assistantMessageId,
-                  generationId,
-                  stopReason: "tool_calls",
-                  timings: parsed.timings || ({} as import("@shared/types.js").LlamaTimings),
-                  fullContent: prevContent,
-                  fullRawContent,
-                  fullThinking: prevThinking,
-                });
+                const timings = parsed.timings || ({} as import("@shared/types.js").LlamaTimings);
+                if (toolRecursionDepth >= MAX_TOOL_RECURSION_DEPTH) {
+                  const recursionMessage = `Tool recursion limit (${MAX_TOOL_RECURSION_DEPTH}) reached for chat ${chatId}.`;
+                  logWarn(recursionMessage);
+                  broadcast({
+                    type: "error",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    message: recursionMessage,
+                  });
+                  broadcast({
+                    type: "stop",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    stopReason: "error",
+                    timings,
+                    fullContent: prevContent,
+                    fullRawContent,
+                    fullThinking: prevThinking,
+                  });
+                } else {
+                  broadcast({
+                    type: "stop",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    stopReason: "tool_calls",
+                    timings,
+                    fullContent: prevContent,
+                    fullRawContent,
+                    fullThinking: prevThinking,
+                  });
 
-                const { proxyCompletion } = await import("./streamProxy");
-                await proxyCompletion({
-                  chatId,
-                  content: "",
-                  attachments: [],
-                  isToolRecurse: true,
-                  isRecursive: true,
-                });
+                  const { proxyCompletion } = await import("./streamProxy");
+                  await proxyCompletion({
+                    chatId,
+                    content: "",
+                    attachments: [],
+                    isToolRecurse: true,
+                    isRecursive: true,
+                    toolRecursionDepth: toolRecursionDepth + 1,
+                  });
+                }
               }
 
               shouldStop = true;
@@ -722,6 +929,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               }
 
               updatePromptCacheStats(chatId, timings);
+              const messageMetrics = buildMessageMetrics(timings, promptTokensCount);
               broadcast({
                 type: "stop",
                 chatId,
@@ -741,24 +949,30 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               const dbFinal = await import("./persistence/db").then((m) => m.getDb());
               dbFinal
                 .prepare(
-                  "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
+                  "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
                 )
-                .run(prevContent, fullRawContent, prevThinking || null, assistantMessageId);
-
+                .run(
+                  prevContent,
+                  fullRawContent,
+                  prevThinking || null,
+                  JSON.stringify(messageMetrics),
+                  assistantMessageId,
+                );
               if (settings.autonameEnabled) await triggerAutoname(chatId);
               shouldStop = true;
               break;
             }
           }
-
           if (shouldStop || done) break;
+          resetInactivityTimer();
         }
       } catch (err: any) {
-        if (err.name === "AbortError") {
+        if (err.name === "AbortError" || abortController.signal.aborted) {
           const db = await import("./persistence/db").then((m) => m.getDb());
           db.prepare(
             "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
           ).run(prevContent, fullRawContent, prevThinking || null, assistantMessageId);
+          cleanupEmptyAssistantMessage();
           logWarn("[streamProxy] Generation aborted by user or timeout", {
             chatId,
             assistantMessageId,
@@ -769,7 +983,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
             chatId,
             messageId: assistantMessageId,
             generationId,
-            message: "Generation cancelled.",
+            message: "Generation cancelled or timed out.",
           });
         } else {
           logStreamProxyError("stream-parse", err, {
@@ -777,21 +991,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
             assistantMessageId,
             generationId,
           });
-          // C6 fix: delete the empty assistant row if generation failed
-          // to prevent orphaned blank messages in chat history.
-          if (!isContinue) {
-            try {
-              const dbCleanup = await import("./persistence/db").then((m) => m.getDb());
-              const row = dbCleanup
-                .query<{ content: string }, [string]>("SELECT content FROM messages WHERE id = ?")
-                .get(assistantMessageId);
-              if (row && row.content.length === 0) {
-                dbCleanup.prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
-              }
-            } catch (cleanupErr) {
-              logError("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
-            }
-          }
+          cleanupEmptyAssistantMessage();
           broadcast({
             type: "error",
             chatId,
@@ -802,14 +1002,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         }
       } finally {
         clearTimeout(inactivityTimer);
-        const { cancelPendingApprovals } = await import("./tools");
         cancelPendingApprovals(chatId);
         activeGenerations.delete(generationId);
       }
     })
-    .catch(async (err) => {
+    .catch(async (err: any) => {
       clearTimeout(inactivityTimer);
-      const { cancelPendingApprovals } = await import("./tools");
       cancelPendingApprovals(chatId);
       activeGenerations.delete(generationId);
       logStreamProxyError("fetch-catch", err, {
@@ -818,21 +1016,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         assistantMessageId,
         generationId,
       });
-      // C6 fix: delete the empty assistant row if the fetch itself failed
-      // (e.g., model server unreachable, connection refused)
-      if (!isContinue) {
-        try {
-          const dbCleanup = await import("./persistence/db").then((m) => m.getDb());
-          const row = dbCleanup
-            .query<{ content: string }, [string]>("SELECT content FROM messages WHERE id = ?")
-            .get(assistantMessageId);
-          if (row && row.content.length === 0) {
-            dbCleanup.prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
-          }
-        } catch (cleanupErr) {
-          logError("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
-        }
-      }
+      cleanupEmptyAssistantMessage();
       broadcast({
         type: "error",
         chatId,

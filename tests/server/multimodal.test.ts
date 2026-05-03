@@ -4,11 +4,6 @@
  */
 
 import { describe, expect, it, mock } from "bun:test";
-import os from "node:os";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
-
-const APP_ROOT = path.join(os.homedir(), ".llamaforge");
 
 // Mock fs/promises for any remaining directory operations
 mock.module("node:fs/promises", () => ({
@@ -26,6 +21,9 @@ const fileSpy = spyOn(Bun, "file").mockImplementation((path: string | URL) => {
     exists: async () => true,
     size: 100,
     text: async () => {
+      if (pathStr.includes("large-a.txt")) return "A".repeat(15000);
+      if (pathStr.includes("large-b.txt")) return "B".repeat(15000);
+      if (pathStr.includes("large-c.txt")) return "C".repeat(15000);
       if (pathStr.includes("img.png")) return "abc";
       if (pathStr.includes("audio.wav")) return "def";
       if (pathStr.includes("pic.jpg")) return "ghi";
@@ -102,6 +100,43 @@ describe("multimodal", () => {
     expect((res as string).match(/Hello world/g)?.length).toBe(1);
   });
 
+  it("caps extracted text per attachment and per message when rebuilding prompt text", async () => {
+    const res = await buildContentParts("Main prompt", [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "text/plain",
+        fileName: "large-a.txt",
+        filePath: "attachments/large-a.txt",
+        createdAt: 0,
+      } as any,
+      {
+        id: "3",
+        messageId: "4",
+        mimeType: "text/plain",
+        fileName: "large-b.txt",
+        filePath: "attachments/large-b.txt",
+        createdAt: 0,
+      } as any,
+      {
+        id: "5",
+        messageId: "6",
+        mimeType: "text/plain",
+        fileName: "large-c.txt",
+        filePath: "attachments/large-c.txt",
+        createdAt: 0,
+      } as any,
+    ]);
+
+    expect(typeof res).toBe("string");
+    expect((res as string).length).toBeLessThan(26000);
+    expect(res as string).toContain("Attachment text truncated: kept 12000 of 15000 characters.");
+    expect(res as string).toContain(
+      "[Attachment text omitted: message attachment text budget exhausted.]",
+    );
+    expect(res as string).toContain("Main prompt");
+  });
+
   it("builds image parts successfully if vision is supported", async () => {
     const attachments = [
       {
@@ -119,9 +154,7 @@ describe("multimodal", () => {
     expect(Array.isArray(res)).toBe(true);
     const parts = res as any[];
     expect(parts[0].type).toBe("image_url");
-    expect(parts[0].image_url.url).toBe(
-      pathToFileURL(path.join(APP_ROOT, "attachments/img.png")).toString(),
-    );
+    expect(parts[0].image_url.url).toBe("file://attachments/img.png");
     expect(parts[1].type).toBe("text");
     expect(parts[1].text).toBe("Look at this");
   });
@@ -161,9 +194,7 @@ describe("multimodal", () => {
     expect(Array.isArray(res)).toBe(true);
     const parts = res as any[];
     expect(parts[0].type).toBe("image_url");
-    expect(parts[0].image_url.url).toBe(
-      pathToFileURL(path.join(APP_ROOT, "attachments/audio.wav")).toString(),
-    );
+    expect(parts[0].image_url.url).toBe("file://attachments/audio.wav");
     expect(parts[1].type).toBe("text");
     expect(parts[1].text).toBe("Listen to this");
   });

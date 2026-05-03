@@ -465,7 +465,7 @@ RUNNING ──switchModel()──► UNLOADING ──killed──► LOADING ─
  */
 
 import { type Subprocess } from "bun";
-import { type ModelLoadConfig } from "@shared/types.js";
+import { type ModelLoadConfig } from "../shared/types";
 import { findFreePort } from "./utils/network.js";
 import { broadcastStatus, broadcastLog } from "./wsHub.js";
 import { writeFileSync, rmSync } from "node:fs";
@@ -840,7 +840,7 @@ The engine is responsible for constructing the complete prompt string from conve
  */
 
 import { Template } from "@huggingface/jinja";
-import { type ChatMessage, type SystemPromptPreset, type ThinkingTagConfig } from "@shared/types.js";
+import { type ChatMessage, type SystemPromptPreset, type ThinkingTagConfig } from "../shared/types";
 
 /**
  * Renders a full prompt string for submission to llama-server /completion.

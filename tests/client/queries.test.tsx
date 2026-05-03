@@ -61,7 +61,7 @@ describe("Chat query hooks", () => {
       </QueryClientProvider>,
     );
 
-    await waitFor(() => expect(fetchChats).toHaveBeenCalledWith(undefined, 150, 0));
+    await waitFor(() => expect(fetchChats).toHaveBeenCalledWith(undefined, 300, 0));
     await waitFor(() =>
       expect(queryClient.getQueryData(["chats", { q: undefined }])).toBeDefined(),
     );

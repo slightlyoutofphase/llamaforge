@@ -4,7 +4,7 @@
  */
 
 import { json } from "@codemirror/lang-json";
-import type { InferencePreset } from "@shared/types.js";
+import type { InferencePreset } from "../shared/types";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -716,91 +716,14 @@ export function InferencePresetEditor() {
               type="checkbox"
               checked={localState.thinkingEnabled ?? true}
               onChange={(e) => updateField("thinkingEnabled", e.target.checked)}
+              disabled={localState.isDefault}
               className="accent-[var(--color-accent)]"
             />
           </h3>
-          <div className="grid grid-cols-2 gap-2 text-xs mt-2">
-            <div>
-              <label
-                htmlFor="thinkingOpenTag"
-                className="block mb-1 text-[var(--color-text-muted)]">
-                Open Tag
-              </label>
-              <input
-                id="thinkingOpenTag"
-                type="text"
-                value={localState.thinkingTagOverride?.openTag || ""}
-                disabled={localState.isDefault}
-                onChange={(e) =>
-                  updateField("thinkingTagOverride", {
-                    openTag: e.target.value,
-                    closeTag: localState.thinkingTagOverride?.closeTag || "</think>",
-                    enableToken: localState.thinkingTagOverride?.enableToken,
-                  })
-                }
-                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
-                placeholder="<think>"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="thinkingCloseTag"
-                className="block mb-1 text-[var(--color-text-muted)]">
-                Close Tag
-              </label>
-              <input
-                id="thinkingCloseTag"
-                type="text"
-                value={localState.thinkingTagOverride?.closeTag || ""}
-                disabled={localState.isDefault}
-                onChange={(e) =>
-                  updateField("thinkingTagOverride", {
-                    openTag: localState.thinkingTagOverride?.openTag || "<think>",
-                    closeTag: e.target.value,
-                    enableToken: localState.thinkingTagOverride?.enableToken,
-                  })
-                }
-                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
-                placeholder="</think>"
-              />
-            </div>
-            <div className="col-span-2">
-              <label
-                htmlFor="thinkingEnableToken"
-                className="block mb-1 text-[var(--color-text-muted)]">
-                Enable Token (Fallback injected to sys prompt)
-              </label>
-              <input
-                id="thinkingEnableToken"
-                type="text"
-                value={localState.thinkingTagOverride?.enableToken || ""}
-                disabled={localState.isDefault}
-                onChange={(e) =>
-                  updateField("thinkingTagOverride", {
-                    openTag: localState.thinkingTagOverride?.openTag || "<think>",
-                    closeTag: localState.thinkingTagOverride?.closeTag || "</think>",
-                    enableToken: e.target.value,
-                  })
-                }
-                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1.5 rounded font-mono"
-              />
-            </div>
-            <div className="col-span-2 pt-1">
-              <button
-                type="button"
-                disabled={localState.isDefault}
-                onClick={() => {
-                  updateField("thinkingTagOverride", {
-                    openTag: "<|channel>thought\n",
-                    closeTag: "<channel|>",
-                    enableToken: "<|think|>",
-                  });
-                }}
-                className="text-xs text-[var(--color-text-muted)] hover:text-[var(--color-accent)] disabled:opacity-50 mt-1 block">
-                Load Gemma 4 Defaults
-              </button>
-            </div>
-          </div>
+          <p className="text-xs text-[var(--color-text-muted)] mt-2">
+            Tag parsing is controlled by the active load preset. This toggle only controls whether
+            `enable_thinking` is requested on subsequent generations.
+          </p>
         </section>
 
         <section className="space-y-4">

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist/docs",
+    "types": ["bun-types"]
+  },
+  "include": ["src/client", "src/server", "src/shared"],
+  "exclude": ["node_modules", "dist"]
+}

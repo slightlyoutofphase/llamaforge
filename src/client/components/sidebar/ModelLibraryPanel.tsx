@@ -3,6 +3,7 @@
  * Provides the model library panel for browsing and loading GGUF models.
  */
 
+import type { LoadModelRequest, LoadPreset } from "../shared/types";
 import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import {
@@ -16,7 +17,7 @@ import {
   Settings,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { logError } from "../../logger";
 import { useCreateChat, useLoadPresets } from "../../queries";
 import { useAppStore } from "../../store";
@@ -30,7 +31,8 @@ import { MultimodalGuardModal } from "./MultimodalGuardModal";
  * @returns The rendered React element.
  */
 export function ModelLibraryPanel() {
-  const { models, loadModel, loadedModel, isGenerating, messages } = useAppStore();
+  const { models, loadModel, loadedModel, isGenerating, isWaitingForToolApproval, messages } =
+    useAppStore();
   const { setRightPanelView } = useUiStore();
   const { data: loadPresets } = useLoadPresets();
   const createChatMut = useCreateChat();
@@ -42,6 +44,7 @@ export function ModelLibraryPanel() {
     messages: any[];
   } | null>(null);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
+  const createChatLockRef = useRef(false);
 
   const filteredModels = models.filter(
     (m) =>
@@ -51,9 +54,10 @@ export function ModelLibraryPanel() {
 
   const selectedModel = models.find((m) => m.primaryPath === selectedPath);
   const defaultLoadPreset = loadPresets?.find((p) => p.isDefault) || loadPresets?.[0];
+  const requestInFlight = isGenerating || isWaitingForToolApproval;
 
-  const handleLoad = (p: { id: string; config: any }) => {
-    if (!selectedModel || isGenerating) return;
+  const handleLoad = (preset: LoadPreset) => {
+    if (!selectedModel || requestInFlight) return;
 
     // Check for multimodal incompatibility
     const hasVision = !!selectedModel.metadata?.hasVisionEncoder;
@@ -77,15 +81,27 @@ export function ModelLibraryPanel() {
       return;
     }
 
-    loadModel({
-      ...p.config,
+    const request: LoadModelRequest = {
+      ...preset.config,
       modelPath: selectedModel.primaryPath,
-      presetId: p.id,
-    });
+      presetId: preset.id,
+      thinkingTagOverride: preset.thinkingTagOverride,
+    };
+
+    if (
+      preset.chatTemplateOverride &&
+      preset.chatTemplateOverride.length > 0 &&
+      preset.chatTemplateOverride !== selectedModel.metadata?.chatTemplate
+    ) {
+      request.chatTemplateFile = preset.chatTemplateOverride;
+    }
+
+    loadModel(request);
   };
 
   const handleStartNewChat = async () => {
-    if (isCreatingChat) return;
+    if (isCreatingChat || createChatLockRef.current) return;
+    createChatLockRef.current = true;
     setIsCreatingChat(true);
     try {
       const chat = await createChatMut.mutateAsync({ name: "New Chat (Model Switch)" });
@@ -95,6 +111,7 @@ export function ModelLibraryPanel() {
     } catch (error) {
       logError("New chat creation failed:", error);
     } finally {
+      createChatLockRef.current = false;
       setIsCreatingChat(false);
       setGuardModal(null);
       setRightPanelView(null);
@@ -256,7 +273,7 @@ export function ModelLibraryPanel() {
                             <button
                               key={p.id}
                               type="button"
-                              disabled={isGenerating}
+                              disabled={requestInFlight}
                               onClick={() => handleLoad(p)}
                               className="bg-[var(--color-bg)] border border-[var(--color-border)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] text-xs px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50">
                               <Settings size={12} />

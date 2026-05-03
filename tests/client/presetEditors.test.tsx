@@ -48,12 +48,17 @@ const mockLoadPreset = {
   modelPath: "/models/test.gguf",
   isDefault: true,
   isReadonly: false,
+  thinkingTagOverride: {
+    openTag: "<think>",
+    closeTag: "</think>",
+    enableToken: "<|think|>",
+  },
   config: {
     modelPath: "/models/test.gguf",
     contextSize: 2048,
     gpuLayers: 10,
     threads: 4,
-    flashAttention: true,
+    flashAttn: "on",
   },
 };
 
@@ -145,7 +150,17 @@ describe("Preset Editors Integration", () => {
     const gpuInput = screen.getByLabelText(/GPU Layers/i);
     expect((gpuInput as HTMLInputElement).value).toBe("10");
 
+    const imageBudgetSelect = screen.getByLabelText(/VIR max tokens/i);
+    expect((imageBudgetSelect as HTMLSelectElement).value).toBe("560");
+
+    fireEvent.click(screen.getByRole("button", { name: "Memory & KV Cache" }));
+    const flashAttnSelect = screen.getByLabelText(/Flash Attention/i);
+    expect((flashAttnSelect as HTMLSelectElement).value).toBe("on");
+
     // Verify Jinja template override section
     expect(screen.getByText("Jinja Chat Template")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Thinking Tag Override" }));
+    expect(screen.getByLabelText("Open Tag")).toBeDefined();
+    expect(screen.getByRole("button", { name: /Detect from architecture/i })).toBeDefined();
   });
 });

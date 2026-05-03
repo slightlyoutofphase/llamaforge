@@ -3,7 +3,15 @@
  * Optimization algorithm for suggesting model load parameters based on hardware capabilities.
  */
 
-import type { GgufDisplayMetadata, HardwareInfo, ModelLoadConfig } from "@shared/types.js";
+import type { GgufDisplayMetadata, HardwareInfo, ModelLoadConfig } from "../shared/types";
+
+type ConfirmedGpuBackend = "cuda" | "rocm" | "metal" | "vulkan";
+
+function isConfirmedGpuBackend(
+  backend: HardwareInfo["gpus"][number]["backend"],
+): backend is ConfirmedGpuBackend {
+  return backend === "cuda" || backend === "rocm" || backend === "metal" || backend === "vulkan";
+}
 
 /**
  * Calculates optimized load parameters for a given model on specific hardware.
@@ -18,10 +26,11 @@ export function optimizeLoadConfig(
 ): Partial<ModelLoadConfig> {
   const suggested: Partial<ModelLoadConfig> = {};
 
-  const hasGpu = hardware.gpus.length > 0;
+  const confirmedGpus = hardware.gpus.filter((gpu) => isConfirmedGpuBackend(gpu.backend));
+  const hasGpu = confirmedGpus.length > 0;
   suggested.flashAttn = hasGpu ? "auto" : "off";
 
-  const totalVram = hardware.gpus.reduce((acc, g) => acc + Math.max(0, g.vramBytes), 0);
+  const totalVram = confirmedGpus.reduce((acc, g) => acc + Math.max(0, g.vramBytes), 0);
   const blockCount = Math.max(0, metadata.blockCount ?? 0);
   const contextLength = metadata.contextLength ?? 4096;
   const embeddingLength = Math.max(4096, metadata.embeddingLength ?? 4096);

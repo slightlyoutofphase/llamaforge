@@ -4,7 +4,8 @@
  * All functions return promises and throw Errors on non-OK responses.
  */
 
-import type { InferencePreset, LoadPreset, SystemPromptPreset } from "@shared/types.js";
+import type { InferencePreset, LoadPreset, SystemPromptPreset } from "../shared/types";
+import { request } from "./http";
 
 /**
  * Fetches all available model load presets from the backend.
@@ -25,7 +26,7 @@ export async function fetchLoadPresets(): Promise<LoadPreset[]> {
  * @returns A promise that resolves when the preset is created.
  */
 export async function createLoadPreset(preset: LoadPreset): Promise<void> {
-  const res = await fetch("/api/presets/load", {
+  const res = await request("/api/presets/load", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(preset),
@@ -41,7 +42,7 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
  * @returns A promise that resolves when the update is complete.
  */
 export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>): Promise<void> {
-  const res = await fetch(`/api/presets/load/${id}`, {
+  const res = await request(`/api/presets/load/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
@@ -56,7 +57,7 @@ export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>)
  * @returns A promise that resolves when the deletion is complete.
  */
 export async function deleteLoadPreset(id: string): Promise<void> {
-  const res = await fetch(`/api/presets/load/${id}`, { method: "DELETE" });
+  const res = await request(`/api/presets/load/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error("Failed to delete load preset");
 }
 
@@ -79,7 +80,7 @@ export async function fetchInferencePresets(): Promise<InferencePreset[]> {
  * @returns A promise that resolves when the preset is created.
  */
 export async function createInferencePreset(preset: InferencePreset): Promise<void> {
-  const res = await fetch("/api/presets/inference", {
+  const res = await request("/api/presets/inference", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(preset),
@@ -98,7 +99,7 @@ export async function updateInferencePreset(
   id: string,
   updates: Partial<InferencePreset>,
 ): Promise<void> {
-  const res = await fetch(`/api/presets/inference/${id}`, {
+  const res = await request(`/api/presets/inference/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
@@ -113,7 +114,7 @@ export async function updateInferencePreset(
  * @returns A promise that resolves when the deletion is complete.
  */
 export async function deleteInferencePreset(id: string): Promise<void> {
-  const res = await fetch(`/api/presets/inference/${id}`, { method: "DELETE" });
+  const res = await request(`/api/presets/inference/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error("Failed to delete inference preset");
 }
 
@@ -149,7 +150,7 @@ export async function fetchChats(
 export async function createChat(
   data: Partial<import("@shared/types.js").ChatSession> = {},
 ): Promise<import("@shared/types.js").ChatSession> {
-  const res = await fetch("/api/chats", {
+  const res = await request("/api/chats", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -181,7 +182,7 @@ export async function updateChat(
   id: string,
   updates: Partial<import("@shared/types.js").ChatSession>,
 ): Promise<void> {
-  const res = await fetch(`/api/chats/${id}`, {
+  const res = await request(`/api/chats/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
@@ -204,7 +205,7 @@ export async function updateMessage(
   content: string,
   thinkingContent?: string,
 ): Promise<void> {
-  const res = await fetch(`/api/chats/${chatId}/messages/${messageId}`, {
+  const res = await request(`/api/chats/${chatId}/messages/${messageId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content, thinkingContent }),
@@ -220,7 +221,7 @@ export async function updateMessage(
  * @returns A promise that resolves when complete.
  */
 export async function deleteMessage(chatId: string, messageId: string): Promise<void> {
-  const res = await fetch(`/api/chats/${chatId}/messages/${messageId}`, {
+  const res = await request(`/api/chats/${chatId}/messages/${messageId}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error("Failed to delete message");
@@ -233,7 +234,7 @@ export async function deleteMessage(chatId: string, messageId: string): Promise<
  * @returns A promise that resolves when complete.
  */
 export async function deleteChat(id: string): Promise<void> {
-  const res = await fetch(`/api/chats/${id}`, { method: "DELETE" });
+  const res = await request(`/api/chats/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error("Failed to delete chat");
 }
 
@@ -248,7 +249,7 @@ export async function branchChat(
   id: string,
   messageId: string,
 ): Promise<import("@shared/types.js").ChatSession> {
-  const res = await fetch(`/api/chats/${id}/branch`, {
+  const res = await request(`/api/chats/${id}/branch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messageId }),
@@ -264,7 +265,7 @@ export async function branchChat(
  * @returns A promise resolving to the new message metadata.
  */
 export async function regenerateChat(id: string): Promise<{ messageId: string }> {
-  const res = await fetch(`/api/chats/${id}/regenerate`, { method: "POST" });
+  const res = await request(`/api/chats/${id}/regenerate`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to regenerate chat");
   return res.json();
 }
@@ -276,7 +277,7 @@ export async function regenerateChat(id: string): Promise<{ messageId: string }>
  * @returns A promise resolving to the updated message metadata.
  */
 export async function continueChat(id: string): Promise<{ messageId: string }> {
-  const res = await fetch(`/api/chats/${id}/continue`, { method: "POST" });
+  const res = await request(`/api/chats/${id}/continue`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to continue chat");
   return res.json();
 }
@@ -292,7 +293,7 @@ export async function exportChat(
   id: string,
   format: "json" | "markdown" = "json",
 ): Promise<string> {
-  const res = await fetch(`/api/chats/${id}/export`, {
+  const res = await request(`/api/chats/${id}/export`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ format }),
@@ -309,7 +310,7 @@ export async function exportChat(
  * @returns A promise resolving to the ID of the newly created chat.
  */
 export async function importChat(content: string): Promise<{ id: string }> {
-  const res = await fetch("/api/chats/import", {
+  const res = await request("/api/chats/import", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content }),
@@ -336,7 +337,7 @@ export async function fetchSystemPresets(): Promise<SystemPromptPreset[]> {
  * @returns A promise that resolves when complete.
  */
 export async function createSystemPreset(preset: SystemPromptPreset): Promise<void> {
-  const res = await fetch("/api/presets/system", {
+  const res = await request("/api/presets/system", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(preset),
@@ -355,7 +356,7 @@ export async function updateSystemPreset(
   id: string,
   updates: Partial<SystemPromptPreset>,
 ): Promise<void> {
-  const res = await fetch(`/api/presets/system/${id}`, {
+  const res = await request(`/api/presets/system/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
@@ -370,7 +371,7 @@ export async function updateSystemPreset(
  * @returns A promise that resolves when complete.
  */
 export async function deleteSystemPreset(id: string): Promise<void> {
-  const res = await fetch(`/api/presets/system/${id}`, { method: "DELETE" });
+  const res = await request(`/api/presets/system/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error("Failed to delete system preset");
 }
 
@@ -394,7 +395,7 @@ export async function fetchSettings(): Promise<any> {
  * @returns A promise that resolves when complete.
  */
 export async function updateSettings(updates: any): Promise<void> {
-  const res = await fetch("/api/settings", {
+  const res = await request("/api/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
@@ -412,7 +413,7 @@ export async function updateSettings(updates: any): Promise<void> {
 export async function optimizeHardware(
   modelPath: string,
 ): Promise<Partial<import("@shared/types.js").ModelLoadConfig>> {
-  const res = await fetch("/api/hardware/optimize", {
+  const res = await request("/api/hardware/optimize", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ modelPath }),

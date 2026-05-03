@@ -51,7 +51,7 @@ export function ThinkingBlock({ content, isLive }: ThinkingBlockProps) {
           <ChevronRight size={14} className="mr-2 shrink-0" />
         )}
         <span className="font-mono text-xs font-semibold uppercase tracking-wider flex items-center gap-2">
-          Thinking ({tokenEstimate} tokens)
+          Thinking trace ({tokenEstimate} tokens)
           {isLive && <Loader2 size={10} className="animate-spin text-[var(--color-accent)]" />}
         </span>
       </button>

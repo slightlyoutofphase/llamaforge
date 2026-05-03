@@ -5,17 +5,18 @@
  */
 
 import { useQueryClient } from "@tanstack/react-query";
-import { Link, Outlet, useLocation } from "@tanstack/react-router";
+import { Link, Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import { MessageSquare, Server, Settings, Terminal } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { ConsoleLog } from "./ConsoleLog";
+import { ChatSidebar } from "./components/sidebar/ChatSidebar";
 import { InferencePresetEditor } from "./components/preset/InferencePresetEditor";
 import { LoadPresetEditor } from "./components/preset/LoadPresetEditor";
 import { SystemPresetEditor } from "./components/preset/SystemPresetEditor";
-import { ChatSidebar } from "./components/sidebar/ChatSidebar";
 import { ModelLibraryPanel } from "./components/sidebar/ModelLibraryPanel";
 import { HardwareInfo } from "./HardwareInfo";
-import { queryKeys, useSettings } from "./queries";
+import { logError } from "./logger";
+import { queryKeys, useCreateChat, useSettings } from "./queries";
 import { SettingsPanel } from "./SettingsPanel";
 import { useAppStore } from "./store";
 import { useUiStore } from "./uiStore";
@@ -43,13 +44,41 @@ export default function App() {
     notifications,
     removeNotification,
     unloadModel,
+    currentChatId,
   } = useAppStore();
-  const { setRightPanelView, rightPanelView, toggleConsole } = useUiStore();
+  const { setRightPanelView, rightPanelView, toggleConsole, isConsoleVisible } = useUiStore();
   const { data: settings } = useSettings();
+  const createChatMut = useCreateChat();
   const queryClient = useQueryClient();
+  const didApplyStartupConsoleRef = useRef(false);
+  const createWorkspaceLockRef = useRef(false);
 
   const location = useLocation();
+  const navigate = useNavigate();
   const activeTab = location.pathname.startsWith("/chat") ? "chat" : "models";
+
+  const handleOpenChatWorkspace = async () => {
+    if (currentChatId) {
+      navigate({ to: "/chat/$chatId", params: { chatId: currentChatId } });
+      return;
+    }
+
+    if (createWorkspaceLockRef.current || createChatMut.isPending) {
+      return;
+    }
+
+    createWorkspaceLockRef.current = true;
+    try {
+      const chat = await createChatMut.mutateAsync({ name: "New Chat" });
+      if (chat?.id) {
+        navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
+      }
+    } catch (error) {
+      logError("Failed to open chat workspace", error);
+    } finally {
+      createWorkspaceLockRef.current = false;
+    }
+  };
 
   // S11 fix: Zustand store methods are stable references; run initialization once on mount only
   /* eslint-disable react-hooks/exhaustive-deps */
@@ -78,6 +107,21 @@ export default function App() {
       document.documentElement.style.setProperty("--color-accent", settings.accentColor);
     }
   }, [settings?.accentColor]);
+
+  useEffect(() => {
+    document.documentElement.style.fontSize = `${settings?.fontSize ?? 14}px`;
+  }, [settings?.fontSize]);
+
+  useEffect(() => {
+    if (!settings || didApplyStartupConsoleRef.current) {
+      return;
+    }
+
+    didApplyStartupConsoleRef.current = true;
+    if (settings.showConsoleOnStartup) {
+      useUiStore.setState({ isConsoleVisible: true });
+    }
+  }, [settings]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -124,13 +168,16 @@ export default function App() {
           title="Models">
           <Server size={22} />
         </Link>
-        <Link
-          to="/chat/$chatId"
-          params={{ chatId: "default-chat" }}
+        <button
+          type="button"
+          onClick={() => {
+            void handleOpenChatWorkspace();
+          }}
+          disabled={!currentChatId && createChatMut.isPending}
           className={`p-3 rounded-xl transition-all ${activeTab === "chat" ? "bg-[var(--color-surface-elevated)] text-[var(--color-accent)]" : "text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]"}`}
           title="Chat Workspace">
           <MessageSquare size={22} />
-        </Link>
+        </button>
 
         <div className="flex-grow" />
 
@@ -159,7 +206,7 @@ export default function App() {
       {activeTab === "chat" && <ChatSidebar />}
 
       {/* Main Content Area */}
-      <div className="flex-1 min-w-0 flex flex-col relative h-full">
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col relative h-full">
         <header className="h-14 border-b border-[var(--color-border)] flex items-center px-4 bg-[var(--color-surface)] justify-between shrink-0">
           <div className="flex items-center gap-4">
             <h1 className="font-semibold">
@@ -195,7 +242,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="flex-1 min-w-0 overflow-hidden relative flex flex-col">
+        <main className="flex-1 min-w-0 min-h-0 overflow-hidden relative flex flex-col">
           {errorMessage ? (
             <div className="shrink-0 relative z-20 p-4 bg-[var(--color-error)] text-white flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md">
               <div className="flex-1 min-w-0">
@@ -223,10 +270,10 @@ export default function App() {
             </div>
           ) : null}
 
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 min-h-0 flex-1 flex flex-col">
             <Outlet />
           </div>
-          <ConsoleLog />
+          {isConsoleVisible ? <ConsoleLog /> : null}
 
           <div className="fixed right-4 bottom-4 z-50 flex flex-col gap-3">
             {notifications.map((notification) => {

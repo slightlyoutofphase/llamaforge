@@ -6,16 +6,19 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { LlamaServerStatus, ModelLoadConfig } from "@shared/types.js";
+import type { LlamaServerStatus, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
 import { type Subprocess, spawn } from "bun";
+import { logDebug, logError, logInfo, logWarn, shouldEmitLog } from "./logger";
 import { findFreePort } from "./utils/network";
 import { broadcastLog, broadcastStatus } from "./wsHub";
 
 let proc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
 let activePort: number | null = null;
 let currentConfig: ModelLoadConfig | null = null;
+let currentThinkingTagOverride: ThinkingTagConfig | undefined;
 let currentStatus: LlamaServerStatus = "idle";
 let loadingLock = false;
+let unloadPromise: Promise<void> | null = null;
 // M2 fix: ring buffer for boot logs to prevent O(n) shift operations during long loads
 const BOOT_LOG_CAPACITY = 1000;
 let bootLogBuffer: string[] = [];
@@ -42,8 +45,35 @@ function clearBootLogs(): void {
   bootLogBuffer = [];
   bootLogWriteIndex = 0;
 }
+
+type ActiveReader = {
+  read: () => Promise<{ done: boolean; value?: Uint8Array | undefined }>;
+  cancel: () => Promise<void> | void;
+};
+
 // S9 fix: track active stream readers for cancellation on unload
-const activeReaders: Set<ReadableStreamDefaultReader<Uint8Array>> = new Set();
+const activeReaders = new Set<ActiveReader>();
+
+function resetLoadedModelState(): ModelLoadConfig | null {
+  const configSnapshot = currentConfig;
+  proc = null;
+  activePort = null;
+  currentConfig = null;
+  currentThinkingTagOverride = undefined;
+  setStatus("idle");
+  return configSnapshot;
+}
+
+function cancelActiveLogReaders(): void {
+  for (const reader of activeReaders) {
+    try {
+      reader.cancel();
+    } catch (_e) {
+      // Ignore — reader may already be closed
+    }
+  }
+  activeReaders.clear();
+}
 
 /**
  * Retrieves the raw Bun subprocess instance.
@@ -74,6 +104,15 @@ export function getServerStatus() {
 }
 
 /**
+ * Returns the thinking tag override associated with the currently loaded model preset.
+ *
+ * @returns The active thinking tag override, if one was supplied at model load time.
+ */
+export function getActiveThinkingTagOverride(): ThinkingTagConfig | undefined {
+  return currentThinkingTagOverride;
+}
+
+/**
  * Builds the CLI argument array for llama-server from a ModelLoadConfig.
  * Every field in ModelLoadConfig maps 1:1 to a documented llama-server flag.
  *
@@ -86,6 +125,8 @@ export function getServerStatus() {
  * ```
  */
 export function buildArgs(config: ModelLoadConfig, port: number): readonly string[] {
+  const appRoot = path.join(os.homedir(), ".llamaforge");
+  const mediaPath = appRoot.endsWith(path.sep) ? appRoot : `${appRoot}${path.sep}`;
   const args: string[] = [
     "--model",
     config.modelPath,
@@ -112,6 +153,8 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
     config.kvCacheTypeK,
     "--cache-type-v",
     config.kvCacheTypeV,
+    "--image-min-tokens",
+    "70",
     "--parallel",
     "1",
     "--jinja",
@@ -168,7 +211,6 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
   }
 
   if (config.imageMaxTokens !== undefined) {
-    args.push("--image-min-tokens", "70");
     args.push("--image-max-tokens", String(config.imageMaxTokens));
   }
 
@@ -177,8 +219,7 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
   }
 
   // Pass --media-path to allow local file URLs for multimodal requests
-  const APP_ROOT = path.join(os.homedir(), ".llamaforge");
-  args.push("--media-path", APP_ROOT);
+  args.push("--media-path", mediaPath);
 
   return args;
 }
@@ -194,6 +235,7 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
  * @throws {Error} If the server fails to become ready within the timeout period.
  */
 async function validateBinary(absolutePath: string): Promise<void> {
+  logDebug("Validating binary", { path: absolutePath });
   try {
     const stats = await fs.stat(absolutePath);
     if (!stats.isFile()) {
@@ -204,6 +246,7 @@ async function validateBinary(absolutePath: string): Promise<void> {
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
+    logError("Binary validation failed", { message });
     throw new Error(`Cannot validate llama-server binary: ${message}`);
   }
 }
@@ -224,7 +267,15 @@ export async function loadModel(
   llamaServerBin: string,
   minPort: number,
   maxPort: number,
+  thinkingTagOverride?: ThinkingTagConfig,
 ): Promise<number> {
+  if (!Number.isInteger(minPort) || !Number.isInteger(maxPort) || minPort <= 0 || maxPort <= 0) {
+    throw new Error("Configured llama-server port range must use positive integer values.");
+  }
+  if (minPort > maxPort) {
+    throw new Error("Configured llama-server port range is invalid: minimum exceeds maximum.");
+  }
+
   if (loadingLock) {
     throw new Error("Model loading in progress. Please wait.");
   }
@@ -232,6 +283,16 @@ export async function loadModel(
   clearBootLogs();
 
   try {
+    if (unloadPromise) {
+      await unloadPromise;
+    }
+
+    logInfo("Hardware initialization", {
+      arch: os.arch(),
+      platform: os.platform(),
+      cpus: os.cpus().length,
+      totalMem: os.totalmem(),
+    });
     await validateBinary(llamaServerBin);
 
     if (proc) {
@@ -239,7 +300,14 @@ export async function loadModel(
     }
 
     setStatus("loading");
+    logInfo("Starting model load sequence", {
+      model: config.modelPath,
+      contextSize: config.contextSize,
+    });
     const port = await findFreePort(minPort, maxPort);
+    logDebug("Selected free port", port);
+
+    const persistedConfig: ModelLoadConfig = { ...config };
 
     // Temporary file handling for custom Jinja templates
     if (config.chatTemplateFile !== undefined) {
@@ -249,31 +317,42 @@ export async function loadModel(
     }
 
     currentConfig = config;
+    currentThinkingTagOverride = thinkingTagOverride;
     const args = buildArgs(config, port);
+    logInfo("Spawning llama-server", { command: llamaServerBin });
+
+    const fullCmd = [llamaServerBin, ...args];
+    logInfo("Executing llama-server", { command: fullCmd.join(" ") });
 
     proc = spawn({
-      cmd: [llamaServerBin, ...args],
+      cmd: fullCmd,
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",
     });
+    const targetProc = proc;
 
     activePort = port;
 
-    consumeLogs(proc.stderr, "server");
-    consumeLogs(proc.stdout, "server");
+    consumeLogs(targetProc.stderr, "server");
+    consumeLogs(targetProc.stdout, "server");
 
-    const isReady = await waitForHealthCheck(port);
+    const isReady = await waitForHealthCheck(targetProc, port);
     if (!isReady) {
       const lastError = getBootLogs().slice(-10).join("\n");
+      logError("Server failed to reach ready state");
       await unloadModel();
       throw new Error(`llama-server failed to become ready. Last logs:\n${lastError}`);
     }
 
     setStatus("running");
+    logInfo("Model server running", { port, model: config.modelPath });
 
     const { saveSettings } = await import("./persistence/settingsRepo");
-    await saveSettings({ lastLoadConfig: config });
+    await saveSettings({
+      lastLoadConfig: persistedConfig,
+      ...(thinkingTagOverride ? { lastLoadThinkingTagOverride: thinkingTagOverride } : {}),
+    });
 
     return port;
   } finally {
@@ -281,10 +360,13 @@ export async function loadModel(
   }
 }
 
-async function waitForHealthCheck(port: number): Promise<boolean> {
+async function waitForHealthCheck(
+  target: Subprocess<"ignore", "pipe", "pipe">,
+  port: number,
+): Promise<boolean> {
   const maxAttempts = 480; // 120s at 250ms
   for (let i = 0; i < maxAttempts; i++) {
-    if (proc && proc.exitCode !== null) {
+    if (proc !== target || target.exitCode !== null) {
       return false; // Process died, no need to keep polling
     }
     try {
@@ -340,18 +422,24 @@ async function consumeLogs(
             const level = parsed.level?.toLowerCase() || defaultLevel;
 
             if (["info", "warn", "error", "debug", "server"].includes(level)) {
-              broadcastLog(
-                level as "info" | "warn" | "error" | "debug" | "server",
-                parsed.msg || line,
-              );
+              const normalizedLevel = level as "info" | "warn" | "error" | "debug" | "server";
+              if (shouldEmitLog(normalizedLevel)) {
+                broadcastLog(normalizedLevel, parsed.msg || line);
+              }
             } else {
-              broadcastLog(defaultLevel, parsed.msg || line);
+              if (shouldEmitLog(defaultLevel)) {
+                broadcastLog(defaultLevel, parsed.msg || line);
+              }
             }
           } catch {
-            broadcastLog(defaultLevel, line);
+            if (shouldEmitLog(defaultLevel)) {
+              broadcastLog(defaultLevel, line);
+            }
           }
         } else {
-          broadcastLog(defaultLevel, line);
+          if (shouldEmitLog(defaultLevel)) {
+            broadcastLog(defaultLevel, line);
+          }
         }
       }
     }
@@ -369,54 +457,57 @@ async function consumeLogs(
  * @returns A promise that resolves when the process has been terminated.
  */
 export async function unloadModel(): Promise<void> {
-  if (!proc) {
-    activePort = null;
-    currentConfig = null;
-    setStatus("idle");
-    return;
+  await requestUnloadModel();
+}
+
+export function requestUnloadModel(): Promise<void> {
+  if (unloadPromise) {
+    return unloadPromise;
   }
 
-  setStatus("loading");
-  const target = proc;
+  unloadPromise = (async () => {
+    logInfo("Unloading model...");
+    const { cancelPendingApprovals } = await import("./tools");
+    cancelPendingApprovals(undefined, "unloaded");
+    if (!proc) {
+      resetLoadedModelState();
+      return;
+    }
 
-  // S9 fix: cancel all active log readers before killing the process
-  for (const reader of activeReaders) {
+    const target = proc;
+    const configSnapshot = resetLoadedModelState();
+    cancelActiveLogReaders();
+
     try {
-      reader.cancel();
-    } catch (_e) {
-      // Ignore — reader may already be closed
-    }
-  }
-  activeReaders.clear();
-
-  try {
-    try {
-      target.kill(15); // SIGTERM
-    } catch (_e) {
-      // Ignore error if process is already dead
-    }
-
-    // Wait up to 15s for graceful shutdown
-    for (let i = 0; i < 60; i++) {
-      if (target.exitCode !== null) break;
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    if (target.exitCode === null) {
       try {
-        target.kill(9); // SIGKILL
+        target.kill(15); // SIGTERM
       } catch (_e) {
-        // Ignore
+        // Ignore error if process is already dead
+      }
+
+      // Wait up to 15s for graceful shutdown
+      for (let i = 0; i < 60; i++) {
+        if (target.exitCode !== null) break;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      if (target.exitCode === null) {
+        logWarn("Forcing server termination (SIGKILL)");
+        try {
+          target.kill(9); // SIGKILL
+        } catch (_e) {
+          // Ignore
+        }
+      }
+    } finally {
+      if (configSnapshot?.chatTemplateFile) {
+        fs.unlink(configSnapshot.chatTemplateFile).catch(() => {});
       }
     }
-  } finally {
-    if (currentConfig?.chatTemplateFile) {
-      fs.unlink(currentConfig.chatTemplateFile).catch(() => {});
-    }
-    proc = null;
-    activePort = null;
-    currentConfig = null;
-    setStatus("idle");
-  }
+  })().finally(() => {
+    unloadPromise = null;
+  });
+
+  return unloadPromise;
 }
 
 /**
@@ -434,7 +525,8 @@ export async function switchModel(
   llamaServerBin: string,
   minPort: number,
   maxPort: number,
+  thinkingTagOverride?: ThinkingTagConfig,
 ): Promise<number> {
   await unloadModel();
-  return loadModel(config, llamaServerBin, minPort, maxPort);
+  return loadModel(config, llamaServerBin, minPort, maxPort, thinkingTagOverride);
 }

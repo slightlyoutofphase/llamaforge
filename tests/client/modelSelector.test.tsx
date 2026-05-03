@@ -5,7 +5,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
 
 mock.module("@tanstack/react-router", () => ({
@@ -77,7 +77,7 @@ describe("ModelSelector Component", () => {
                   kvCacheTypeV: "f16",
                   mlock: false,
                   noMmap: false,
-                  flashAttention: false,
+                  flashAttn: "off",
                 },
                 createdAt: Date.now(),
                 updatedAt: Date.now(),
@@ -156,5 +156,126 @@ describe("ModelSelector Component", () => {
     expect(screen.getByText("VISION ENABLED")).toBeTruthy();
     expect(screen.queryByText("Unknown Architecture")).toBeNull();
     expect(screen.queryByText("Unknown Size")).toBeNull();
+  });
+
+  it("passes thinking overrides and suppresses redundant template overrides on load", async () => {
+    const loadModelSpy = mock().mockResolvedValue(true);
+    useAppStore.setState({
+      models: [
+        {
+          publisher: "unsloth",
+          modelName: "embe...",
+          primaryPath: "D:/Programs/test/embe.gguf",
+          mmProjPath: undefined,
+          metadata: {
+            architecture: "gemma4",
+            name: "embe...",
+            fileSizeBytes: 123456789,
+            contextLength: 4096,
+            embeddingLength: 0,
+            attentionHeadCount: 16,
+            attentionHeadCountKv: 16,
+            blockCount: 32,
+            feedForwardLength: 0,
+            quantType: "q4_0",
+            hasVisionEncoder: false,
+            hasAudioEncoder: false,
+            defaultTemperature: 0.8,
+            defaultTopK: 40,
+            defaultTopP: 0.95,
+            defaultMinP: 0.05,
+            defaultRepeatPenalty: 1.1,
+            chatTemplate: "same-template",
+            bosToken: undefined,
+            eosToken: undefined,
+          },
+        },
+      ],
+      loadModel: loadModelSpy,
+      unloadModel: () => {},
+      serverStatus: "idle",
+      loadedModel: null,
+      messages: [],
+      isGenerating: false,
+    });
+
+    global.fetch = mock((input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/presets/load")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify([
+              {
+                id: "preset-1",
+                name: "Balanced Default (Default)",
+                modelPath: "D:/Programs/test/embe.gguf",
+                isDefault: true,
+                isReadonly: true,
+                chatTemplateOverride: "same-template",
+                thinkingTagOverride: {
+                  openTag: "<|channel>thought\n",
+                  closeTag: "<channel|>",
+                  enableToken: "<|think|>",
+                },
+                config: {
+                  modelPath: "D:/Programs/test/embe.gguf",
+                  contextSize: 4096,
+                  contextShift: false,
+                  gpuLayers: 33,
+                  threads: 4,
+                  batchSize: 512,
+                  microBatchSize: 128,
+                  ropeScaling: "none",
+                  ropeFreqBase: 10000,
+                  ropeFreqScale: 1.0,
+                  kvCacheTypeK: "f16",
+                  kvCacheTypeV: "f16",
+                  mlock: false,
+                  noMmap: false,
+                  contBatching: true,
+                  flashAttn: "auto",
+                  swaFull: false,
+                  kvUnified: true,
+                  noKvOffload: false,
+                  cacheReuse: 0,
+                },
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+              },
+            ]),
+            { headers: { "Content-Type": "application/json" } },
+          ),
+        );
+      }
+      if (url.includes("/api/chats")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ id: "new-chat", name: "New Chat" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify([])));
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModelSelector />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /load/i }));
+
+    expect(loadModelSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        presetId: "preset-1",
+        thinkingTagOverride: {
+          openTag: "<|channel>thought\n",
+          closeTag: "<channel|>",
+          enableToken: "<|think|>",
+        },
+      }),
+    );
+    expect(loadModelSpy.mock.calls[0]?.[0]?.chatTemplateFile).toBeUndefined();
   });
 });

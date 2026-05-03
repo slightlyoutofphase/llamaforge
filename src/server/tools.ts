@@ -42,10 +42,40 @@ export function parseToolCallsFromResponse(content: string) {
 
 type PendingToolApproval = {
   chatId: string;
-  resolve: (decision: { approved: boolean; editedArguments?: string | undefined }) => void;
+  resolve: (decision: ToolApprovalDecision) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+export type ToolApprovalDecision = {
+  approved: boolean;
+  editedArguments?: string | undefined;
+  reason?: "approved" | "rejected" | "timeout" | "cancelled" | "disconnected" | "unloaded";
 };
 
 const pendingApprovals = new Map<string, PendingToolApproval>();
+let toolApprovalTimeoutMs = 120_000;
+
+function settlePendingApproval(toolCallId: string, decision: ToolApprovalDecision): boolean {
+  const pending = pendingApprovals.get(toolCallId);
+  if (!pending) {
+    return false;
+  }
+
+  clearTimeout(pending.timer);
+  pendingApprovals.delete(toolCallId);
+  pending.resolve(decision);
+  return true;
+}
+
+/**
+ * Overrides the default tool approval timeout for tests.
+ *
+ * @param timeoutMs - Timeout in milliseconds.
+ * @internal
+ */
+export function __setToolApprovalTimeoutMs(timeoutMs: number): void {
+  toolApprovalTimeoutMs = timeoutMs;
+}
 
 /**
  * Waits for a user to approve or edit a tool call via the UI.
@@ -57,9 +87,12 @@ const pendingApprovals = new Map<string, PendingToolApproval>();
 export function waitForToolApproval(
   chatId: string,
   toolCallId: string,
-): Promise<{ approved: boolean; editedArguments?: string | undefined }> {
+): Promise<ToolApprovalDecision> {
   return new Promise((resolve) => {
-    pendingApprovals.set(toolCallId, { chatId, resolve });
+    const timer = setTimeout(() => {
+      settlePendingApproval(toolCallId, { approved: false, reason: "timeout" });
+    }, toolApprovalTimeoutMs);
+    pendingApprovals.set(toolCallId, { chatId, resolve, timer });
   });
 }
 
@@ -68,10 +101,14 @@ export function waitForToolApproval(
  *
  * @param chatId - Optional chat ID to filter by.
  */
-export function cancelPendingApprovals(chatId?: string) {
+export function cancelPendingApprovals(
+  chatId?: string,
+  reason: "cancelled" | "disconnected" | "unloaded" = "cancelled",
+) {
   for (const [id, pending] of pendingApprovals.entries()) {
     if (!chatId || pending.chatId === chatId) {
-      pending.resolve({ approved: false });
+      clearTimeout(pending.timer);
+      pending.resolve({ approved: false, reason });
       pendingApprovals.delete(id);
     }
   }
@@ -89,11 +126,11 @@ export function resolveToolApproval(
   approved: boolean,
   editedArguments?: string | undefined,
 ) {
-  const pending = pendingApprovals.get(toolCallId);
-  if (pending) {
-    pending.resolve({ approved, editedArguments });
-    pendingApprovals.delete(toolCallId);
-  }
+  settlePendingApproval(toolCallId, {
+    approved,
+    editedArguments,
+    reason: approved ? "approved" : "rejected",
+  });
 }
 
 /**

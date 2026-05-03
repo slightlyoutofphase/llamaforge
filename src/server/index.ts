@@ -13,7 +13,21 @@ import { initDb, resetDb } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
 import { createRouter } from "./router";
 
-async function main() {
+function resolveServerPort(settings: Awaited<ReturnType<typeof loadSettings>>): number {
+  return settings.serverPort ?? 11435;
+}
+
+function describeBindFailure(port: number, err: unknown): Error {
+  const message = err instanceof Error ? err.message : String(err);
+  if (message.includes("EADDRINUSE") || /address.+in use/i.test(message)) {
+    return new Error(
+      `Configured Bun server port ${port} is already in use. Choose a different Bun Server Port in Settings and restart LlamaForge.`,
+    );
+  }
+  return err instanceof Error ? err : new Error(message);
+}
+
+export async function startServer(options: { scheduleRecurringCleanup?: boolean } = {}) {
   await initDb();
   const settings = await loadSettings();
 
@@ -41,7 +55,9 @@ async function main() {
     }
   };
   void scheduleCleanup();
-  setInterval(scheduleCleanup, 24 * 60 * 60 * 1000);
+  if (options.scheduleRecurringCleanup ?? true) {
+    setInterval(scheduleCleanup, 24 * 60 * 60 * 1000);
+  }
 
   // Autoload last model if enabled
   if (settings.autoloadLastModel && settings.lastLoadConfig && settings.llamaServerPath) {
@@ -52,6 +68,7 @@ async function main() {
         settings.llamaServerPath,
         settings.llamaPortRangeMin,
         settings.llamaPortRangeMax,
+        settings.lastLoadThinkingTagOverride,
       );
       logInfo("Autoload completed successfully.");
     } catch (err) {
@@ -63,21 +80,24 @@ async function main() {
   }
 
   const isProd = process.env.NODE_ENV === "production" || process.argv[1]?.includes("dist");
-  // In dev, Vite is on 3000 and proxies to us on 11435.
-  // In prod, WE are on 3000 and serve static files.
-  const port = isProd ? 3000 : (settings.serverPort ?? 11435);
+  const port = resolveServerPort(settings);
   const hostname = "127.0.0.1";
 
   logInfo(`Starting LlamaForge Server on http://${hostname}:${port} (Prod: ${isProd})`);
 
   const router = createRouter(settings);
 
-  const server = serve({
-    port,
-    hostname,
-    fetch: router.fetch,
-    websocket: router.websocket,
-  });
+  let server: ReturnType<typeof serve>;
+  try {
+    server = serve({
+      port,
+      hostname,
+      fetch: router.fetch,
+      websocket: router.websocket,
+    });
+  } catch (err) {
+    throw describeBindFailure(port, err);
+  }
 
   let shutdownInProgress = false;
   const cleanup = () => {
@@ -102,9 +122,13 @@ async function main() {
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
   process.on("SIGHUP", cleanup);
+
+  return server;
 }
 
-main().catch((err) => {
-  logError("Server startup failed:", err);
-  process.exit(1);
-});
+if (import.meta.main) {
+  startServer().catch((err) => {
+    logError("Server startup failed:", err);
+    process.exit(1);
+  });
+}

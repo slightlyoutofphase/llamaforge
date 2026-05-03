@@ -27,4 +27,23 @@ describe("settingsRepo", () => {
     const s = await loadSettings();
     expect(s.serverPort).toBe(12345);
   });
+
+  it("rejects NaN numeric settings", async () => {
+    await expect(saveSettings({ serverPort: Number.NaN })).rejects.toThrow("serverPort");
+  });
+
+  it("rejects negative request timeout values", async () => {
+    await expect(saveSettings({ requestTimeoutSeconds: -1 })).rejects.toThrow(
+      "requestTimeoutSeconds",
+    );
+  });
+
+  it("rejects inverted llama port ranges", async () => {
+    await expect(
+      saveSettings({
+        llamaPortRangeMin: 14000,
+        llamaPortRangeMax: 13000,
+      }),
+    ).rejects.toThrow("llamaPortRangeMin");
+  });
 });

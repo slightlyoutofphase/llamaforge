@@ -44,7 +44,9 @@ export function MessageActions({
   if (role === "system" || role === "tool") return null;
 
   return (
-    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity bg-[var(--color-bg)]/80 backdrop-blur border border-[var(--color-border)] rounded-lg p-0.5 shadow-sm">
+    <div
+      data-testid="message-actions"
+      className="flex items-center gap-1 opacity-75 transition-opacity hover:opacity-100 bg-[var(--color-bg)]/80 backdrop-blur border border-[var(--color-border)] rounded-lg p-0.5 shadow-sm">
       <ActionBtn icon={<Copy size={14} />} onClick={onCopy} title="Copy Content" />
       {onEdit && <ActionBtn icon={<Edit2 size={14} />} onClick={onEdit} title="Edit" />}
       {onBranch && (

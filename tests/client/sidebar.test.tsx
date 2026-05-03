@@ -4,7 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ChatSidebar } from "../../src/client/components/sidebar/ChatSidebar";
 import { useAppStore } from "../../src/client/store";
 
@@ -338,6 +338,149 @@ describe("ChatSidebar Component", () => {
     expect(chatLinksAfter[1].textContent).toContain("Beta Chat");
   });
 
+  it("creates only one chat on rapid New Chat clicks", async () => {
+    const createMutateAsync = mock(async () => ({ id: "new-chat", name: "New Chat" }));
+    const navigateSpy = mock();
+
+    mock.module("@tanstack/react-router", () => ({
+      useParams: () => ({ chatId: "chat-1" }),
+      useNavigate: () => navigateSpy,
+      Link: ({ children, to, onClick }: any) => (
+        <a href={to} onClick={onClick}>
+          {children}
+        </a>
+      ),
+      useRouter: () => ({ buildLocation: () => ({}) }),
+    }));
+
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: { pages: [[]] },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutateAsync: createMutateAsync, isPending: false }),
+      useDeleteChat: () => ({ mutateAsync: mock(async () => undefined), isPending: false }),
+      useUpdateChat: () => ({ mutateAsync: mock(async () => undefined) }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    const newChatButton = screen.getByRole("button", { name: /new chat/i });
+    fireEvent.click(newChatButton);
+    fireEvent.click(newChatButton);
+
+    await waitFor(() => {
+      expect(createMutateAsync).toHaveBeenCalledTimes(1);
+      expect(navigateSpy).toHaveBeenCalledWith({
+        to: "/chat/$chatId",
+        params: { chatId: "new-chat" },
+      });
+    });
+  });
+
+  it("deletes only the targeted chat once on rapid delete clicks", async () => {
+    const deleteMutateAsync = mock(async () => undefined);
+    const navigateSpy = mock();
+    const unloadChatSpy = mock();
+    useAppStore.setState({ currentChatId: "chat-1", unloadChat: unloadChatSpy });
+    globalThis.confirm = mock(() => true) as typeof globalThis.confirm;
+
+    mock.module("@tanstack/react-router", () => ({
+      useParams: () => ({ chatId: "chat-1" }),
+      useNavigate: () => navigateSpy,
+      Link: ({ children, to, onClick }: any) => (
+        <a href={to} onClick={onClick}>
+          {children}
+        </a>
+      ),
+      useRouter: () => ({ buildLocation: () => ({}) }),
+    }));
+
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [
+            [
+              { id: "chat-1", name: "First Chat", createdAt: 3000, updatedAt: 3000 },
+              { id: "chat-2", name: "Second Chat", createdAt: 2000, updatedAt: 4000 },
+            ],
+          ],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutateAsync: mock(async () => undefined), isPending: false }),
+      useDeleteChat: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
+      useUpdateChat: () => ({ mutateAsync: mock(async () => undefined) }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    const deleteButton = screen.getAllByTitle("Delete")[0];
+    fireEvent.click(deleteButton);
+    fireEvent.click(deleteButton);
+
+    await waitFor(() => {
+      expect(deleteMutateAsync).toHaveBeenCalledTimes(1);
+      expect(deleteMutateAsync).toHaveBeenCalledWith("chat-1");
+      expect(unloadChatSpy).toHaveBeenCalledTimes(1);
+      expect(navigateSpy).toHaveBeenCalledWith({
+        to: "/chat/$chatId",
+        params: { chatId: "chat-2" },
+      });
+    });
+  });
+
+  it("keeps default date sorting ordered by creation time instead of recent updates", () => {
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [
+            [
+              {
+                id: "chat-1",
+                name: "Older but recently active",
+                createdAt: 1000,
+                updatedAt: 9000,
+              },
+              { id: "chat-2", name: "Newer Chat", createdAt: 2000, updatedAt: 2000 },
+            ],
+          ],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutateAsync: mock(async () => undefined), isPending: false }),
+      useDeleteChat: () => ({ mutateAsync: mock(async () => undefined), isPending: false }),
+      useUpdateChat: () => ({ mutateAsync: mock(async () => undefined) }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    const chatLinks = screen.getAllByRole("link");
+    expect(chatLinks[0].textContent).toContain("Newer Chat");
+    expect(chatLinks[1].textContent).toContain("Older but recently active");
+  });
+
   it("renders branch history indicator for branch chats", () => {
     mock.module("../../src/client/queries", () => ({
       useInfiniteChats: () => ({
@@ -345,7 +488,13 @@ describe("ChatSidebar Component", () => {
           pages: [
             [
               { id: "chat-1", name: "Main Chat", createdAt: 1000 },
-              { id: "chat-2", name: "Branch Chat", createdAt: 2000, isBranch: true },
+              {
+                id: "chat-2",
+                name: "Branch Chat",
+                createdAt: 2000,
+                isBranch: true,
+                parentId: "chat-1",
+              },
             ],
           ],
         },
@@ -364,7 +513,60 @@ describe("ChatSidebar Component", () => {
       </QueryClientProvider>,
     );
 
-    expect(screen.getByText("Main Chat")).toBeTruthy();
+    expect(screen.getAllByText("Main Chat").length).toBeGreaterThan(0);
     expect(screen.getByText("🌿 Branch Chat")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Open parent chat: Main Chat/i })).toBeTruthy();
+  });
+
+  it("navigates to the parent chat from a branch row action", () => {
+    const navigateSpy = mock();
+    mock.module("@tanstack/react-router", () => ({
+      useParams: () => ({ chatId: "chat-2" }),
+      useNavigate: () => navigateSpy,
+      Link: ({ children, to, onClick }: any) => (
+        <a href={to} onClick={onClick}>
+          {children}
+        </a>
+      ),
+      useRouter: () => ({ buildLocation: () => ({}) }),
+    }));
+
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [
+            [
+              { id: "chat-1", name: "Main Chat", createdAt: 1000 },
+              {
+                id: "chat-2",
+                name: "Branch Chat",
+                createdAt: 2000,
+                isBranch: true,
+                parentId: "chat-1",
+              },
+            ],
+          ],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), isPending: false }),
+      useUpdateChat: () => ({ mutate: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Open parent chat: Main Chat/i }));
+
+    expect(navigateSpy).toHaveBeenCalledWith({
+      to: "/chat/$chatId",
+      params: { chatId: "chat-1" },
+    });
   });
 });

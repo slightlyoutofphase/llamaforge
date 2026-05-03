@@ -5,7 +5,7 @@
  */
 
 import { markdown } from "@codemirror/lang-markdown";
-import type { SystemPromptPreset } from "@shared/types.js";
+import type { SystemPromptPreset } from "../shared/types";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";

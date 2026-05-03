@@ -5,7 +5,7 @@
  */
 
 import { Template } from "@huggingface/jinja";
-import type { ChatMessage, ThinkingTagConfig } from "@shared/types.js";
+import type { ChatMessage, ThinkingTagConfig } from "../shared/types";
 import { logWarn } from "./logger";
 
 /**

@@ -3,11 +3,17 @@
  * Tests for token overflow detection and truncation behavior.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { ChatMessage } from "@shared/types";
-import { truncateMessages } from "../../src/server/overflow";
+import { getTokens, truncateMessages } from "../../src/server/overflow";
+
+const originalFetch = globalThis.fetch;
 
 describe("overflow logic", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   const mockMsg = (role: any, content: string): ChatMessage => ({
     id: Math.random().toString(),
     chatId: "1",
@@ -67,7 +73,6 @@ describe("overflow logic", () => {
     expect(result[0].content.length).toBeLessThan(2000);
   });
 
-  const { getTokens } = require("../../src/server/overflow");
   it("computes attachment token estimates with default image/audio budgets", async () => {
     const msgs = [
       {
@@ -83,5 +88,66 @@ describe("overflow logic", () => {
     // Total should be around 818
     expect(tokens).toBeGreaterThan(810);
     expect(tokens).toBeLessThan(830);
+  });
+
+  it("tokenizes the serialized prompt payload once and reuses the cached count", async () => {
+    const msgs = [mockMsg("system", "SYS"), mockMsg("user", "One"), mockMsg("assistant", "Two")];
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+      const tokenCount = Math.max(1, Math.ceil((body.content?.length ?? 0) / 4));
+      return new Response(JSON.stringify({ tokens: new Array(tokenCount).fill(1) }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const first = await getTokens(msgs, 8080);
+    const second = await getTokens(msgs, 8080);
+
+    expect(first).toBe(second);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("truncates based on tool and schema overhead in the assembled request payload", async () => {
+    const msgs = [
+      mockMsg("system", "SYS".repeat(20)),
+      mockMsg("assistant", "OLD ".repeat(120)),
+      mockMsg("user", "LATEST QUESTION".repeat(8)),
+    ];
+
+    const result = await truncateMessages([...msgs], "RollingWindow", 1024, 512, undefined, true, {
+      buildPromptText: async (messages) =>
+        JSON.stringify({
+          messages: messages.map((message) => ({ role: message.role, content: message.content })),
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "tool",
+                description: "T".repeat(1400),
+                parameters: {
+                  type: "object",
+                  properties: { value: { type: "string" } },
+                },
+              },
+            },
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              type: "object",
+              properties: {
+                result: { type: "string", description: "S".repeat(200) },
+              },
+            },
+          },
+        }),
+    });
+
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe("system");
+    expect(result[1].role).toBe("user");
+    expect(result[1].content).toContain("LATEST QUESTION");
   });
 });

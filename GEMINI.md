@@ -6,8 +6,9 @@ Stub code, placeholder code, todos, simplifications, and any other kind of code 
 This **IS** a real implementation. This **IS** a full implementation. The user will immediately notice any failure to implement the project plan correctly and fully.
 You **ABSOLUTELY MUST AT ALL TIMES** follow the TypeScript compiler flag rules and TypeDoc documentation comment requirements that are outlined in the project plan.
 You **ABSOLUTELY MUST AT ALL TIMES** consider edge cases and handle them properly. "Happy path only" programming is **NOT** acceptable.
+This is a **SINGLE-USER OFFLINE APPLICATION.** Do not write or suggest code that optimizes for non-existent multi-user concurrency while sacrificing any aspect of the intended single-user experience.
 # ULTIMATE SOURCES OF TRUTH:
-The complete latest docs for the llama-server CLI executable are in `llama-server-docs.md` which can be found in the top-level project directory.
+The complete latest documentation for the llama-server CLI executable itself are in the `llama-server-docs.md` file which can be found in the top-level workspace directory.
 Gemma 4 prompt formatting docs:
 https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
 Gemma 4 vision docs:

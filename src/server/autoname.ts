@@ -3,7 +3,7 @@
  * Logic for generating an automatic title for a chat based on its first exchange.
  */
 
-import type { WsAutonameFrame } from "@shared/types.js";
+import type { WsAutonameFrame } from "../shared/types";
 import { getServerStatus } from "./llamaServer";
 import { logError } from "./logger";
 import { getChat, updateChat } from "./persistence/chatRepo";

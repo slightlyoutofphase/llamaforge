@@ -8,12 +8,14 @@ import type {
   ChatMessage,
   HardwareInfo,
   LlamaServerStatus,
+  LoadModelRequest,
   ModelEntry,
-  ModelLoadConfig,
   WsFrame,
-} from "@shared/types.js";
+} from "../shared/types";
 import { create } from "zustand";
-import { logError, logInfo } from "./logger";
+import { request } from "./http";
+import { logDebug, logError, logInfo, logWarn } from "./logger";
+import { useUiStore } from "./uiStore";
 
 /**
  * A notification object for user-facing alerts.
@@ -62,6 +64,8 @@ interface AppState {
   } | null;
   /** Whether a generation is currently in progress. */
   isGenerating: boolean;
+  /** Whether generation is paused pending tool-call approval. */
+  isWaitingForToolApproval: boolean;
   /** Real-time statistics for the ongoing or last generation. */
   generationStats: {
     tokensCached: number;
@@ -69,6 +73,8 @@ interface AppState {
     tokensEvaluated?: number;
     promptTokens?: number;
     contextSize?: number;
+    tokensPerSecond?: number;
+    promptTokensPerSecond?: number;
     stopReason?: string | undefined;
   } | null;
   /** ID of the active generation session for the current chat. */
@@ -133,7 +139,7 @@ interface AppState {
   /** Fetches prompt cache statistics for a specific chat. */
   fetchPromptCacheStats: (chatId: string) => Promise<void>;
   /** Spawns the llama-server process with the given configuration. */
-  loadModel: (config: ModelLoadConfig) => Promise<void>;
+  loadModel: (config: LoadModelRequest) => Promise<boolean>;
   /** Loads older messages for the current chat (M10 pagination). */
   loadMoreMessages: () => Promise<void>;
   /** Terminates the active llama-server process. */
@@ -150,11 +156,18 @@ interface AppState {
 let ws: WebSocket | null = null;
 let currentReconnectDelay = 2000;
 const MAX_RECONNECT_DELAY = 30000;
+const MAX_LOG_LINES = 5000;
 let reconnectTimer: number | null = null;
 const pendingChatFrames = new Map<string, WsFrame[]>();
 // M6 fix: guard against duplicate sends from rapid clicks
 let sendInProgress = false;
-let loadingDefaultChatLock = false;
+let activeChatLoadRequestId = 0;
+let latestRequestedChatId: string | null = null;
+let activeChatLoadController: AbortController | null = null;
+
+function appendLogLine(logs: string[], line: string): string[] {
+  return [...logs.slice(-(MAX_LOG_LINES - 1)), line];
+}
 
 function frameHasChatId(frame: WsFrame): frame is WsFrame & { chatId: string } {
   const chatIdValue = (frame as { chatId?: string }).chatId;
@@ -171,15 +184,16 @@ function bufferChatFrame(frame: WsFrame) {
 function applyPendingChatFrames(
   chatId: string,
   messages: ChatMessage[],
-): { messages: ChatMessage[]; stillGenerating: boolean } {
+): { messages: ChatMessage[]; stillGenerating: boolean; waitingForToolApproval: boolean } {
   const pending = pendingChatFrames.get(chatId);
-  if (!pending?.length) return { messages, stillGenerating: false };
+  if (!pending?.length) return { messages, stillGenerating: false, waitingForToolApproval: false };
 
   const nextMessages = [...messages];
   // Q2 fix: track whether the buffered frames include a stop frame.
   // If no stop frame was received, the generation is still in-flight.
   let sawTokens = false;
   let sawStop = false;
+  let waitingForToolApproval = false;
 
   for (const frame of pending) {
     if (frame.type === "message") {
@@ -212,6 +226,7 @@ function applyPendingChatFrames(
       }
     }
     if (frame.type === "tool_call") {
+      waitingForToolApproval = true;
       const idx = nextMessages.findIndex((m) => m.id === frame.messageId);
       if (idx >= 0) {
         const message = { ...nextMessages[idx] } as ChatMessage;
@@ -219,10 +234,24 @@ function applyPendingChatFrames(
         nextMessages[idx] = message;
       }
     }
+    if (frame.type === "tool_approval_state") {
+      waitingForToolApproval = frame.pending;
+    }
+    if (frame.type === "stop" || frame.type === "error") {
+      waitingForToolApproval = false;
+    }
   }
 
   pendingChatFrames.delete(chatId);
-  return { messages: nextMessages, stillGenerating: sawTokens && !sawStop };
+  return {
+    messages: nextMessages,
+    stillGenerating: sawTokens && !sawStop,
+    waitingForToolApproval,
+  };
+}
+
+function isCurrentChatLoadRequest(requestId: number, chatId: string): boolean {
+  return requestId === activeChatLoadRequestId && latestRequestedChatId === chatId;
 }
 
 /**
@@ -240,6 +269,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentChatId: null,
   currentChatMetadata: null,
   isGenerating: false,
+  isWaitingForToolApproval: false,
   currentGenerationId: null,
   generationStats: null,
   promptCacheStats: null,
@@ -271,7 +301,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   removeNotification: (id) =>
     set((state) => ({ notifications: state.notifications.filter((note) => note.id !== id) })),
   addLog: (level, body) =>
-    set((state) => ({ logs: [...state.logs.slice(-100), `[${level}] ${body}`] })),
+    set((state) => ({ logs: appendLogLine(state.logs, `[${level}] ${body}`) })),
   clearUnreadChat: (chatId) =>
     set((state) => ({ unreadChatIds: state.unreadChatIds.filter((id) => id !== chatId) })),
 
@@ -302,6 +332,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         isConnected: false,
         isGenerating: false,
+        isWaitingForToolApproval: false,
         currentGenerationId: null,
         errorMessage: "WebSocket connection error.",
         errorActionLabel: "Retry",
@@ -315,6 +346,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({
         isConnected: false,
         isGenerating: false,
+        isWaitingForToolApproval: false,
         currentGenerationId: null,
       });
       if (shouldReconnect) {
@@ -345,9 +377,18 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       try {
         if (frame.type === "server_status") {
+          set(() => {
+            const updates: Partial<AppState> = { serverStatus: frame.status };
+            if (frame.status === "idle") {
+              updates.isGenerating = false;
+              updates.isWaitingForToolApproval = false;
+              updates.currentGenerationId = null;
+              updates.errorMessage = null;
+            }
+            return updates;
+          });
           const prevStatus = get().serverStatus;
           const prevLoadedModel = get().loadedModel;
-          set({ serverStatus: frame.status });
           if (
             frame.status !== prevStatus ||
             (frame.status === "running" && prevLoadedModel === null)
@@ -355,7 +396,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             void get().fetchServerStatus();
           }
         } else if (frame.type === "log") {
-          set((state) => ({ logs: [...state.logs.slice(-100), `[${frame.level}] ${frame.body}`] }));
+          set((state) => ({ logs: appendLogLine(state.logs, `[${frame.level}] ${frame.body}`) }));
         } else if (frame.type === "token") {
           set((state) => {
             if (frame.chatId && frame.chatId !== state.currentChatId) {
@@ -402,6 +443,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             return {
               messages,
               isGenerating: true,
+              isWaitingForToolApproval: false,
               generationStats: stats,
               currentGenerationId: frame.generationId ?? state.currentGenerationId,
             };
@@ -424,9 +466,18 @@ export const useAppStore = create<AppState>((set, get) => ({
               if (frame.fullContent !== undefined) lastMsg.content = frame.fullContent;
               if (frame.fullRawContent !== undefined) lastMsg.rawContent = frame.fullRawContent;
               if (frame.fullThinking !== undefined) lastMsg.thinkingContent = frame.fullThinking;
+              lastMsg.metrics = {
+                predictedTokens: frame.timings.predicted_n,
+                tokensPerSecond: frame.timings.predicted_per_second,
+                promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
+                promptTokensPerSecond: frame.timings.prompt_per_second,
+                cachedPromptTokens: frame.timings.tokens_cached,
+                evaluatedPromptTokens: frame.timings.tokens_evaluated,
+              };
             }
             return {
               isGenerating: false,
+              isWaitingForToolApproval: false,
               currentGenerationId: null,
               messages: nextMessages,
               generationStats: {
@@ -435,6 +486,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 tokensEvaluated: frame.timings.tokens_evaluated,
                 promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
                 contextSize: frame.contextSize ?? state.generationStats?.contextSize ?? 0,
+                tokensPerSecond: frame.timings.predicted_per_second,
+                promptTokensPerSecond: frame.timings.prompt_per_second,
                 stopReason: frame.stopReason,
               },
             };
@@ -460,7 +513,31 @@ export const useAppStore = create<AppState>((set, get) => ({
             if (lastMsg && lastMsg.role === "assistant" && lastMsg.id === frame.messageId) {
               lastMsg.toolCallsJson = JSON.stringify(frame.toolCalls);
             }
-            return { messages, isGenerating: false };
+            return {
+              messages,
+              isGenerating: false,
+              isWaitingForToolApproval: true,
+              currentGenerationId: frame.generationId ?? state.currentGenerationId,
+            };
+          });
+        } else if (frame.type === "tool_approval_state") {
+          set((state) => {
+            if (frame.chatId && frame.chatId !== state.currentChatId) {
+              bufferChatFrame(frame);
+              return {
+                ...state,
+                unreadChatIds:
+                  state.currentChatId === frame.chatId
+                    ? state.unreadChatIds
+                    : [...new Set([...state.unreadChatIds, frame.chatId])],
+              };
+            }
+
+            return {
+              isWaitingForToolApproval: frame.pending,
+              isGenerating: frame.pending ? false : (frame.resumeGeneration ?? false),
+              currentGenerationId: frame.generationId ?? state.currentGenerationId,
+            };
           });
         } else if (frame.type === "message") {
           set((state) => {
@@ -505,6 +582,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           logError("WS Error frame:", frame.message);
           set({
             isGenerating: false,
+            isWaitingForToolApproval: false,
             currentGenerationId: null,
             errorMessage: frame.message || "An unknown error occurred during generation.",
           });
@@ -518,6 +596,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   sendMessage: async (content: string, files?: File[]) => {
     const state = get();
     const chatId = state.currentChatId;
+    if (latestRequestedChatId && latestRequestedChatId !== chatId) {
+      set({
+        errorMessage:
+          "Please wait for the selected chat to finish loading before sending a message.",
+      });
+      return;
+    }
     if (!chatId) {
       set({ errorMessage: "Unable to send message: no chat selected." });
       return;
@@ -526,11 +611,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ errorMessage: "Message content exceeds maximum length of 25,000 characters." });
       return;
     }
-    // M6 fix: prevent duplicate sends from rapid double-clicks
     if (sendInProgress) {
+      logWarn("sendMessage blocked: send already in progress");
       return;
     }
     sendInProgress = true;
+    logDebug("sendMessage initiated", {
+      chatId,
+      content: content.slice(0, 50),
+      files: files?.length,
+    });
     if (files?.length && files.length > 5) {
       sendInProgress = false;
       set({ errorMessage: "A maximum of 5 attachments is supported per message." });
@@ -558,10 +648,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
       ],
       isGenerating: true,
+      isWaitingForToolApproval: false,
       generationStats: null,
     }));
 
+    const requestTimeoutMs = 60000;
+
     try {
+      const requestUrl = `/api/chats/${chatId}/messages`;
+      const hasAttachments = Boolean(files?.length);
+
       let res: Response;
       if (files?.length) {
         const formData = new FormData();
@@ -570,27 +666,68 @@ export const useAppStore = create<AppState>((set, get) => ({
           formData.append("file", f);
         }
 
-        res = await fetch(`/api/chats/${chatId}/messages`, {
+        logDebug("Sending multipart message", {
+          url: requestUrl,
+          fileCount: files.length,
+          files: files.map((file) => ({
+            name: file.name,
+            type: file.type,
+            size: file.size,
+          })),
+        });
+        res = (await request(requestUrl, {
           method: "POST",
           body: formData,
-        });
+          timeoutMs: requestTimeoutMs,
+        })) as Response;
       } else {
-        res = await fetch(`/api/chats/${chatId}/messages`, {
+        logDebug("Sending JSON message", { url: requestUrl });
+        res = (await request(requestUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content }),
-        });
+          timeoutMs: requestTimeoutMs,
+        })) as Response;
       }
+
+      logDebug("Message send fetch resolved", {
+        url: requestUrl,
+        hasAttachments,
+        status: res.status,
+        ok: res.ok,
+      });
 
       if (!res.ok) {
         const errorBody = await res.text().catch(() => "");
+        logWarn("Message send returned non-OK response", {
+          url: requestUrl,
+          hasAttachments,
+          status: res.status,
+          bodyLength: errorBody.length,
+        });
         throw new Error(`Server returned ${res.status}${errorBody ? `: ${errorBody}` : ""}`);
       }
       set({ errorMessage: null });
     } catch (err: unknown) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        logWarn("Message send request timed out", {
+          url: `/api/chats/${chatId}/messages`,
+          hasAttachments: Boolean(files?.length),
+          timeoutMs: requestTimeoutMs,
+        });
+      }
+      logError("Message send fetch failed", {
+        url: `/api/chats/${chatId}/messages`,
+        hasAttachments: Boolean(files?.length),
+        aborted:
+          err instanceof Error ? err.name === "AbortError" || err.name === "TimeoutError" : false,
+        errorName: err instanceof Error ? err.name : undefined,
+        errorMessage: err instanceof Error ? err.message : String(err),
+      });
       set((s) => ({
         messages: s.messages.filter((msg) => msg.id !== optimisticMessageId),
         isGenerating: false,
+        isWaitingForToolApproval: false,
         errorMessage: err instanceof Error ? err.message : "Message send failed.",
       }));
     } finally {
@@ -601,8 +738,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   stopGeneration: () => {
     const state = get();
-    if (!state.isGenerating || !state.currentChatId) return;
-    set({ isGenerating: false });
+    if ((!state.isGenerating && !state.isWaitingForToolApproval) || !state.currentChatId) return;
+    set({ isGenerating: false, isWaitingForToolApproval: false });
 
     const lastMsg = state.messages[state.messages.length - 1];
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -625,7 +762,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       shouldReconnect: false,
       isConnected: false,
       isGenerating: false,
+      isWaitingForToolApproval: false,
       currentGenerationId: null,
+      errorMessage: null, // Clear error on disconnect
     });
     if (reconnectTimer !== null) {
       window.clearTimeout(reconnectTimer);
@@ -637,18 +776,58 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadChat: async (chatId: string) => {
+    const requestId = ++activeChatLoadRequestId;
+    const chatLoadTimeoutMs = 30000;
+    latestRequestedChatId = chatId;
+    activeChatLoadController?.abort();
+    const controller = new AbortController();
+    let didTimeout = false;
+    const timeoutId = window.setTimeout(() => {
+      didTimeout = true;
+      controller.abort();
+    }, chatLoadTimeoutMs);
+    activeChatLoadController = controller;
+    set((state) => {
+      if (state.currentChatId === chatId) {
+        return { errorMessage: null };
+      }
+
+      return {
+        currentChatId: null,
+        currentChatMetadata: null,
+        messages: [],
+        generationStats: null,
+        promptCacheStats: null,
+        totalMessages: 0,
+        currentGenerationId: null,
+        isGenerating: false,
+        isWaitingForToolApproval: false,
+        errorMessage: null,
+      };
+    });
+
     try {
-      const res = await fetch(`/api/chats/${chatId}`);
+      const res = await fetch(`/api/chats/${chatId}`, { signal: controller.signal });
+      if (!isCurrentChatLoadRequest(requestId, chatId)) {
+        return;
+      }
       if (res.ok) {
         const chat = await res.json();
+        if (!isCurrentChatLoadRequest(requestId, chatId)) {
+          return;
+        }
         // Q2 fix: destructure both messages and stillGenerating flag so that
         // switching back to a chat with an active generation restores the stop button.
-        const { messages, stillGenerating } = applyPendingChatFrames(chatId, chat.messages || []);
+        const { messages, stillGenerating, waitingForToolApproval } = applyPendingChatFrames(
+          chatId,
+          chat.messages || [],
+        );
         set((state) => ({
           currentChatId: chatId,
           messages,
           totalMessages: chat.totalMessages ?? messages.length,
           isGenerating: stillGenerating,
+          isWaitingForToolApproval: waitingForToolApproval,
           currentChatMetadata: {
             name: chat.name,
             systemPresetId: chat.systemPresetId,
@@ -657,57 +836,84 @@ export const useAppStore = create<AppState>((set, get) => ({
           unreadChatIds: state.unreadChatIds.filter((id) => id !== chatId),
           errorMessage: null,
         }));
-      } else if (chatId === "default-chat") {
-        if (loadingDefaultChatLock) return;
-        loadingDefaultChatLock = true;
-        try {
-          const createRes = await fetch("/api/chats", {
+      } else {
+        // S11 fix: If the default chat is missing, create it automatically.
+        // This handles fresh installations or DB resets gracefully.
+        if (chatId === "default" || chatId === "default-chat") {
+          const createRes = await request("/api/chats", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: "New Chat" }),
+            body: JSON.stringify({ name: "Default Chat" }),
           });
-          if (createRes.ok) {
-            const chat = await createRes.json();
-            set({
-              currentChatId: chat.id,
-              messages: [],
-              currentChatMetadata: {
-                name: chat.name,
-                systemPresetId: chat.systemPresetId,
-                inferencePresetId: chat.inferencePresetId,
-              },
-              errorMessage: null,
-            });
-          } else {
-            const errorBody = await createRes.text().catch(() => "");
-            set({
-              errorMessage: `Unable to create default chat: ${createRes.status}${errorBody ? `: ${errorBody}` : ""}`,
-            });
+          if (!isCurrentChatLoadRequest(requestId, chatId)) {
+            return;
           }
-        } finally {
-          loadingDefaultChatLock = false;
+          if (createRes.ok) {
+            const newChat = await createRes.json();
+            if (!isCurrentChatLoadRequest(requestId, chatId)) {
+              return;
+            }
+            set((state) => ({
+              currentChatId: newChat.id,
+              messages: [],
+              totalMessages: 0,
+              isGenerating: false,
+              isWaitingForToolApproval: false,
+              currentChatMetadata: {
+                name: newChat.name,
+                systemPresetId: null,
+                inferencePresetId: null,
+              },
+              unreadChatIds: state.unreadChatIds.filter((id) => id !== newChat.id),
+              errorMessage: null,
+            }));
+            return;
+          }
         }
-      } else {
-        get().setError(`Unable to load chat: ${res.statusText || res.status}`, "Retry", () =>
-          get().loadChat(chatId),
-        );
+        // Clear state if not found
+        get().unloadChat();
+        if (chatId !== "default" && chatId !== "default-chat") {
+          get().setError(`Chat not found: ${chatId}`);
+        }
       }
     } catch (e: unknown) {
+      if (didTimeout) {
+        logWarn("Chat load request timed out", {
+          url: `/api/chats/${chatId}`,
+          timeoutMs: chatLoadTimeoutMs,
+        });
+      }
+      if (controller.signal.aborted || !isCurrentChatLoadRequest(requestId, chatId)) {
+        return;
+      }
       logError("Fetch chat failed", e);
       get().setError(e instanceof Error ? e.message : "Failed to load chat.", "Retry", () =>
         get().loadChat(chatId),
       );
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (activeChatLoadController === controller) {
+        activeChatLoadController = null;
+      }
     }
   },
 
   unloadChat: () =>
-    set({
-      currentChatId: null,
-      currentChatMetadata: null,
-      messages: [],
-      generationStats: null,
-      totalMessages: 0,
-    }),
+    (() => {
+      activeChatLoadRequestId += 1;
+      latestRequestedChatId = null;
+      activeChatLoadController?.abort();
+      activeChatLoadController = null;
+      set({
+        currentChatId: null,
+        currentChatMetadata: null,
+        messages: [],
+        generationStats: null,
+        totalMessages: 0,
+        isWaitingForToolApproval: false,
+        errorMessage: null, // Clear errors when unloading/switching chats
+      });
+    })(),
 
   loadMoreMessages: async () => {
     const state = get();
@@ -795,36 +1001,61 @@ export const useAppStore = create<AppState>((set, get) => ({
       const res = await fetch("/api/server/status");
       if (res.ok) {
         const data = await res.json();
+        const modelPath = data.config?.modelPath;
         set((state) => {
-          const modelPath = data.config?.modelPath;
           let loadedModel = null;
           if (modelPath) {
-            loadedModel = state.models.find((m) => m.primaryPath === modelPath) || {
-              publisher: "unknown",
-              modelName: modelPath.split(/[/\\]/).pop() || modelPath,
-              primaryPath: modelPath,
-              metadata: undefined,
-            };
+            loadedModel = state.models.find((m) => m.primaryPath === modelPath) || null;
+            // S12 fix: If the server reports a model that isn't in our scanned models list
+            // (e.g. it was deleted or moved), create a synthetic entry so the UI doesn't break.
+            if (!loadedModel) {
+              const fileName = modelPath.split(/[/\\]/).pop() || "unknown.gguf";
+              loadedModel = {
+                publisher: "unknown",
+                modelName: fileName,
+                primaryPath: modelPath,
+                metadata: {
+                  architecture: "unknown",
+                  name: fileName,
+                  fileSizeBytes: 0,
+                  hasVisionEncoder: false,
+                  hasAudioEncoder: false,
+                  contextLength: undefined,
+                  embeddingLength: undefined,
+                  attentionHeadCount: undefined,
+                  attentionHeadCountKv: undefined,
+                  blockCount: undefined,
+                  feedForwardLength: undefined,
+                  quantType: undefined,
+                  defaultTemperature: undefined,
+                  defaultTopK: undefined,
+                  defaultTopP: undefined,
+                  defaultMinP: undefined,
+                  defaultRepeatPenalty: undefined,
+                  chatTemplate: undefined,
+                  bosToken: undefined,
+                  eosToken: undefined,
+                },
+              };
+            }
           }
           return { serverStatus: data.status, loadedModel, errorMessage: null };
         });
-      } else {
+      } else if (get().serverStatus !== "idle") {
         const errorBody = await res.text().catch(() => "");
         get().addNotification(
           `Failed to fetch server status: ${res.status}${errorBody ? `: ${errorBody}` : ""}`,
           "error",
-          "Retry",
-          () => get().fetchServerStatus(),
         );
       }
     } catch (e: unknown) {
-      logError("Fetch server status failed", e);
-      get().addNotification(
-        e instanceof Error ? e.message : "Failed to fetch server status.",
-        "error",
-        "Retry",
-        () => get().fetchServerStatus(),
-      );
+      if (get().serverStatus !== "idle") {
+        logError("Status fetch failed", e);
+        get().addNotification(
+          e instanceof Error ? e.message : "Server status unavailable.",
+          "error",
+        );
+      }
     }
   },
 
@@ -850,7 +1081,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  loadModel: async (config: ModelLoadConfig) => {
+  loadModel: async (config: LoadModelRequest): Promise<boolean> => {
     set({ serverStatus: "loading" });
     try {
       const res = await fetch("/api/server/load", {
@@ -863,28 +1094,32 @@ export const useAppStore = create<AppState>((set, get) => ({
         const errorMessage = body?.error
           ? String(body.error)
           : `Failed to load model: ${res.status}`;
-        const action =
-          res.status === 503 && body?.code === "NOT_CONFIGURED"
-            ? () =>
-                import("./uiStore").then((m) =>
-                  m.useUiStore.getState().setRightPanelView("settings"),
-                )
-            : null;
+        const shouldOpenSettings = body?.code === "NOT_CONFIGURED" || body?.code === "INVALID_PATH";
+        const action = shouldOpenSettings
+          ? () => useUiStore.getState().setRightPanelView("settings")
+          : null;
+        if (action) {
+          action();
+        }
         set({ serverStatus: "idle" });
         get().setError(errorMessage, action ? "Settings" : null, action);
+        return false;
       } else {
         set({ errorMessage: null, errorActionLabel: null, errorAction: null });
         await get().fetchServerStatus();
+        return true;
       }
     } catch (e: unknown) {
       set({
         serverStatus: "idle",
         errorMessage: e instanceof Error ? e.message : "Model load failed.",
       });
+      return false;
     }
   },
 
   unloadModel: async () => {
+    set({ errorMessage: null }); // Clear any stale errors
     try {
       const res = await fetch("/api/server/unload", { method: "POST" });
       if (res.ok) {

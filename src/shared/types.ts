@@ -72,6 +72,15 @@ export interface ModelLoadConfig {
 }
 
 /**
+ * Request payload for loading a model into llama-server.
+ * Extends the CLI-backed load config with runtime-only preset state.
+ */
+export interface LoadModelRequest extends ModelLoadConfig {
+  /** Optional thinking tag override associated with the selected load preset. */
+  thinkingTagOverride?: ThinkingTagConfig | undefined;
+}
+
+/**
  * Metadata extracted from a GGUF file for display and optimization purposes.
  */
 export interface GgufDisplayMetadata {
@@ -174,6 +183,24 @@ export interface LlamaTimings {
   tokens_cached: number;
   /** Number of tokens evaluated by the model. */
   tokens_evaluated: number;
+}
+
+/**
+ * Persisted response metrics for a completed assistant message.
+ */
+export interface MessageMetrics {
+  /** Number of output tokens produced for the message. */
+  predictedTokens: number;
+  /** Output token throughput in tokens per second. */
+  tokensPerSecond: number;
+  /** Number of prompt tokens evaluated for the request. */
+  promptTokens: number;
+  /** Prompt evaluation throughput in tokens per second. */
+  promptTokensPerSecond: number;
+  /** Number of prompt tokens reused from cache. */
+  cachedPromptTokens: number;
+  /** Number of prompt tokens evaluated by the model. */
+  evaluatedPromptTokens: number;
 }
 
 /**
@@ -315,6 +342,36 @@ export interface WsToolCallFrame {
 }
 
 /**
+ * Explicit state transition for the tool-approval phase of a generation.
+ */
+export interface WsToolApprovalStateFrame {
+  /** Packet type identifier for tool-approval state changes. */
+  type: "tool_approval_state";
+  /** Chat session identifier. */
+  chatId: string;
+  /** Message identifier for the assistant message awaiting approval. */
+  messageId: string;
+  /** Optional generation session identifier. */
+  generationId?: string | undefined;
+  /** Whether the generation is currently blocked on user approval. */
+  pending: boolean;
+  /** Whether execution should resume after leaving the approval phase. */
+  resumeGeneration?: boolean | undefined;
+  /** Optional active tool call identifier. */
+  toolCallId?: string | undefined;
+  /** Reason for the state transition. */
+  reason?:
+    | "awaiting_user"
+    | "approved"
+    | "rejected"
+    | "timeout"
+    | "cancelled"
+    | "disconnected"
+    | "unloaded"
+    | undefined;
+}
+
+/**
  * Broadcast wrapper directly sending standard explicitly populated ChatMessage models safely over websocket tunnels.
  */
 export interface WsMessageFrame {
@@ -341,6 +398,7 @@ export type WsFrame =
   | WsServerStatusFrame
   | WsAutonameFrame
   | WsToolCallFrame
+  | WsToolApprovalStateFrame
   | WsMessageFrame
   | WsPresetsUpdatedFrame;
 
@@ -481,8 +539,6 @@ export interface InferencePreset {
   contextOverflowPolicy?: ContextOverflowPolicy;
   /** Whether thinking tags are enabled. */
   thinkingEnabled?: boolean;
-  /** Optional thinking tag override configuration. */
-  thinkingTagOverride?: ThinkingTagConfig;
   /** Preset creation timestamp. */
   createdAt: number;
   /** Preset last update timestamp. */
@@ -507,6 +563,8 @@ export interface LoadPreset {
   config: ModelLoadConfig;
   /** Optional custom chat template override. */
   chatTemplateOverride?: string | undefined;
+  /** Optional thinking tag override for the active loaded model. */
+  thinkingTagOverride?: ThinkingTagConfig | undefined;
   /** Preset creation timestamp. */
   createdAt: number;
   /** Preset last update timestamp. */
@@ -553,6 +611,8 @@ export interface ChatMessage {
   toolCallId?: string | undefined;
   /** Optional raw JSON payload for tool call arguments. */
   toolCallsJson?: string | undefined;
+  /** Optional persisted response metrics for assistant messages. */
+  metrics?: MessageMetrics | undefined;
   /** Optional attachments included with this message. */
   attachments?: Attachment[] | undefined;
 }
@@ -614,7 +674,7 @@ export interface GpuInfo {
   /** Video memory size in bytes. */
   vramBytes: number;
   /** GPU backend platform. */
-  backend: "cuda" | "metal" | "rocm" | "vulkan" | "cpu";
+  backend: "cuda" | "metal" | "rocm" | "vulkan" | "cpu" | "unknown";
 }
 
 /**
@@ -639,6 +699,16 @@ export interface AppSettings {
   modelsPath: string;
   /** Optional path to the llama-server executable. */
   llamaServerPath?: string;
+  /** Optional override path to the nvidia-smi executable. */
+  nvidiaSmiPath?: string;
+  /** Optional override path to the rocm-smi executable. */
+  rocmSmiPath?: string;
+  /** Optional override path to the sysctl executable. */
+  sysctlPath?: string;
+  /** Optional override path to the system_profiler executable. */
+  systemProfilerPath?: string;
+  /** Optional override path to the PowerShell executable used for Windows probes. */
+  powershellPath?: string;
   /** Preferred UI theme. */
   theme: "dark" | "light" | "system";
   /** Accent color used by the application UI. */
@@ -667,4 +737,6 @@ export interface AppSettings {
   showConsoleOnStartup: boolean;
   /** Optional last used model load configuration. */
   lastLoadConfig?: ModelLoadConfig;
+  /** Optional last used thinking tag override associated with the loaded model. */
+  lastLoadThinkingTagOverride?: ThinkingTagConfig;
 }

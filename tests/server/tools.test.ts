@@ -3,10 +3,19 @@
  * Tests for tool schema generation and response parsing utilities.
  */
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { generateGrammarFromSchema } from "../../src/server/tools";
 
 describe("tools", () => {
+  afterEach(() => {
+    const {
+      __setToolApprovalTimeoutMs,
+      cancelPendingApprovals,
+    } = require("../../src/server/tools");
+    __setToolApprovalTimeoutMs(120000);
+    cancelPendingApprovals();
+  });
+
   it("generates a valid gbnf string for simple types", () => {
     const schema = {
       type: "object",
@@ -46,6 +55,7 @@ describe("tools", () => {
   });
 
   const {
+    __setToolApprovalTimeoutMs,
     waitForToolApproval,
     resolveToolApproval,
     cancelPendingApprovals,
@@ -84,5 +94,40 @@ describe("tools", () => {
     const r2 = await p2;
     expect(r1.approved).toBe(false);
     expect(r2.approved).toBe(false);
+  });
+
+  it("times out delayed tool approvals", async () => {
+    __setToolApprovalTimeoutMs(20);
+
+    const result = await waitForToolApproval("chat-timeout", "tool-timeout");
+    expect(result.approved).toBe(false);
+    expect(result.reason).toBe("timeout");
+  });
+
+  it("surfaces rejected tool approvals explicitly", async () => {
+    const approvalPromise = waitForToolApproval("chat-reject", "tool-reject");
+    resolveToolApproval("tool-reject", false);
+
+    const result = await approvalPromise;
+    expect(result.approved).toBe(false);
+    expect(result.reason).toBe("rejected");
+  });
+
+  it("clears pending approvals when the client disconnects", async () => {
+    const approvalPromise = waitForToolApproval("chat-disconnect", "tool-disconnect");
+    cancelPendingApprovals(undefined, "disconnected");
+
+    const result = await approvalPromise;
+    expect(result.approved).toBe(false);
+    expect(result.reason).toBe("disconnected");
+  });
+
+  it("clears pending approvals when the model unloads", async () => {
+    const approvalPromise = waitForToolApproval("chat-unload", "tool-unload");
+    cancelPendingApprovals(undefined, "unloaded");
+
+    const result = await approvalPromise;
+    expect(result.approved).toBe(false);
+    expect(result.reason).toBe("unloaded");
   });
 });

@@ -6,11 +6,32 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { ChatMessage, ChatSession, GgufDisplayMetadata } from "@shared/types.js";
+import type {
+  ChatMessage,
+  ChatSession,
+  GgufDisplayMetadata,
+  MessageMetrics,
+} from "../shared/types";
+import { sanitizeToolCallsJson } from "@shared/toolCalls.js";
 import { logError, logWarn } from "../logger";
 import { getDb } from "./db";
 
 const APP_ROOT = path.join(os.homedir(), ".llamaforge");
+type ChatMessageRow = Omit<ChatMessage, "metrics"> & {
+  metricsJson?: string | null;
+};
+
+function normalizeToolCallsJson(
+  toolCallsJson: string | null | undefined,
+  context: string,
+): string | undefined {
+  if (!toolCallsJson) return undefined;
+  const sanitized = sanitizeToolCallsJson(toolCallsJson);
+  if (!sanitized) {
+    logWarn(`[chatRepo] Stripping invalid toolCallsJson in ${context}`);
+  }
+  return sanitized;
+}
 
 /**
  * S6 fix: Computes the next message position for a chat using MAX(position) + 1.
@@ -48,6 +69,47 @@ function isValidMessageRole(value: unknown): value is "system" | "user" | "assis
   return value === "system" || value === "user" || value === "assistant" || value === "tool";
 }
 
+function parseMessageMetrics(metricsJson: string | null | undefined): MessageMetrics | undefined {
+  if (!metricsJson) return undefined;
+
+  try {
+    const parsed = JSON.parse(metricsJson) as Partial<MessageMetrics>;
+    if (
+      typeof parsed.predictedTokens === "number" &&
+      typeof parsed.tokensPerSecond === "number" &&
+      typeof parsed.promptTokens === "number" &&
+      typeof parsed.promptTokensPerSecond === "number" &&
+      typeof parsed.cachedPromptTokens === "number" &&
+      typeof parsed.evaluatedPromptTokens === "number"
+    ) {
+      return {
+        predictedTokens: parsed.predictedTokens,
+        tokensPerSecond: parsed.tokensPerSecond,
+        promptTokens: parsed.promptTokens,
+        promptTokensPerSecond: parsed.promptTokensPerSecond,
+        cachedPromptTokens: parsed.cachedPromptTokens,
+        evaluatedPromptTokens: parsed.evaluatedPromptTokens,
+      };
+    }
+  } catch (err) {
+    logWarn("[chatRepo] Failed to parse message metrics", err);
+  }
+
+  return undefined;
+}
+
+function hydrateChatMessage(row: ChatMessageRow): ChatMessage {
+  const metrics = parseMessageMetrics(row.metricsJson);
+  const { metricsJson: _metricsJson, toolCallsJson: _toolCallsJson, ...message } = row;
+  const toolCallsJson = normalizeToolCallsJson(row.toolCallsJson, "message hydration");
+
+  return {
+    ...message,
+    ...(toolCallsJson ? { toolCallsJson } : {}),
+    ...(metrics ? { metrics } : {}),
+  };
+}
+
 function assertImportPayload(parsed: any) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     logError("[chatRepo] Invalid imported chat payload: not an object", { parsed });
@@ -64,6 +126,12 @@ function assertImportPayload(parsed: any) {
     }
     if (!isValidMessageRole(msg.role)) {
       throw new Error(`Message at index ${index} has invalid role.`);
+    }
+    if (
+      msg.role === "tool" &&
+      (typeof msg.toolCallId !== "string" || msg.toolCallId.length === 0)
+    ) {
+      throw new Error(`Tool message at index ${index} requires a valid toolCallId.`);
     }
     if (typeof msg.content !== "string") {
       throw new Error(`Message at index ${index} requires a content string.`);
@@ -144,7 +212,7 @@ export async function createChat(
  */
 export async function getChats(
   search?: string,
-  limit: number = 150,
+  limit: number = 300,
   offset: number = 0,
 ): Promise<ChatSession[]> {
   const db = getDb();
@@ -157,7 +225,7 @@ export async function getChats(
     params.push(`%${search}%`);
   }
 
-  query += " ORDER BY updated_at DESC LIMIT ? OFFSET ?";
+  query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?";
   params.push(limit, offset);
 
   const stmt = db.query<ChatSession, (string | number)[]>(query);
@@ -208,15 +276,15 @@ export async function getChat(
     (chat as any).totalMessages = totalMessages;
 
     // Load paginated slice (most recent messages first, then reverse for display order)
-    const msgStmt = db.query<ChatMessage, [string, number, number]>(
-      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson FROM messages WHERE chat_id = ? ORDER BY position DESC LIMIT ? OFFSET ?",
+    const msgStmt = db.query<ChatMessageRow, [string, number, number]>(
+      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson, metrics_json as metricsJson FROM messages WHERE chat_id = ? ORDER BY position DESC LIMIT ? OFFSET ?",
     );
-    chat.messages = msgStmt.all(id, messageLimit, offset).reverse();
+    chat.messages = msgStmt.all(id, messageLimit, offset).reverse().map(hydrateChatMessage);
   } else {
-    const msgStmt = db.query<ChatMessage, [string]>(
-      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson FROM messages WHERE chat_id = ? ORDER BY position ASC",
+    const msgStmt = db.query<ChatMessageRow, [string]>(
+      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson, metrics_json as metricsJson FROM messages WHERE chat_id = ? ORDER BY position ASC",
     );
-    chat.messages = msgStmt.all(id);
+    chat.messages = msgStmt.all(id).map(hydrateChatMessage);
   }
 
   if (chat.messages.length > 0) {
@@ -368,8 +436,8 @@ export async function deleteChat(id: string): Promise<void> {
 export async function addMessage(message: ChatMessage): Promise<void> {
   const db = getDb();
   const stmt = db.prepare(`
-    INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json, metrics_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   stmt.run(
     message.id,
@@ -381,7 +449,8 @@ export async function addMessage(message: ChatMessage): Promise<void> {
     message.position,
     message.createdAt,
     message.toolCallId || null,
-    message.toolCallsJson || null,
+    normalizeToolCallsJson(message.toolCallsJson, "message save") || null,
+    message.metrics ? JSON.stringify(message.metrics) : null,
   );
 
   db.prepare("UPDATE chats SET updated_at = ? WHERE id = ?").run(Date.now(), message.chatId);
@@ -560,8 +629,8 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
   );
 
   const insertMsg = db.prepare(
-    `INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json, metrics_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   const insertAttachment = db.prepare(
@@ -596,7 +665,8 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
         msg.position,
         msg.createdAt,
         msg.toolCallId || null,
-        msg.toolCallsJson || null,
+        normalizeToolCallsJson(msg.toolCallsJson, "branch copy") || null,
+        msg.metrics ? JSON.stringify(msg.metrics) : null,
       );
 
       // We read attachments from the existing array in `getChat` since it's already there!
@@ -779,8 +849,8 @@ export async function importChat(jsonContent: string): Promise<string> {
     "INSERT INTO chats (id, name, created_at, updated_at, model_path, system_preset_id, inference_preset_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
   const insertMsg = db.prepare(
-    `INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json, metrics_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertAttachment = db.prepare(
     "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -825,7 +895,8 @@ export async function importChat(jsonContent: string): Promise<string> {
           i,
           msg.createdAt || now,
           msg.toolCallId || null,
-          msg.toolCallsJson || null,
+          normalizeToolCallsJson(msg.toolCallsJson, "chat import") || null,
+          msg.metrics ? JSON.stringify(msg.metrics) : null,
         );
 
         if (Array.isArray(msg.attachments)) {

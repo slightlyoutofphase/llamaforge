@@ -26,5 +26,23 @@ describe("db configuration", () => {
     expect(tableNames).toContain("system_presets");
     expect(tableNames).toContain("model_cache");
     expect(tableNames).toContain("settings");
+
+    const messageColumns = db
+      .query<{ name: string }, []>("PRAGMA table_info(messages)")
+      .all()
+      .map((column) => column.name);
+    expect(messageColumns).toContain("metrics_json");
+  });
+
+  it("seeds the default load preset with canonical flashAttn config", () => {
+    const db = getDb(":memory:");
+    const row = db
+      .query<{ config_json: string }, []>("SELECT config_json FROM load_presets LIMIT 1")
+      .get();
+
+    expect(row).toBeDefined();
+    const parsed = JSON.parse(row?.config_json ?? "{}");
+    expect(parsed.config?.flashAttn).toBe("on");
+    expect(parsed.config?.flashAttention).toBeUndefined();
   });
 });

@@ -3,10 +3,88 @@
  * Preset repository — CRUD operations for load, inference, and system presets.
  */
 
-import type { InferencePreset, LoadPreset, SystemPromptPreset } from "@shared/types.js";
+import type { InferencePreset, LoadPreset, SystemPromptPreset } from "../shared/types";
+import { detectThinkingConfig } from "../chatTemplateEngine";
 import { logWarn } from "../logger";
 import { generateGrammarFromSchema } from "../tools";
 import { getDb } from "./db";
+
+type ParsedLoadPresetPayload = {
+  config: LoadPreset["config"];
+  chatTemplateOverride?: string;
+  thinkingTagOverride?: LoadPreset["thinkingTagOverride"];
+};
+
+function isThinkingTagOverride(
+  value: unknown,
+): value is NonNullable<LoadPreset["thinkingTagOverride"]> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate["openTag"] === "string" &&
+    typeof candidate["closeTag"] === "string" &&
+    (candidate["enableToken"] === undefined || typeof candidate["enableToken"] === "string")
+  );
+}
+
+function normalizeFlashAttnValue(
+  rawConfig: Record<string, unknown>,
+): LoadPreset["config"]["flashAttn"] | undefined {
+  const flashAttn = rawConfig["flashAttn"];
+  if (flashAttn === "on" || flashAttn === "off" || flashAttn === "auto") {
+    return flashAttn;
+  }
+
+  const legacyFlashAttention = rawConfig["flashAttention"];
+  if (typeof legacyFlashAttention === "boolean") {
+    return legacyFlashAttention ? "on" : "off";
+  }
+
+  return undefined;
+}
+
+function normalizeLoadPresetConfig(rawConfig: Record<string, unknown>): LoadPreset["config"] {
+  const configWithoutLegacy: Record<string, unknown> = { ...rawConfig };
+  delete configWithoutLegacy["flashAttention"];
+  const flashAttn = normalizeFlashAttnValue(rawConfig);
+
+  return {
+    ...(configWithoutLegacy as unknown as LoadPreset["config"]),
+    ...(flashAttn ? { flashAttn } : {}),
+  };
+}
+
+function parseLoadPresetPayload(configJson: string): ParsedLoadPresetPayload {
+  const parsed = safeParse<Record<string, unknown>>(configJson, {});
+  const parsedConfig = parsed["config"];
+  const rawConfig =
+    typeof parsedConfig === "object" && parsedConfig !== null && !Array.isArray(parsedConfig)
+      ? (parsedConfig as Record<string, unknown>)
+      : parsed;
+  const chatTemplateOverride = parsed["chatTemplateOverride"];
+  const thinkingTagOverride = parsed["thinkingTagOverride"];
+
+  return {
+    config: normalizeLoadPresetConfig(rawConfig),
+    ...(typeof chatTemplateOverride === "string" ? { chatTemplateOverride } : {}),
+    ...(isThinkingTagOverride(thinkingTagOverride) ? { thinkingTagOverride } : {}),
+  };
+}
+
+function serializeLoadPresetPayload(payload: ParsedLoadPresetPayload): string {
+  return JSON.stringify({
+    config: normalizeLoadPresetConfig(payload.config as unknown as Record<string, unknown>),
+    ...(payload.chatTemplateOverride !== undefined
+      ? { chatTemplateOverride: payload.chatTemplateOverride }
+      : {}),
+    ...(payload.thinkingTagOverride !== undefined
+      ? { thinkingTagOverride: payload.thinkingTagOverride }
+      : {}),
+  });
+}
 
 function safeParse<T>(json: string, fallback: T): T {
   try {
@@ -42,10 +120,7 @@ export async function getLoadPresets(): Promise<LoadPreset[]> {
     >("SELECT * FROM load_presets")
     .all();
   return rows.map((r) => {
-    const parsed = safeParse<{ config: LoadPreset["config"]; chatTemplateOverride?: string }>(
-      r.config_json,
-      { config: {} as LoadPreset["config"] } as any,
-    );
+    const parsed = parseLoadPresetPayload(r.config_json);
     return {
       id: r.id,
       name: r.name,
@@ -53,7 +128,12 @@ export async function getLoadPresets(): Promise<LoadPreset[]> {
       isDefault: Boolean(r.is_default),
       isReadonly: Boolean(r.is_readonly),
       config: parsed.config,
-      chatTemplateOverride: parsed.chatTemplateOverride,
+      ...(parsed.chatTemplateOverride !== undefined
+        ? { chatTemplateOverride: parsed.chatTemplateOverride }
+        : {}),
+      ...(parsed.thinkingTagOverride !== undefined
+        ? { thinkingTagOverride: parsed.thinkingTagOverride }
+        : {}),
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };
@@ -132,21 +212,23 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
     updatedAt,
     config,
     chatTemplateOverride,
+    thinkingTagOverride,
   } = preset;
   if (!id) id = crypto.randomUUID();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
 
-  const configJson = JSON.stringify({
+  const configJson = serializeLoadPresetPayload({
     config,
-    chatTemplateOverride,
+    ...(chatTemplateOverride !== undefined ? { chatTemplateOverride } : {}),
+    ...(thinkingTagOverride !== undefined ? { thinkingTagOverride } : {}),
   });
   db.prepare(
     `INSERT INTO load_presets (id, name, model_path, is_default, is_readonly, config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     name,
-    modelPath || null,
+    modelPath || config.modelPath || null,
     isDefault ? 1 : 0,
     isReadonly ? 1 : 0,
     configJson,
@@ -165,31 +247,42 @@ export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>)
   const db = getDb();
   const existing = db
     .query<
-      { config_json: string; name: string },
+      { config_json: string; name: string; model_path: string | null },
       [string]
-    >("SELECT config_json, name FROM load_presets WHERE id = ?")
+    >("SELECT config_json, name, model_path FROM load_presets WHERE id = ?")
     .get(id);
   if (!existing) return;
-  const currentConfig = safeParse<{ config: LoadPreset["config"]; chatTemplateOverride?: string }>(
-    existing.config_json,
-    { config: {} as LoadPreset["config"] } as any,
-  );
+  const currentConfig = parseLoadPresetPayload(existing.config_json);
 
-  const newConfigJson = JSON.stringify({
+  const newConfigJson = serializeLoadPresetPayload({
     config: updates.config ?? currentConfig.config,
-    chatTemplateOverride:
-      updates.chatTemplateOverride !== undefined
-        ? updates.chatTemplateOverride
-        : currentConfig.chatTemplateOverride,
+    ...((updates.chatTemplateOverride !== undefined
+      ? updates.chatTemplateOverride
+      : currentConfig.chatTemplateOverride) !== undefined
+      ? {
+          chatTemplateOverride:
+            updates.chatTemplateOverride !== undefined
+              ? updates.chatTemplateOverride
+              : currentConfig.chatTemplateOverride,
+        }
+      : {}),
+    ...((updates.thinkingTagOverride !== undefined
+      ? updates.thinkingTagOverride
+      : currentConfig.thinkingTagOverride) !== undefined
+      ? {
+          thinkingTagOverride:
+            updates.thinkingTagOverride !== undefined
+              ? updates.thinkingTagOverride
+              : currentConfig.thinkingTagOverride,
+        }
+      : {}),
   });
 
   const newName = updates.name ?? existing.name;
-  db.prepare("UPDATE load_presets SET name = ?, config_json = ?, updated_at = ? WHERE id = ?").run(
-    newName,
-    newConfigJson,
-    Date.now(),
-    id,
-  );
+  const newModelPath = updates.modelPath ?? updates.config?.modelPath ?? existing.model_path;
+  db.prepare(
+    "UPDATE load_presets SET name = ?, model_path = ?, config_json = ?, updated_at = ? WHERE id = ?",
+  ).run(newName, newModelPath ?? null, newConfigJson, Date.now(), id);
 }
 
 /**
@@ -363,16 +456,17 @@ export async function ensureModelDefaultPresets(
     if (!existingLoadPaths.has(m.primaryPath)) {
       const newLoadPreset: LoadPreset = {
         id: Bun.randomUUIDv7(),
-        name: `Default for ${m.modelName}`,
+        name: "Default (from GGUF)",
         modelPath: m.primaryPath,
-        isDefault: false,
-        isReadonly: false,
-        chatTemplateOverride: m.metadata.chatTemplate || "",
+        isDefault: true,
+        isReadonly: true,
+        chatTemplateOverride: m.metadata.chatTemplate ?? undefined,
+        thinkingTagOverride: detectThinkingConfig(m.metadata.architecture),
         config: {
           modelPath: m.primaryPath,
           mmProjPath: m.mmProjPath,
           contextSize: m.metadata.contextLength || 4096,
-          contextShift: true,
+          contextShift: false,
           gpuLayers: -1,
           threads: -1,
           batchSize: 2048,
@@ -390,6 +484,7 @@ export async function ensureModelDefaultPresets(
           kvUnified: true,
           noKvOffload: false,
           cacheReuse: 0,
+          imageMaxTokens: 560,
         },
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -402,9 +497,9 @@ export async function ensureModelDefaultPresets(
     if (!existingInfPaths.has(m.primaryPath)) {
       const newInfPreset: import("../../shared/types").InferencePreset = {
         id: Bun.randomUUIDv7(),
-        name: `Default for ${m.modelName}`,
+        name: "Default (from GGUF)",
         sourceModelPath: m.primaryPath,
-        isDefault: false,
+        isDefault: true,
         temperature: m.metadata.defaultTemperature ?? 0.8,
         topK: m.metadata.defaultTopK ?? 40,
         topP: m.metadata.defaultTopP ?? 0.95,

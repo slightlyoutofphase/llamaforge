@@ -17,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import type React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { logError } from "../../logger";
 import { useCreateChat, useDeleteChat, useInfiniteChats, useUpdateChat } from "../../queries";
 import { useAppStore } from "../../store";
@@ -33,12 +33,16 @@ export function ChatSidebar() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [sortBy, setSortBy] = useState<"date" | "name">("date");
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const createLockRef = useRef(false);
+  const deleteLockRef = useRef(false);
   const navigate = useNavigate();
   const { chatId } = useParams({ strict: false });
 
   const { data, isLoading, hasNextPage, fetchNextPage, isFetchingNextPage } =
     useInfiniteChats(search);
   const chats = useMemo(() => data?.pages.flat() || [], [data]);
+  const chatsById = useMemo(() => new Map(chats.map((chat) => [chat.id, chat])), [chats]);
 
   const unloadChat = useAppStore((state) => state.unloadChat);
   const unreadChatIds = useAppStore((state) => state.unreadChatIds);
@@ -60,13 +64,17 @@ export function ChatSidebar() {
   }, [qc]);
 
   const handleCreateChat = async () => {
-    if (createMut.isPending) return;
+    if (createLockRef.current || createMut.isPending) return;
+    createLockRef.current = true;
     try {
       const newChat = await createMut.mutateAsync({ name: "New Chat" });
-      if (!newChat?.id) throw new Error("Failed to create new chat.");
-      navigate({ to: "/chat/$chatId", params: { chatId: newChat.id } });
+      if (newChat?.id) {
+        navigate({ to: "/chat/$chatId", params: { chatId: newChat.id } });
+      }
     } catch (err: unknown) {
       logError("Create chat failed", err);
+    } finally {
+      createLockRef.current = false;
     }
   };
 
@@ -87,11 +95,38 @@ export function ChatSidebar() {
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    await deleteMut.mutateAsync(id);
-    if (chatId === id) {
-      unloadChat();
-      navigate({ to: "/", params: {} });
+    if (deleteLockRef.current || deleteMut.isPending) return;
+    if (!confirm("Are you sure you want to delete this chat?")) return;
+
+    const nextChatId = chatId === id ? chats.find((c) => c.id !== id)?.id : undefined;
+
+    deleteLockRef.current = true;
+    setPendingDeleteId(id);
+    try {
+      await deleteMut.mutateAsync(id);
+      if (chatId === id) {
+        unloadChat();
+        if (nextChatId) {
+          navigate({ to: "/chat/$chatId", params: { chatId: nextChatId } });
+        } else {
+          navigate({ to: "/" });
+        }
+      }
+    } finally {
+      deleteLockRef.current = false;
+      setPendingDeleteId(null);
     }
+  };
+
+  const handleOpenChat = (targetChatId: string) => {
+    clearUnreadChat(targetChatId);
+    navigate({ to: "/chat/$chatId", params: { chatId: targetChatId } });
+  };
+
+  const handleOpenParentChat = (parentChatId: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    handleOpenChat(parentChatId);
   };
 
   const handleExport = async (id: string, e: React.MouseEvent) => {
@@ -137,9 +172,10 @@ export function ChatSidebar() {
       return filtered.slice().sort((a, b) => a.name.localeCompare(b.name));
     }
     return filtered.slice().sort((a, b) => {
-      const aDate = new Date(a.updatedAt || a.createdAt).getTime();
-      const bDate = new Date(b.updatedAt || b.createdAt).getTime();
-      return bDate - aDate;
+      const aDate = new Date(a.createdAt).getTime();
+      const bDate = new Date(b.createdAt).getTime();
+      if (bDate !== aDate) return bDate - aDate;
+      return b.id.localeCompare(a.id);
     });
   }, [chats, search, sortBy]);
 
@@ -223,9 +259,13 @@ export function ChatSidebar() {
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
         {sortedChats.map((c) => {
+          const isActive = chatId === c.id;
+          const parentChat = c.parentId ? chatsById.get(c.parentId) : undefined;
+
           const row = (
             <div
               key={c.id}
+              data-status={isActive ? "active" : "idle"}
               className="group flex flex-col px-3 py-2.5 rounded-xl transition-all hover:bg-[var(--color-surface-elevated)] data-[status=active]:bg-[var(--color-accent)]/10 data-[status=active]:text-[var(--color-accent)]">
               <div className="flex items-center justify-between gap-2 overflow-hidden">
                 <div className="flex flex-col min-w-0 flex-1">
@@ -258,18 +298,36 @@ export function ChatSidebar() {
                     </div>
                   ) : (
                     <>
-                      <span className="truncate font-medium text-sm leading-tight group-data-[status=active]:font-bold">
-                        {c.isBranch && "🌿 "}
-                        {c.name}
-                      </span>
-                      <span className="text-[10px] text-[var(--color-text-muted)] mt-0.5 flex items-center gap-2">
-                        {new Date(c.createdAt).toLocaleString()}
-                        {unreadChatIds.includes(c.id) && (
-                          <span className="inline-flex items-center rounded-full bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg)]">
-                            New
-                          </span>
-                        )}
-                      </span>
+                      <Link
+                        to="/chat/$chatId"
+                        params={{ chatId: c.id }}
+                        onClick={() => clearUnreadChat(c.id)}
+                        className="min-w-0 flex flex-col">
+                        <span className="truncate font-medium text-sm leading-tight group-data-[status=active]:font-bold">
+                          {c.isBranch && "🌿 "}
+                          {c.name}
+                        </span>
+                        <span className="text-[10px] text-[var(--color-text-muted)] mt-0.5 flex items-center gap-2">
+                          {new Date(c.createdAt).toLocaleString()}
+                          {unreadChatIds.includes(c.id) && (
+                            <span className="inline-flex items-center rounded-full bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg)]">
+                              New
+                            </span>
+                          )}
+                        </span>
+                      </Link>
+                      {c.isBranch && c.parentId && (
+                        <div className="mt-1 flex items-center gap-1 text-[10px] text-[var(--color-text-muted)]">
+                          <span>Parent:</span>
+                          <button
+                            type="button"
+                            onClick={(e) => handleOpenParentChat(c.parentId as string, e)}
+                            className="truncate rounded px-1 py-0.5 text-left text-[var(--color-accent)] hover:bg-[var(--color-surface)]"
+                            aria-label={`Open parent chat: ${parentChat?.name ?? c.parentId}`}>
+                            {parentChat?.name ?? c.parentId}
+                          </button>
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
@@ -292,6 +350,7 @@ export function ChatSidebar() {
                     <button
                       type="button"
                       onClick={(e) => handleDelete(c.id, e)}
+                      disabled={pendingDeleteId !== null}
                       className="p-1.5 hover:bg-red-500/10 rounded-lg text-[var(--color-text-muted)] hover:text-red-400"
                       title="Delete">
                       <Trash2 size={14} />
@@ -302,20 +361,7 @@ export function ChatSidebar() {
             </div>
           );
 
-          return editingId === c.id ? (
-            <div key={c.id}>{row}</div>
-          ) : (
-            <Link
-              key={c.id}
-              to="/chat/$chatId"
-              params={{ chatId: c.id }}
-              onClick={() => clearUnreadChat(c.id)}
-              activeProps={{
-                "data-status": "active",
-              }}>
-              {row}
-            </Link>
-          );
+          return row;
         })}
         {sortedChats.length === 0 && !isLoading && (
           <div className="flex flex-col items-center justify-center p-8 text-center text-[var(--color-text-muted)] opacity-50">

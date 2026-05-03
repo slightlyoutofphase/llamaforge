@@ -1,11 +1,13 @@
 {
   "$schema": "https://typedoc.org/schema.json",
   "entryPoints": ["src/server/index.ts", "src/client/main.tsx", "src/shared/types.ts"],
+  "tsconfig": "tsconfig.docs.json",
   "out": "docs",
   "plugin": ["typedoc-plugin-markdown"],
   "name": "LlamaForge Technical Documentation",
   "includeVersion": true,
   "theme": "default",
+  "disableSources": true,
   "hideGenerator": true,
   "categorizeByGroup": true,
   "sort": ["kind", "instance-first", "alphabetical"],

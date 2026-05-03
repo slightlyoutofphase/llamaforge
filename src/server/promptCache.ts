@@ -2,7 +2,7 @@
  * @packageDocumentation
  * Types and utilities for prompt cache tracking.
  */
-import type { LlamaTimings } from "@shared/types.js";
+import type { LlamaTimings } from "../shared/types";
 
 /**
  * Interface describing cumulative prompt evaluation statistics for a session.

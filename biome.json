@@ -24,6 +24,9 @@
         "noArrayIndexKey": "off",
         "noExplicitAny": "off",
         "noFallthroughSwitchClause": "error"
+      },
+      "complexity": {
+        "useLiteralKeys": "off"
       }
     }
   }

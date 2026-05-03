@@ -4,11 +4,13 @@
  * Manages client lifecycle (add/remove) and various broadcast helpers.
  */
 
-import type { LlamaServerStatus, WsFrame } from "@shared/types.js";
+import type { LlamaServerStatus, WsFrame } from "../shared/types";
 import type { ServerWebSocket } from "bun";
 import { logWarn } from "./logger";
-
 const connections = new Set<ServerWebSocket<unknown>>();
+const logBuffer: Extract<WsFrame, { type: "log" }>[] = [];
+const MAX_BUFFER_SIZE = 200;
+
 const lastPongTimes = new WeakMap<ServerWebSocket<unknown>, number>();
 
 // M4 fix: periodic WebSocket heartbeat to detect stale/half-open connections
@@ -25,6 +27,7 @@ function startHeartbeat(): void {
       if (now - lastPong > STALE_THRESHOLD_MS) {
         logWarn("[wsHub] Closing stale WebSocket (no pong received)");
         connections.delete(ws);
+        stopHeartbeatIfEmpty();
         try {
           ws.close(1001, "Heartbeat timeout");
         } catch (_e) {
@@ -36,6 +39,7 @@ function startHeartbeat(): void {
         ws.ping();
       } catch (_e) {
         connections.delete(ws);
+        stopHeartbeatIfEmpty();
       }
     }
   }, PING_INTERVAL_MS);
@@ -55,6 +59,10 @@ function stopHeartbeatIfEmpty(): void {
  */
 export function addConnection(ws: ServerWebSocket<unknown>): void {
   connections.add(ws);
+  // Send buffered logs to new connection
+  for (const log of logBuffer) {
+    ws.send(JSON.stringify(log));
+  }
   lastPongTimes.set(ws, Date.now());
   startHeartbeat();
 }
@@ -110,9 +118,31 @@ export function broadcastStatus(status: LlamaServerStatus): void {
  * @param level - The severity level of the log.
  * @param body - The text content of the log message.
  */
-export function broadcastLog(
-  level: "info" | "warn" | "error" | "debug" | "server",
-  body: string,
-): void {
-  broadcast({ type: "log", level, body, ts: Date.now() });
+export function broadcastLog(level: string, message: string): void {
+  const normalizedLevel: Extract<WsFrame, { type: "log" }>["level"] =
+    level === "info" ||
+    level === "warn" ||
+    level === "error" ||
+    level === "debug" ||
+    level === "server"
+      ? level
+      : "server";
+  const logFrame: Extract<WsFrame, { type: "log" }> = {
+    type: "log",
+    level: normalizedLevel,
+    body: message,
+    ts: Date.now(),
+  };
+  logBuffer.push(logFrame);
+  if (logBuffer.length > MAX_BUFFER_SIZE) logBuffer.shift();
+  broadcast(logFrame);
+}
+/**
+ * Removes all active WebSocket connections and clears the log buffer.
+ * Primarily used for ensuring isolation between automated tests.
+ */
+export function clearConnections(): void {
+  connections.clear();
+  logBuffer.length = 0;
+  stopHeartbeatIfEmpty();
 }

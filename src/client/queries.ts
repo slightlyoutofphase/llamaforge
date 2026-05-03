@@ -44,14 +44,12 @@ export function useInfiniteChats(q?: string) {
   const query = q?.trim() ? q : undefined;
   return useInfiniteQuery({
     queryKey: queryKeys.chats(query),
-    queryFn: ({ pageParam = 0 }) => api.fetchChats(query, 150, pageParam),
+    queryFn: ({ pageParam = 0 }) => api.fetchChats(query, 300, pageParam),
     initialPageParam: 0,
+    staleTime: 30000, // 30 seconds of stability
     getNextPageParam: (lastPage, allPages) => {
-      // If the last page is empty, we are definitively at the end
       if (lastPage.length === 0) return undefined;
-      // If the last page has less than the requested limit, we are also at the end
-      if (lastPage.length < 150) return undefined;
-      // the next offset is the sum of items loaded so far
+      if (lastPage.length < 300) return undefined;
       return allPages.reduce((acc, page) => acc + page.length, 0);
     },
   });

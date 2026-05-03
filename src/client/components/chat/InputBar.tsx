@@ -8,12 +8,36 @@ import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 
+interface PendingAttachment {
+  id: string;
+  file: File;
+  previewUrl: string | null;
+}
+
+function createPreviewUrl(file: File): string | null {
+  return file.type.startsWith("image/") ? URL.createObjectURL(file) : null;
+}
+
+function revokePreviewUrl(previewUrl: string | null) {
+  if (previewUrl) {
+    URL.revokeObjectURL(previewUrl);
+  }
+}
+
+async function cloneFile(file: File): Promise<File> {
+  const buffer = await file.arrayBuffer();
+  return new File([buffer], file.name, {
+    type: file.type,
+    lastModified: file.lastModified,
+  });
+}
+
 /**
  * Properties for the InputBar component.
  */
 interface InputBarProps {
   /** Callback fired when the user submits a message and attachments. */
-  onSend: (content: string, files: File[]) => void;
+  onSend: (content: string, files: File[]) => void | Promise<void>;
   /** Whether the model is currently generating a response. */
   isGenerating: boolean;
   /** Whether a chat session is currently active and accepts messages. */
@@ -29,9 +53,22 @@ interface InputBarProps {
  * @returns The rendered React element.
  */
 export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarProps) {
-  const [files, setFiles] = useState<{ id: string; file: File }[]>([]);
+  const [files, setFiles] = useState<PendingAttachment[]>([]);
   const [inputContent, setInputContent] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const filesRef = useRef<PendingAttachment[]>([]);
+
+  useEffect(() => {
+    filesRef.current = files;
+  }, [files]);
+
+  useEffect(() => {
+    return () => {
+      for (const file of filesRef.current) {
+        revokePreviewUrl(file.previewUrl);
+      }
+    };
+  }, []);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: we want to trigger this when inputContent changes
   useEffect(() => {
@@ -42,7 +79,11 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
   }, [inputContent]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    const newItems = acceptedFiles.map((f) => ({ id: crypto.randomUUID(), file: f }));
+    const newItems = acceptedFiles.map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      previewUrl: createPreviewUrl(file),
+    }));
     setFiles((prev) => [...prev, ...newItems]);
   }, []);
 
@@ -59,15 +100,17 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     },
   });
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if ((!inputContent.trim() && files.length === 0) || isGenerating) return;
 
-    // We pass budgets as an array corresponding to the files array to ensure NO collisions
-    onSend(
-      inputContent,
-      files.map((f) => f.file),
-    );
+    const pendingFiles = [...files];
+    const filesToSend = await Promise.all(pendingFiles.map(({ file }) => cloneFile(file)));
 
+    await Promise.resolve(onSend(inputContent, filesToSend));
+
+    for (const file of pendingFiles) {
+      revokePreviewUrl(file.previewUrl);
+    }
     setInputContent("");
     setFiles([]);
   };
@@ -97,16 +140,12 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
 
       {files.length > 0 && (
         <div className="flex flex-wrap gap-2 p-3 pb-0 max-h-32 overflow-y-auto">
-          {files.map(({ id, file }) => (
+          {files.map(({ id, file, previewUrl }) => (
             <div
               key={id}
               className="flex items-center gap-2 bg-[var(--color-bg)] border border-[var(--color-border)] px-2 py-1.5 rounded-lg text-sm group">
-              {file.type.startsWith("image/") ? (
-                <img
-                  src={URL.createObjectURL(file)}
-                  alt={file.name}
-                  className="h-8 w-8 rounded object-cover"
-                />
+              {previewUrl ? (
+                <img src={previewUrl} alt={file.name} className="h-8 w-8 rounded object-cover" />
               ) : (
                 <Paperclip size={14} />
               )}
@@ -114,7 +153,17 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
               <button
                 type="button"
                 onClick={() => {
-                  setFiles((f) => f.filter((item) => item.id !== id));
+                  setFiles((currentFiles) => {
+                    const nextFiles: PendingAttachment[] = [];
+                    for (const item of currentFiles) {
+                      if (item.id === id) {
+                        revokePreviewUrl(item.previewUrl);
+                        continue;
+                      }
+                      nextFiles.push(item);
+                    }
+                    return nextFiles;
+                  });
                 }}
                 className="text-[var(--color-text-muted)] hover:bg-[var(--color-surface-elevated)] p-0.5 rounded opacity-0 group-hover:opacity-100 transition-opacity">
                 <X size={14} />

@@ -13,6 +13,34 @@ import { defineConfig, loadEnv } from "vite";
  */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, ".", "");
+
+  const manualChunks = (id: string) => {
+    if (!id.includes("node_modules")) return undefined;
+    if (
+      id.includes("@uiw/react-codemirror") ||
+      id.includes("@codemirror") ||
+      id.includes("codemirror")
+    ) {
+      return "codemirror";
+    }
+    if (
+      id.includes("react-markdown") ||
+      id.includes("remark-") ||
+      id.includes("rehype-") ||
+      id.includes("highlight.js") ||
+      id.includes("katex")
+    ) {
+      return "markdown";
+    }
+    if (id.includes("pdfjs-dist")) {
+      return "pdfjs";
+    }
+    if (id.includes("@tanstack")) {
+      return "tanstack";
+    }
+    return "vendor";
+  };
+
   return {
     plugins: [react(), tailwindcss()],
     define: {
@@ -27,6 +55,11 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: "dist/client",
       emptyOutDir: true,
+      rollupOptions: {
+        output: {
+          manualChunks,
+        },
+      },
     },
     server: {
       host: "0.0.0.0",
