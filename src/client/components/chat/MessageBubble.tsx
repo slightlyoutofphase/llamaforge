@@ -4,8 +4,8 @@
  * Handles markdown rendering, tool call cards, thinking blocks, and message action toolbars.
  */
 
-import type { ChatMessage } from "../shared/types";
-import { parseToolCallsJson } from "@shared/toolCalls.js";
+import type { ChatMessage } from "../../../shared/types";
+import { parseToolCallsJson } from "../../../shared/toolCalls";
 import { Check, FileText, X } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";

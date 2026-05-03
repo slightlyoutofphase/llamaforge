@@ -5,7 +5,7 @@
 
 import os from "node:os";
 import { join } from "node:path";
-import type { AppSettings } from "../shared/types";
+import type { AppSettings } from "../../shared/types";
 import { getDb, getDbGeneration } from "./db";
 
 const DEFAULT_SETTINGS: AppSettings = {

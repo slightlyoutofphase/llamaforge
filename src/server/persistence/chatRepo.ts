@@ -11,8 +11,8 @@ import type {
   ChatSession,
   GgufDisplayMetadata,
   MessageMetrics,
-} from "../shared/types";
-import { sanitizeToolCallsJson } from "@shared/toolCalls.js";
+} from "../../shared/types";
+import { sanitizeToolCallsJson } from "../../shared/toolCalls";
 import { logError, logWarn } from "../logger";
 import { getDb } from "./db";
 

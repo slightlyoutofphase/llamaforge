@@ -5,7 +5,7 @@
  */
 
 import { markdown } from "@codemirror/lang-markdown";
-import type { LoadPreset, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
+import type { LoadPreset, ModelLoadConfig, ThinkingTagConfig } from "../../../shared/types";
 import CodeMirror from "@uiw/react-codemirror";
 import { ChevronDown, ChevronRight, Copy, Plus, Save, Trash2, X, Zap } from "lucide-react";
 import type React from "react";

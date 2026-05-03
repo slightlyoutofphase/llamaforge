@@ -3,7 +3,7 @@
  * A hardware-aware optimization dialogue that calculates and applies optimal inference settings.
  */
 
-import type { ModelLoadConfig } from "../shared/types";
+import type { ModelLoadConfig } from "../../../shared/types";
 import { AlertCircle, Check, Cpu, Loader2, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useOptimizeHardware } from "../../queries";

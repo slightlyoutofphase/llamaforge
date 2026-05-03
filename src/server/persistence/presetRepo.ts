@@ -3,7 +3,7 @@
  * Preset repository — CRUD operations for load, inference, and system presets.
  */
 
-import type { InferencePreset, LoadPreset, SystemPromptPreset } from "../shared/types";
+import type { InferencePreset, LoadPreset, SystemPromptPreset } from "../../shared/types";
 import { detectThinkingConfig } from "../chatTemplateEngine";
 import { logWarn } from "../logger";
 import { generateGrammarFromSchema } from "../tools";

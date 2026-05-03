@@ -5,7 +5,7 @@
  */
 
 import type { ChatMessage, MessageMetrics } from "../shared/types";
-import { parseToolCallsJson } from "@shared/toolCalls.js";
+import { parseToolCallsJson } from "../shared/toolCalls";
 import { triggerAutoname } from "./autoname";
 import { detectThinkingConfig, parseThinkTags } from "./chatTemplateEngine";
 import { getActiveThinkingTagOverride, getServerStatus } from "./llamaServer";

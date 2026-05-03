@@ -3,7 +3,7 @@
  * Provides the model library panel for browsing and loading GGUF models.
  */
 
-import type { LoadModelRequest, LoadPreset } from "../shared/types";
+import type { LoadModelRequest, LoadPreset } from "../../../shared/types";
 import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import {

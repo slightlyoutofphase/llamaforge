@@ -4,7 +4,7 @@
  */
 
 import { json } from "@codemirror/lang-json";
-import type { InferencePreset } from "../shared/types";
+import type { InferencePreset } from "../../../shared/types";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
