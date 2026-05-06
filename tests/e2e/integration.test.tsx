@@ -3,13 +3,15 @@
  * Integration tests covering full client-side user flows.
  */
 
-import { beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render } from "@testing-library/react";
 import * as React from "react";
 import App from "../../src/client/App";
 
 const queryClient = new QueryClient();
+const originalFetch = global.fetch;
+const originalWebSocket = global.WebSocket;
 
 // Mock tanstack router so we don't need full Provider setup that fails in happy-dom headless
 mock.module("@tanstack/react-router", () => ({
@@ -39,6 +41,11 @@ describe("E2E Integration", () => {
       close() {}
       send() {}
     } as any;
+  });
+
+  afterAll(() => {
+    global.fetch = originalFetch;
+    global.WebSocket = originalWebSocket;
   });
 
   it("mounts the root component directly and verifies it renders without errors", async () => {

@@ -35,12 +35,12 @@ describe("server index startup", () => {
   let originalNodeEnv: string | undefined;
 
   beforeEach(() => {
-    originalNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "production";
+    originalNodeEnv = Bun.env.NODE_ENV;
+    Bun.env.NODE_ENV = "production";
   });
 
   afterEach(() => {
-    process.env.NODE_ENV = originalNodeEnv;
+    Bun.env.NODE_ENV = originalNodeEnv;
     mock.restore();
   });
 
@@ -60,6 +60,66 @@ describe("server index startup", () => {
     const server = await startServer({ scheduleRecurringCleanup: false });
 
     expect(server.port).toBe(14001);
+    server.stop();
+  });
+
+  it("canonicalizes autoload mmProjPath from the scanned model entry", async () => {
+    const autoloadSettings: AppSettings = {
+      ...productionSettings,
+      autoloadLastModel: true,
+      llamaServerPath: "/usr/bin/llama-server",
+      lastLoadConfig: {
+        modelPath: "/models/multimodal.gguf",
+        mmProjPath: "/models/stale.mmproj.gguf",
+        contextSize: 4096,
+        contextShift: false,
+        gpuLayers: 0,
+        threads: 4,
+        batchSize: 512,
+        microBatchSize: 128,
+        ropeScaling: "none",
+        ropeFreqBase: 10000,
+        ropeFreqScale: 1,
+        kvCacheTypeK: "f16",
+        kvCacheTypeV: "f16",
+        mlock: false,
+        noMmap: false,
+        contBatching: true,
+        flashAttn: "off",
+        swaFull: false,
+        noKvOffload: false,
+        cacheReuse: 0,
+      },
+    };
+
+    spyOn(dbModule, "initDb").mockResolvedValue();
+    spyOn(settingsRepoModule, "loadSettings").mockResolvedValue(autoloadSettings);
+    spyOn(modelScannerModule, "scanModels").mockResolvedValue([
+      {
+        publisher: "Test Publisher",
+        modelName: "Multimodal Model",
+        primaryPath: "/models/multimodal.gguf",
+        mmProjPath: "/models/multimodal.mmproj.gguf",
+      },
+    ]);
+    spyOn(modelScannerModule, "populateMetadata").mockImplementation(
+      async (model: ModelEntry) => model,
+    );
+    spyOn(presetRepoModule, "ensureModelDefaultPresets").mockResolvedValue();
+    spyOn(cleanupModule, "cleanupOrphanedAttachments").mockResolvedValue();
+    const loadSpy = spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+    spyOn(loggerModule, "logError").mockImplementation(() => {});
+    spyOn(loggerModule, "logInfo").mockImplementation(() => {});
+
+    const server = await startServer({ scheduleRecurringCleanup: false });
+
+    expect(loadSpy).toHaveBeenCalledTimes(1);
+    expect(loadSpy.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        modelPath: "/models/multimodal.gguf",
+        mmProjPath: "/models/multimodal.mmproj.gguf",
+      }),
+    );
     server.stop();
   });
 });

@@ -4,7 +4,6 @@
  * Uses platform-specific system calls (nvidia-smi, sysctl, system_profiler) to determine resources.
  */
 
-import fs from "node:fs/promises";
 import os from "node:os";
 import type { GpuInfo, HardwareInfo } from "../shared/types";
 import { spawn } from "bun";
@@ -63,7 +62,7 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
   let totalRamBytes = os.totalmem();
   try {
     if (process.platform === "linux") {
-      const meminfo = await fs.readFile("/proc/meminfo", "utf-8");
+      const meminfo = await Bun.file("/proc/meminfo").text();
       const match = meminfo.match(/MemTotal:\s+(\d+)\s+kB/);
       if (match?.[1]) {
         totalRamBytes = parseInt(match[1], 10) * 1024;

@@ -57,8 +57,8 @@ export async function cleanupOrphanedAttachments() {
                 const relPath = ["attachments", chatDir.name, msgDir.name, file.name].join("/");
                 if (!referencedSet.has(relPath)) {
                   logInfo(`Cleaning up orphaned attachment: ${relPath}`);
-                  await fs
-                    .unlink(path.join(msgDirPath, file.name))
+                  await Bun.file(path.join(msgDirPath, file.name))
+                    .delete()
                     .catch((e) => logError(`Failed to unlink orphaned file ${relPath}:`, e));
                 }
               }),

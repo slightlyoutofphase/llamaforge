@@ -92,9 +92,17 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
   // Autoload last model if enabled
   if (settings.autoloadLastModel && settings.lastLoadConfig && settings.llamaServerPath) {
     try {
-      logInfo(`Autoloading last model: ${settings.lastLoadConfig.modelPath}`);
+      const autoloadConfig = { ...settings.lastLoadConfig };
+      const selectedModel = rawModels.find(
+        (model) => model.primaryPath === settings.lastLoadConfig?.modelPath,
+      );
+      if (selectedModel?.mmProjPath) {
+        autoloadConfig.mmProjPath = selectedModel.mmProjPath;
+      }
+
+      logInfo(`Autoloading last model: ${autoloadConfig.modelPath}`);
       await loadModel(
-        settings.lastLoadConfig,
+        autoloadConfig,
         settings.llamaServerPath,
         settings.llamaPortRangeMin,
         settings.llamaPortRangeMax,
@@ -109,7 +117,7 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
     }
   }
 
-  const isProd = process.env.NODE_ENV === "production" || process.argv[1]?.includes("dist");
+  const isProd = process.env.NODE_ENV === "production" || Bun.argv[1]?.includes("dist");
   const port = resolveServerPort(settings);
   const hostname = "127.0.0.1";
 

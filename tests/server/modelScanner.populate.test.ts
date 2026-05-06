@@ -3,37 +3,13 @@
  * Tests for model scanner metadata population and cache integration.
  */
 
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import * as ggufReaderModule from "../../src/server/ggufReader";
 import { cachedGgufMetadata } from "../../src/server/persistence/chatRepo";
 import { initDb } from "../../src/server/persistence/db";
-
-mock.module("../../src/server/ggufReader", () => ({
-  parseGgufMetadata: async (_filePath: string) => ({
-    architecture: "gemma4",
-    name: "Test Model",
-    fileSizeBytes: 5_368_709_120,
-    contextLength: 8192,
-    embeddingLength: 0,
-    attentionHeadCount: 32,
-    attentionHeadCountKv: 32,
-    blockCount: 48,
-    feedForwardLength: 8192,
-    quantType: "q4_0",
-    hasVisionEncoder: true,
-    hasAudioEncoder: false,
-    defaultTemperature: 0.8,
-    defaultTopK: 40,
-    defaultTopP: 0.95,
-    defaultMinP: 0.05,
-    defaultRepeatPenalty: 1.1,
-    chatTemplate: undefined,
-    bosToken: undefined,
-    eosToken: undefined,
-  }),
-}));
 
 import { populateMetadata } from "../../src/server/modelScanner";
 
@@ -42,13 +18,37 @@ describe("modelScanner metadata population", () => {
   let modelPath: string;
 
   beforeAll(async () => {
+    spyOn(ggufReaderModule, "parseGgufMetadata").mockImplementation(async (_filePath: string) => ({
+      architecture: "gemma4",
+      name: "Test Model",
+      fileSizeBytes: 5_368_709_120,
+      contextLength: 8192,
+      embeddingLength: 0,
+      attentionHeadCount: 32,
+      attentionHeadCountKv: 32,
+      blockCount: 48,
+      feedForwardLength: 8192,
+      quantType: "q4_0",
+      hasVisionEncoder: true,
+      hasAudioEncoder: false,
+      defaultTemperature: 0.8,
+      defaultTopK: 40,
+      defaultTopP: 0.95,
+      defaultMinP: 0.05,
+      defaultRepeatPenalty: 1.1,
+      chatTemplate: undefined,
+      bosToken: undefined,
+      eosToken: undefined,
+    }));
+
     await initDb(":memory:");
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "llamaforge-modelmeta-"));
     modelPath = path.join(tmpDir, "test-model.gguf");
-    await fs.writeFile(modelPath, "dummy content");
+    await Bun.write(modelPath, "dummy content");
   });
 
   afterAll(async () => {
+    mock.restore();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 

@@ -4,13 +4,10 @@
  */
 
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type { Attachment, GgufDisplayMetadata } from "../shared/types";
 import { logInfo, logWarn } from "./logger";
-import { getDb } from "./persistence/db";
-
-const APP_ROOT = path.join(os.homedir(), ".llamaforge");
+import { getAppDataDir, getDb, resolveAppDataPath } from "./persistence/db";
 const MAX_EXTRACTED_TEXT_CHARS_PER_ATTACHMENT = 12_000;
 const MAX_EXTRACTED_TEXT_CHARS_PER_MESSAGE = 24_000;
 const ATTACHMENT_TEXT_BUDGET_EXHAUSTED_NOTICE =
@@ -55,8 +52,9 @@ function resolveStoredAttachmentPath(relativePath: string): string | null {
   const normalized = normalizeStoredAttachmentPath(relativePath);
   if (!normalized) return null;
 
-  const absPath = path.join(APP_ROOT, ...normalized.split("/"));
-  const relative = path.relative(APP_ROOT, absPath);
+  const appRoot = getAppDataDir();
+  const absPath = path.join(appRoot, ...normalized.split("/"));
+  const relative = path.relative(appRoot, absPath);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
   return absPath;
 }
@@ -217,19 +215,16 @@ export async function processUpload(
   mimeType: string,
   buffer: ArrayBuffer,
 ): Promise<ProcessedAttachment> {
-  const appData = path.join(os.homedir(), ".llamaforge", "attachments", chatId, messageId);
+  const appData = resolveAppDataPath("attachments", chatId, messageId);
   await fs.mkdir(appData, { recursive: true });
 
   const ext = path.extname(fileName) || "";
   const safeName = Bun.randomUUIDv7() + ext;
   const filePath = path.join(appData, safeName);
 
-  await Bun.write(filePath, buffer);
+  await fs.writeFile(filePath, Buffer.from(buffer));
 
-  const relPath = path
-    .relative(path.join(os.homedir(), ".llamaforge"), filePath)
-    .split(path.sep)
-    .join("/");
+  const relPath = path.relative(getAppDataDir(), filePath).split(path.sep).join("/");
 
   const attachment: ProcessedAttachment = {
     id: Bun.randomUUIDv7(),

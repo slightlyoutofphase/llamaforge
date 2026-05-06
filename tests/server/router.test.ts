@@ -8,6 +8,7 @@ import * as llamaServerModule from "../../src/server/llamaServer";
 import { createChat } from "../../src/server/persistence/chatRepo";
 import { initDb } from "../../src/server/persistence/db";
 import { createInferencePreset } from "../../src/server/persistence/presetRepo";
+import { saveSettings } from "../../src/server/persistence/settingsRepo";
 import { __setHardwareProbe } from "../../src/server/router";
 
 let createRouter: typeof import("../../src/server/router").createRouter;
@@ -42,15 +43,20 @@ describe("router", () => {
   });
 
   it("production GET document routes fall back to index.html", async () => {
-    const previousNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "production";
-    const fileSpy = spyOn(Bun, "file").mockImplementation((filePath: string | URL) => {
-      const pathText = filePath.toString().replace(/\\/g, "/");
-      const exists = pathText.endsWith("/dist/client/index.html");
-      return Object.assign(new Blob(["<html><body>ok</body></html>"], { type: "text/html" }), {
-        exists: async () => exists,
-      }) as BunFile;
-    });
+    const previousNodeEnv = Bun.env.NODE_ENV;
+    Bun.env.NODE_ENV = "production";
+    const fileSpy = spyOn(Bun, "file").mockImplementation(
+      (
+        filePath: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number,
+        _options?: BlobPropertyBag,
+      ) => {
+        const pathText = filePath.toString().replace(/\\/g, "/");
+        const exists = pathText.endsWith("/dist/client/index.html");
+        return Object.assign(new Blob(["<html><body>ok</body></html>"], { type: "text/html" }), {
+          exists: async () => exists,
+        }) as ReturnType<typeof Bun.file>;
+      },
+    );
 
     try {
       const router = createRouter(settings);
@@ -63,13 +69,13 @@ describe("router", () => {
       expect(await res?.text()).toContain("ok");
     } finally {
       fileSpy.mockRestore();
-      process.env.NODE_ENV = previousNodeEnv;
+      Bun.env.NODE_ENV = previousNodeEnv;
     }
   });
 
   it("production missing asset requests return 404 instead of index.html", async () => {
-    const previousNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "production";
+    const previousNodeEnv = Bun.env.NODE_ENV;
+    Bun.env.NODE_ENV = "production";
 
     try {
       const router = createRouter(settings);
@@ -79,13 +85,13 @@ describe("router", () => {
       expect(res?.status).toBe(404);
       expect(await res?.text()).toBe("Not Found");
     } finally {
-      process.env.NODE_ENV = previousNodeEnv;
+      Bun.env.NODE_ENV = previousNodeEnv;
     }
   });
 
   it("production non-GET SPA route requests return 404", async () => {
-    const previousNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "production";
+    const previousNodeEnv = Bun.env.NODE_ENV;
+    Bun.env.NODE_ENV = "production";
 
     try {
       const router = createRouter(settings);
@@ -98,7 +104,7 @@ describe("router", () => {
       expect(res?.status).toBe(404);
       expect(await res?.text()).toBe("Not Found");
     } finally {
-      process.env.NODE_ENV = previousNodeEnv;
+      Bun.env.NODE_ENV = previousNodeEnv;
     }
   });
 
@@ -109,6 +115,44 @@ describe("router", () => {
     expect(res?.status).toBe(200);
     const body = await res?.json();
     expect(body).toBeDefined();
+  });
+
+  it("JSON API responses close the connection for direct browser clients", async () => {
+    const router = createRouter(settings);
+
+    const settingsRes = await router.fetch(new Request("http://localhost/api/settings"), {});
+    const chatRes = await router.fetch(
+      new Request("http://localhost/api/chats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Connection Close Test" }),
+      }),
+      {},
+    );
+
+    expect(settingsRes?.status).toBe(200);
+    expect(chatRes?.status).toBe(200);
+    expect(settingsRes?.headers.get("connection")).toBe("close");
+    expect(chatRes?.headers.get("connection")).toBe("close");
+  });
+
+  it("POST /api/chats/:id/branch-and-edit returns a JSON 404 for missing branch messages", async () => {
+    const router = createRouter(settings);
+    const chat = await createChat("Branch Edit Error");
+
+    const res = await router.fetch(
+      new Request(`http://localhost/api/chats/${chat.id}/branch-and-edit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messageId: "missing-message", newContent: "edited" }),
+      }),
+      {},
+    );
+
+    expect(res?.status).toBe(404);
+    expect(res?.headers.get("content-type")).toContain("application/json");
+    const body = (await res?.json()) as { error?: string };
+    expect(body.error).toBe("Message not found in chat");
   });
 
   it("PUT /api/settings rejects invalid numeric settings payloads", async () => {
@@ -373,7 +417,35 @@ describe("router", () => {
   });
 
   it("GET /api/presets/inference returns presets", async () => {
-    await createInferencePreset({ name: "Preset A", config: {} });
+    await createInferencePreset({
+      id: "preset-a",
+      name: "Preset A",
+      isDefault: false,
+      temperature: 0.8,
+      topK: 40,
+      topP: 0.95,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      repeatLastN: 64,
+      typicalP: 1.0,
+      presencePenalty: 0.0,
+      frequencyPenalty: 0.0,
+      mirostat: 0,
+      mirostatTau: 5.0,
+      mirostatEta: 0.1,
+      dynaTempRange: 0.0,
+      dynaTempExponent: 1.0,
+      seed: -1,
+      maxTokens: -1,
+      stopStrings: [],
+      toolCallsEnabled: false,
+      tools: [],
+      structuredOutput: undefined,
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
     const router = createRouter(settings);
     const req = new Request("http://localhost/api/presets/inference");
     const res = await router.fetch(req, {});
@@ -401,6 +473,75 @@ describe("router", () => {
     expect(res?.status).toBe(200);
     const body: any = await res?.json();
     expect(body).toBeDefined();
+  });
+
+  it("POST /api/server/load prefers the scanned model mmProjPath over stale request data", async () => {
+    await saveSettings({
+      modelsPath: settings.modelsPath,
+      llamaServerPath: settings.llamaServerPath,
+      llamaPortRangeMin: settings.llamaPortRangeMin,
+      llamaPortRangeMax: settings.llamaPortRangeMax,
+    });
+
+    const router = createRouter(settings);
+    const modelScannerModule = await import("../../src/server/modelScanner.ts");
+    const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
+
+    const scanSpy = spyOn(modelScannerModule, "scanModels").mockResolvedValue([
+      {
+        publisher: "Test Publisher",
+        modelName: "Multimodal Model",
+        primaryPath: "/tmp/models/multimodal.gguf",
+        mmProjPath: "/tmp/models/multimodal.mmproj.gguf",
+      },
+    ]);
+    const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(null);
+    const loadSpy = spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+
+    try {
+      const res = await router.fetch(
+        new Request("http://localhost/api/server/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            modelPath: "/tmp/models/multimodal.gguf",
+            mmProjPath: "/tmp/models/stale.mmproj.gguf",
+            contextSize: 4096,
+            contextShift: false,
+            gpuLayers: 0,
+            threads: 4,
+            batchSize: 512,
+            microBatchSize: 128,
+            ropeScaling: "none",
+            ropeFreqBase: 10000,
+            ropeFreqScale: 1,
+            kvCacheTypeK: "f16",
+            kvCacheTypeV: "f16",
+            mlock: false,
+            noMmap: false,
+            contBatching: true,
+            flashAttn: "off",
+            swaFull: false,
+            noKvOffload: false,
+            cacheReuse: 0,
+          }),
+        }),
+        {},
+      );
+
+      expect(res?.status).toBe(200);
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+      expect(loadSpy.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          modelPath: "/tmp/models/multimodal.gguf",
+          mmProjPath: "/tmp/models/multimodal.mmproj.gguf",
+        }),
+      );
+    } finally {
+      scanSpy.mockRestore();
+      metadataSpy.mockRestore();
+      loadSpy.mockRestore();
+    }
   });
 
   it("POST /api/server/unload responds before teardown finishes", async () => {

@@ -8,6 +8,7 @@ import { act, cleanup } from "@testing-library/react";
 
 let useAppStore: typeof import("../../src/client/store").useAppStore;
 let useUiStore: typeof import("../../src/client/uiStore").useUiStore;
+const nativeFetch = globalThis.fetch;
 
 describe("stores logic", () => {
   beforeEach(async () => {
@@ -22,6 +23,7 @@ describe("stores logic", () => {
   });
 
   afterEach(() => {
+    globalThis.fetch = nativeFetch;
     cleanup();
   });
 
@@ -128,7 +130,11 @@ describe("stores logic", () => {
     expect(capturedInit?.body).toBeInstanceOf(FormData);
     const body = capturedInit?.body as FormData;
     expect(body.get("content")).toBe("Hello world");
-    expect(body.getAll("file")[0]).toBe(file);
+    const uploadedFile = body.getAll("file")[0];
+    expect(uploadedFile).toBeInstanceOf(File);
+    expect((uploadedFile as File).name).toBe(file.name);
+    expect((uploadedFile as File).size).toBe(file.size);
+    expect(await (uploadedFile as File).text()).toBe("hello");
 
     globalThis.fetch = originalFetch;
   });
@@ -442,6 +448,79 @@ describe("stores logic", () => {
     expect(state.isWaitingForToolApproval).toBe(false);
     expect(state.currentGenerationId).toBeNull();
     expect(state.shouldReconnect).toBe(false);
+  });
+
+  it("replaces optimistic user messages when the server confirms the persisted id", () => {
+    const originalWebSocket = globalThis.WebSocket;
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 3;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+
+      send() {}
+
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [
+          {
+            id: "temp-123",
+            chatId: "chat-1",
+            role: "user",
+            content: "Hello there",
+            rawContent: "Hello there",
+            position: 0,
+            createdAt: 1,
+          },
+        ],
+        isGenerating: true,
+      });
+      useAppStore.getState().connectWs();
+    });
+
+    act(() => {
+      MockWebSocket.instance?.onopen?.();
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "message",
+          chatId: "chat-1",
+          message: {
+            id: "msg-1",
+            chatId: "chat-1",
+            role: "user",
+            content: "Hello there",
+            rawContent: "Hello there",
+            position: 0,
+            createdAt: 1,
+          },
+        }),
+      });
+    });
+
+    const state = useAppStore.getState();
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0]?.id).toBe("msg-1");
+    expect(state.messages[0]?.role).toBe("user");
+
+    globalThis.WebSocket = originalWebSocket;
   });
 
   it("tracks tool approval pending separately from token streaming", () => {

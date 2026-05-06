@@ -3,7 +3,6 @@
  * Basic router for the backend API.
  */
 
-import os from "node:os";
 import path from "node:path";
 import type {
   AppSettings,
@@ -17,6 +16,7 @@ import { getHardwareInfo } from "./hardwareProbe";
 import { getServerStatus, loadModel, requestUnloadModel } from "./llamaServer";
 import { logError } from "./logger";
 import { populateMetadata, scanModels } from "./modelScanner";
+import { getAppDataDir } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
 import { addConnection, recordPong, removeConnection } from "./wsHub";
 
@@ -49,7 +49,10 @@ export function __setHardwareProbe(override: { getHardwareInfo: typeof getHardwa
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Connection: "close",
+    },
   });
 }
 
@@ -188,7 +191,7 @@ function normalizeAttachmentPath(attachPath: string): string | null {
   const normalized = path.normalize(attachPath);
   if (normalized.startsWith(`..${path.sep}`) || normalized === "..") return null;
 
-  const root = path.join(os.homedir(), ".llamaforge");
+  const root = getAppDataDir();
   const absPath = path.join(root, normalized);
   const relative = path.relative(root, absPath);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
@@ -319,7 +322,7 @@ export function createRouter(_settings: AppSettings) {
         return new Response("Upgrade failed", { status: 400 });
       }
 
-      const isProd = process.env.NODE_ENV === "production" || process.argv[1]?.includes("dist");
+      const isProd = process.env.NODE_ENV === "production" || Bun.argv[1]?.includes("dist");
       if (isProd && !url.pathname.startsWith("/api/") && !url.pathname.startsWith("/health")) {
         if (!isStaticMethod(req.method)) {
           return new Response("Not Found", { status: 404 });
@@ -351,20 +354,14 @@ export function createRouter(_settings: AppSettings) {
         const currentSettings = await loadSettings();
         const models = await getModelsSnapshot(currentSettings.modelsPath);
 
-        return new Response(JSON.stringify(models), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse(models);
       }
 
       if (req.method === "POST" && url.pathname === "/api/models/rescan") {
         const currentSettings = await loadSettings();
         const models = await getModelsSnapshot(currentSettings.modelsPath, true);
 
-        return new Response(JSON.stringify(models), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse(models);
       }
 
       if (req.method === "POST" && url.pathname === "/api/server/load") {
@@ -418,6 +415,11 @@ export function createRouter(_settings: AppSettings) {
             ...(requestBody as ModelLoadConfig),
             modelPath,
           };
+          const models = await getModelsSnapshot(curSettings.modelsPath);
+          const selectedModel = models.find((model) => model.primaryPath === modelPath);
+          if (selectedModel?.mmProjPath) {
+            loadConfig.mmProjPath = selectedModel.mmProjPath;
+          }
           const port = await loadModel(
             loadConfig,
             curSettings.llamaServerPath,
@@ -436,20 +438,16 @@ export function createRouter(_settings: AppSettings) {
         void requestUnloadModel().catch((err: unknown) => {
           logError("Background unload failed:", err);
         });
-        return new Response(JSON.stringify({ success: true }));
+        return jsonResponse({ success: true });
       }
 
       if (req.method === "GET" && url.pathname === "/api/server/status") {
-        return new Response(JSON.stringify(getServerStatus()), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse(getServerStatus());
       }
 
       if (req.method === "GET" && url.pathname === "/api/hardware") {
         const hw = await getHardwareInfoImpl();
-        return new Response(JSON.stringify(hw), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse(hw);
       }
 
       if (req.method === "POST" && url.pathname === "/api/hardware/optimize") {
@@ -462,14 +460,12 @@ export function createRouter(_settings: AppSettings) {
         if (!metadata) return new Response("Model metadata not found", { status: 404 });
 
         const optimized = optimizeLoadConfig(hw, metadata);
-        return new Response(JSON.stringify(optimized), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse(optimized);
       }
 
       if (req.method === "GET" && url.pathname === "/api/settings") {
         const s = await loadSettings();
-        return new Response(JSON.stringify(s), { headers: { "Content-Type": "application/json" } });
+        return jsonResponse(s);
       }
 
       if (req.method === "PUT" && url.pathname === "/api/settings") {
@@ -579,9 +575,7 @@ export function createRouter(_settings: AppSettings) {
           offset = parseInt(url.searchParams.get("offset") || "0", 10);
         }
         const chats = await getChats(q, limit, offset);
-        return new Response(JSON.stringify(chats), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse(chats);
       }
 
       // Chat CRUD
@@ -589,9 +583,7 @@ export function createRouter(_settings: AppSettings) {
       if (req.method === "POST" && url.pathname === "/api/chats") {
         const body: any = await req.json();
         const chat = await chatRepo.createChat(body.name, body.modelPath);
-        return new Response(JSON.stringify(chat), {
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse(chat);
       }
       if (url.pathname.startsWith("/api/chats/")) {
         const parts = url.pathname.split("/");
@@ -611,27 +603,23 @@ export function createRouter(_settings: AppSettings) {
               messageOffset > 0 ? messageOffset : undefined,
             );
             if (!chat) return new Response("Not Found", { status: 404 });
-            return new Response(JSON.stringify(chat), {
-              headers: { "Content-Type": "application/json" },
-            });
+            return jsonResponse(chat);
           }
           if (req.method === "PUT") {
             const body: any = await req.json();
             await chatRepo.updateChat(id, body);
-            return new Response(JSON.stringify({ success: true }));
+            return jsonResponse({ success: true });
           }
           if (req.method === "DELETE") {
             await chatRepo.deleteChat(id);
-            return new Response(JSON.stringify({ success: true }));
+            return jsonResponse({ success: true });
           }
         }
 
         if (parts.length === 5 && req.method === "GET" && parts[4] === "prompt-cache") {
           const { getPromptCacheStats } = await import("./promptCache");
           const stats = getPromptCacheStats(id);
-          return new Response(JSON.stringify(stats || { totalEvaluated: 0, totalCached: 0 }), {
-            headers: { "Content-Type": "application/json" },
-          });
+          return jsonResponse(stats || { totalEvaluated: 0, totalCached: 0 });
         }
 
         if (parts.length === 5 && req.method === "POST") {
@@ -682,9 +670,7 @@ export function createRouter(_settings: AppSettings) {
               attachments: [],
               isRegenerate: true,
             });
-            return new Response(JSON.stringify({ messageId }), {
-              headers: { "Content-Type": "application/json" },
-            });
+            return jsonResponse({ messageId });
           }
           if (action === "continue") {
             const { proxyCompletion } = await import("./streamProxy");
@@ -694,9 +680,7 @@ export function createRouter(_settings: AppSettings) {
               attachments: [],
               isContinue: true,
             });
-            return new Response(JSON.stringify({ messageId }), {
-              headers: { "Content-Type": "application/json" },
-            });
+            return jsonResponse({ messageId });
           }
           if (action === "branch-and-regenerate") {
             let body: any;
@@ -758,22 +742,32 @@ export function createRouter(_settings: AppSettings) {
             if (!requestedMessageId || !newContent || newContent.length === 0) {
               return badRequest("branch-and-edit requires a valid messageId and newContent.");
             }
-            const newId = await chatRepo.createBranch(id, requestedMessageId);
-            const newChat = await chatRepo.getChat(newId);
-            const newMsg = newChat?.messages?.at(-1);
+            try {
+              const newId = await chatRepo.createBranch(id, requestedMessageId);
+              const newChat = await chatRepo.getChat(newId);
+              const newMsg = newChat?.messages?.at(-1);
 
-            if (newMsg) {
+              if (!newMsg) {
+                throw new Error("Branched chat is missing its edited message.");
+              }
+
               await chatRepo.updateMessage(newMsg.id, newContent, newContent, undefined);
-            }
 
-            const { proxyCompletion } = await import("./streamProxy");
-            const generatedMessageId = await proxyCompletion({
-              chatId: newId,
-              content: "",
-              attachments: [],
-              isRegenerate: true, // it will regenerate acting from the newly updated last user message
-            });
-            return jsonResponse({ id: newId, messageId: generatedMessageId });
+              const { proxyCompletion } = await import("./streamProxy");
+              const generatedMessageId = await proxyCompletion({
+                chatId: newId,
+                content: "",
+                attachments: [],
+                isRegenerate: true, // it will regenerate acting from the newly updated last user message
+              });
+              return jsonResponse({ id: newId, messageId: generatedMessageId });
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : "Failed to branch and edit chat.";
+              const status =
+                message === "Chat not found" || message === "Message not found in chat" ? 404 : 500;
+              return jsonResponse({ error: message }, status);
+            }
           }
           if (action === "branch-and-continue") {
             let body: any;
@@ -824,11 +818,11 @@ export function createRouter(_settings: AppSettings) {
           if (req.method === "PUT") {
             const body: any = await req.json();
             await chatRepo.updateMessage(msgId, body.content, body.content, body.thinkingContent);
-            return new Response(JSON.stringify({ success: true }));
+            return jsonResponse({ success: true });
           }
           if (req.method === "DELETE") {
             await chatRepo.deleteMessageAndSubsequent(id, msgId);
-            return new Response(JSON.stringify({ success: true }));
+            return jsonResponse({ success: true });
           }
         }
       }
@@ -860,18 +854,9 @@ export function createRouter(_settings: AppSettings) {
         const id = parts[4] as string;
 
         if (parts.length === 4 && req.method === "GET") {
-          if (type === "load")
-            return new Response(JSON.stringify(await presetRepo.getLoadPresets()), {
-              headers: { "Content-Type": "application/json" },
-            });
-          if (type === "inference")
-            return new Response(JSON.stringify(await presetRepo.getInferencePresets()), {
-              headers: { "Content-Type": "application/json" },
-            });
-          if (type === "system")
-            return new Response(JSON.stringify(await presetRepo.getSystemPresets()), {
-              headers: { "Content-Type": "application/json" },
-            });
+          if (type === "load") return jsonResponse(await presetRepo.getLoadPresets());
+          if (type === "inference") return jsonResponse(await presetRepo.getInferencePresets());
+          if (type === "system") return jsonResponse(await presetRepo.getSystemPresets());
         }
 
         if (parts.length === 4 && req.method === "POST") {
@@ -887,15 +872,15 @@ export function createRouter(_settings: AppSettings) {
           }
           if (type === "load")
             await presetRepo.createLoadPreset(
-              body as unknown as import("@shared/types.js").LoadPreset,
+              body as unknown as import("../shared/types").LoadPreset,
             );
           if (type === "inference")
             await presetRepo.createInferencePreset(
-              body as unknown as import("@shared/types.js").InferencePreset,
+              body as unknown as import("../shared/types").InferencePreset,
             );
           if (type === "system")
             await presetRepo.createSystemPreset(
-              body as unknown as import("@shared/types.js").SystemPromptPreset,
+              body as unknown as import("../shared/types").SystemPromptPreset,
             );
           return jsonResponse({ success: true });
         }
@@ -920,7 +905,7 @@ export function createRouter(_settings: AppSettings) {
           if (type === "load") await presetRepo.deleteLoadPreset(id);
           if (type === "inference") await presetRepo.deleteInferencePreset(id);
           if (type === "system") await presetRepo.deleteSystemPreset(id);
-          return new Response(JSON.stringify({ success: true }));
+          return jsonResponse({ success: true });
         }
       }
 
@@ -929,7 +914,7 @@ export function createRouter(_settings: AppSettings) {
         const body: any = await req.json();
         const autoname = await import("./autoname");
         await autoname.triggerAutoname(body.chatId);
-        return new Response(JSON.stringify({ success: true }));
+        return jsonResponse({ success: true });
       }
 
       // Health check

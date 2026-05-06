@@ -8,7 +8,12 @@ import type { ChatMessage, MessageMetrics } from "../shared/types";
 import { parseToolCallsJson } from "../shared/toolCalls";
 import { triggerAutoname } from "./autoname";
 import { detectThinkingConfig, parseThinkTags } from "./chatTemplateEngine";
-import { getActiveThinkingTagOverride, getServerStatus } from "./llamaServer";
+import {
+  getActiveThinkingTagOverride,
+  getProc,
+  getRecentServerLogs,
+  getServerStatus,
+} from "./llamaServer";
 import { logDebug, logError, logInfo, logWarn } from "./logger";
 import {
   mergeExtractedAttachmentText,
@@ -117,6 +122,58 @@ function logStreamProxyError(context: string, err: unknown, details?: Record<str
     details ? JSON.stringify(details) : undefined,
     err instanceof Error ? err.stack || err.message : err,
   );
+}
+
+/**
+ * Captures the current llama-server process state so transport failures can be tied to
+ * an exited process or the latest server-side stderr/stdout lines.
+ *
+ * @returns Structured diagnostics describing the active model process at failure time.
+ */
+function getModelFailureContext(): {
+  serverStatus: ReturnType<typeof getServerStatus>["status"];
+  serverPort: number | null;
+  modelPath: string | null;
+  processExitCode: number | null;
+  recentServerLogs: string[];
+} {
+  const server = getServerStatus();
+  const proc = getProc();
+
+  return {
+    serverStatus: server.status,
+    serverPort: server.port ?? null,
+    modelPath: server.config?.modelPath ?? null,
+    processExitCode: proc?.exitCode ?? null,
+    recentServerLogs: getRecentServerLogs(20),
+  };
+}
+
+/**
+ * Formats a user-visible transport failure message with model-process context when available.
+ *
+ * @param err - Underlying transport error.
+ * @param failureContext - Captured llama-server process diagnostics.
+ * @returns Concise error text suitable for the websocket error frame.
+ */
+function formatTransportErrorMessage(
+  err: unknown,
+  failureContext: ReturnType<typeof getModelFailureContext>,
+): string {
+  const parts = [String(err)];
+
+  if (failureContext.processExitCode !== null) {
+    parts.push(`llama-server exited with code ${failureContext.processExitCode}.`);
+  } else if (failureContext.serverStatus !== "running") {
+    parts.push(`llama-server status is ${failureContext.serverStatus}.`);
+  }
+
+  const lastServerLog = failureContext.recentServerLogs.at(-1);
+  if (lastServerLog) {
+    parts.push(`Last server log: ${lastServerLog}`);
+  }
+
+  return parts.join(" ");
 }
 
 /**
@@ -347,6 +404,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         dbContent,
         userMessageId,
       );
+
+      // Reconcile optimistic client-side temp IDs with the persisted user message ID.
+      broadcast({ type: "message", chatId, message: userMsg });
     } else {
       const userMsgFinal: ChatMessage = {
         id: userMessageId,
@@ -360,6 +420,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       };
       rawMessages.push(userMsgFinal);
       await addMessage(userMsgFinal);
+      broadcast({ type: "message", chatId, message: userMsgFinal });
     }
   }
 
@@ -1056,11 +1117,13 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       clearTimeout(inactivityTimer);
       cancelPendingApprovals(chatId);
       activeGenerations.delete(generationId);
+      const failureContext = getModelFailureContext();
       logStreamProxyError("fetch-catch", err, {
         endpoint,
         chatId,
         assistantMessageId,
         generationId,
+        ...failureContext,
       });
       cleanupEmptyAssistantMessage();
       broadcast({
@@ -1068,7 +1131,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         chatId,
         messageId: assistantMessageId,
         generationId,
-        message: String(err),
+        message: formatTransportErrorMessage(err, failureContext),
       });
     });
 

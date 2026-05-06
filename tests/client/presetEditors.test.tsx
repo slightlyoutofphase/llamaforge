@@ -3,22 +3,18 @@
  * Tests for preset editor components and their form interactions.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
+import { queryKeys } from "../../src/client/queries";
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
 
 let InferencePresetEditor: typeof import("../../src/client/components/preset/InferencePresetEditor").InferencePresetEditor;
 let LoadPresetEditor: typeof import("../../src/client/components/preset/LoadPresetEditor").LoadPresetEditor;
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { retry: false },
-    mutations: { retry: false },
-  },
-});
+let queryClient: QueryClient;
 
 /**
  * Fixture: A sample inference preset for testing.
@@ -63,31 +59,30 @@ const mockLoadPreset = {
 };
 
 describe("Preset Editors Integration", () => {
-  let originalFetch: typeof global.fetch;
-
   beforeAll(async () => {
-    mock.restore();
-    originalFetch = global.fetch;
+    const inferenceModule =
+      await import("../../src/client/components/preset/InferencePresetEditor");
+    InferencePresetEditor = inferenceModule.InferencePresetEditor;
+    const loadModule = await import("../../src/client/components/preset/LoadPresetEditor");
+    LoadPresetEditor = loadModule.LoadPresetEditor;
+  });
 
-    // Mock fetch for all API calls in these components
-    global.fetch = mock((url, _options) => {
-      if (typeof url === "string") {
-        if (url.includes("/api/presets/inference")) {
-          return Promise.resolve(new Response(JSON.stringify([mockInferencePreset])));
-        }
-        if (url.includes("/api/presets/load")) {
-          return Promise.resolve(new Response(JSON.stringify([mockLoadPreset])));
-        }
-        if (url.includes("/api/presets/system")) {
-          return Promise.resolve(new Response(JSON.stringify([])));
-        }
-      }
-      return Promise.resolve(new Response(JSON.stringify({})));
+  beforeEach(() => {
+    queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+        mutations: { retry: false },
+      },
     });
 
-    // Setup UI and store state via zustand
+    queryClient.setQueryData(queryKeys.presetsInference(), [mockInferencePreset]);
+    queryClient.setQueryData(queryKeys.presetsLoad(), [mockLoadPreset]);
+    queryClient.setQueryData(queryKeys.presetsSystem(), []);
+
     useUiStore.setState({
-      activePresetId: "test-inf-id",
+      rightPanelView: null,
+      activePresetId: null,
+      isConsoleVisible: false,
     });
 
     useAppStore.setState({
@@ -100,12 +95,6 @@ describe("Preset Editors Integration", () => {
         },
       ],
     });
-
-    const inferenceModule =
-      await import("../../src/client/components/preset/InferencePresetEditor");
-    InferencePresetEditor = inferenceModule.InferencePresetEditor;
-    const loadModule = await import("../../src/client/components/preset/LoadPresetEditor");
-    LoadPresetEditor = loadModule.LoadPresetEditor;
   });
 
   afterEach(() => {
@@ -113,12 +102,9 @@ describe("Preset Editors Integration", () => {
     queryClient.clear();
   });
 
-  afterAll(() => {
-    mock.restore();
-    global.fetch = originalFetch;
-  });
-
   it("InferencePresetEditor: renders sampling parameters and handles changes", async () => {
+    useUiStore.setState({ activePresetId: "test-inf-id" });
+
     render(
       <QueryClientProvider client={queryClient}>
         <InferencePresetEditor />
@@ -137,6 +123,8 @@ describe("Preset Editors Integration", () => {
   });
 
   it("LoadPresetEditor: renders accordion sections and model config", async () => {
+    useUiStore.setState({ activePresetId: "test-load-id" });
+
     render(
       <QueryClientProvider client={queryClient}>
         <LoadPresetEditor />

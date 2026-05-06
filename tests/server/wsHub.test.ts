@@ -30,7 +30,7 @@ describe("wsHub", () => {
   });
 
   afterEach(() => {
-    setSilent(process.env.NODE_ENV === "test");
+    setSilent(Bun.env.NODE_ENV === "test");
     setConfiguredLogLevel("info");
   });
   it("broadcasts messages to all registered connections", () => {

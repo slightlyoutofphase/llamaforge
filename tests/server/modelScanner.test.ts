@@ -18,19 +18,19 @@ describe("modelScanner", () => {
     // Create PublisherA / Model-7B
     const mod1 = path.join(tmpDir, "PublisherA", "Model-7B");
     await fs.mkdir(mod1, { recursive: true });
-    await fs.writeFile(path.join(mod1, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(mod1, "model-7b-q4.gguf"), "mock");
 
     // Create PublisherA / Model-13B with multiple
     const mod2 = path.join(tmpDir, "PublisherA", "Model-13B");
     await fs.mkdir(mod2, { recursive: true });
-    await fs.writeFile(path.join(mod2, "model-13b-q4.gguf"), "mock");
-    await fs.writeFile(path.join(mod2, "model-13b-q8.gguf"), "mock");
-    await fs.writeFile(path.join(mod2, "mmproj-13b.gguf"), "mock"); // exactly one mmproj
+    await Bun.write(path.join(mod2, "model-13b-q4.gguf"), "mock");
+    await Bun.write(path.join(mod2, "model-13b-q8.gguf"), "mock");
+    await Bun.write(path.join(mod2, "mmproj-13b.gguf"), "mock"); // exactly one mmproj
 
     // Create PublisherB / Model-Vision (only mmproj)
     const mod3 = path.join(tmpDir, "PublisherB", "Model-Vision");
     await fs.mkdir(mod3, { recursive: true });
-    await fs.writeFile(path.join(mod3, "mmproj-vision.gguf"), "mock");
+    await Bun.write(path.join(mod3, "mmproj-vision.gguf"), "mock");
   });
 
   afterAll(async () => {
@@ -63,12 +63,12 @@ describe("modelScanner", () => {
     for (let index = 0; index < 12; index++) {
       const subdir = path.join(noisyRoot, `${index}`.padStart(2, "0"));
       await fs.mkdir(subdir, { recursive: true });
-      await fs.writeFile(path.join(subdir, `note-${index}.txt`), "not a model");
+      await Bun.write(path.join(subdir, `note-${index}.txt`), "not a model");
     }
 
     const lateModelDir = path.join(noisyRoot, "zz-late-model");
     await fs.mkdir(lateModelDir, { recursive: true });
-    await fs.writeFile(path.join(lateModelDir, "late.gguf"), "mock");
+    await Bun.write(path.join(lateModelDir, "late.gguf"), "mock");
 
     const entries = await scanModels(noisyRoot, { maxEntries: 10, maxDepth: 20 });
     expect(entries).toHaveLength(0);
@@ -77,9 +77,9 @@ describe("modelScanner", () => {
   it("leaves mmProjPath unset when multiple mmproj variants match the same primary companion key", async () => {
     const ambiguousRoot = path.join(tmpDir, "AmbiguousPublisher", "Model-7B");
     await fs.mkdir(ambiguousRoot, { recursive: true });
-    await fs.writeFile(path.join(ambiguousRoot, "model-7b-q4.gguf"), "mock");
-    await fs.writeFile(path.join(ambiguousRoot, "mmproj-7b-f16.gguf"), "mock");
-    await fs.writeFile(path.join(ambiguousRoot, "mmproj-7b-q8.gguf"), "mock");
+    await Bun.write(path.join(ambiguousRoot, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(ambiguousRoot, "mmproj-7b-f16.gguf"), "mock");
+    await Bun.write(path.join(ambiguousRoot, "mmproj-7b-q8.gguf"), "mock");
 
     const entries = await scanModels(path.join(tmpDir, "AmbiguousPublisher"));
     expect(entries).toHaveLength(1);

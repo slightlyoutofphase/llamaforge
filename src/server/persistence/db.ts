@@ -6,13 +6,14 @@
 import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { logError, logInfo, logWarn } from "../logger";
 
 let _db: Database | null = null;
 let _dbPath: string | null = null;
 let _vacuumInterval: ReturnType<typeof setInterval> | null = null;
 let _dbGeneration = 0;
+const APP_DATA_DIR_ENV = "LLAMAFORGE_APP_DATA_DIR";
 
 /**
  * Checks whether a SQLite table currently exposes a given column.
@@ -50,11 +51,22 @@ function hasTable(db: Database, tableName: string): boolean {
  * @returns Absolute path to the `.llamaforge` data directory, creating it when needed.
  */
 export function getAppDataDir(): string {
-  const appData = join(os.homedir(), ".llamaforge");
+  const override = process.env[APP_DATA_DIR_ENV]?.trim();
+  const appData = override ? resolve(override) : join(os.homedir(), ".llamaforge");
   if (!fs.existsSync(appData)) {
     fs.mkdirSync(appData, { recursive: true });
   }
   return appData;
+}
+
+/**
+ * Resolves a path rooted inside the effective application data directory.
+ *
+ * @param segments - Path segments beneath the app data root.
+ * @returns Absolute path inside the active data directory.
+ */
+export function resolveAppDataPath(...segments: string[]): string {
+  return join(getAppDataDir(), ...segments);
 }
 
 /**

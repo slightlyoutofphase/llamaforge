@@ -9,6 +9,7 @@ import path from "node:path";
 import type { LlamaServerStatus, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
 import { type Subprocess, spawn } from "bun";
 import { logDebug, logError, logInfo, logWarn, shouldEmitLog } from "./logger";
+import { getAppDataDir } from "./persistence/db";
 import { findFreePort } from "./utils/network";
 import { broadcastLog, broadcastStatus } from "./wsHub";
 
@@ -111,6 +112,21 @@ export function getProc() {
 }
 
 /**
+ * Returns the most recent llama-server log lines captured from stdout/stderr.
+ * Useful when an inference request drops the transport before an HTTP response is produced.
+ *
+ * @param limit - Maximum number of log lines to return.
+ * @returns Recent server log lines ordered from oldest to newest.
+ */
+export function getRecentServerLogs(limit: number = 20): string[] {
+  const normalizedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 20;
+  if (normalizedLimit === 0) {
+    return [];
+  }
+  return getBootLogs().slice(-normalizedLimit);
+}
+
+/**
  * Updates the internal server status and broadcasts it to all connected clients.
  *
  * @param status - The new status to set.
@@ -152,8 +168,7 @@ export function getActiveThinkingTagOverride(): ThinkingTagConfig | undefined {
  * ```
  */
 export function buildArgs(config: ModelLoadConfig, port: number): readonly string[] {
-  const appRoot = path.join(os.homedir(), ".llamaforge");
-  const mediaPath = appRoot.endsWith(path.sep) ? appRoot : `${appRoot}${path.sep}`;
+  const appRoot = getAppDataDir();
   const args: string[] = [
     "--model",
     config.modelPath,
@@ -246,7 +261,7 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
   }
 
   // Pass --media-path to allow local file URLs for multimodal requests
-  args.push("--media-path", mediaPath);
+  args.push("--media-path", appRoot);
 
   return args;
 }
@@ -402,10 +417,7 @@ async function waitForHealthCheck(
       return false; // Process died, no need to keep polling
     }
     try {
-      const res = await fetch(`http://127.0.0.1:${port}/health`, {
-        signal: AbortSignal.timeout(1000),
-      });
-      if (res.ok) {
+      if (await probeHealthEndpoint(port)) {
         return true;
       }
     } catch {
@@ -414,6 +426,28 @@ async function waitForHealthCheck(
     await new Promise((r) => setTimeout(r, 250));
   }
   return false;
+}
+
+/**
+ * Performs a quiet HTTP health probe without using fetch so expected startup
+ * connection refusals and 503 responses do not leak noisy console output.
+ *
+ * @param port - Localhost port exposed by the candidate llama-server process.
+ * @returns `true` when the health endpoint responds with a 2xx status.
+ */
+function probeHealthEndpoint(port: number): Promise<boolean> {
+  return fetch(`http://127.0.0.1:${port}/health`, {
+    signal: AbortSignal.timeout(1000),
+    keepalive: false,
+    headers: {
+      Connection: "close",
+    },
+  })
+    .then((response) => {
+      void response.body?.cancel();
+      return response.ok;
+    })
+    .catch(() => false);
 }
 
 /**
@@ -544,7 +578,9 @@ export function requestUnloadModel(): Promise<void> {
       }
     } finally {
       if (configSnapshot?.chatTemplateFile) {
-        fs.unlink(configSnapshot.chatTemplateFile).catch(() => {});
+        Bun.file(configSnapshot.chatTemplateFile)
+          .delete()
+          .catch(() => {});
       }
     }
   })().finally(() => {

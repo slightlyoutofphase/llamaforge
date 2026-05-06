@@ -3,10 +3,10 @@
  * Tests for llama-server command line argument construction and lifecycle.
  */
 
-import os from "node:os";
-import path from "node:path";
 import { describe, expect, it } from "bun:test";
+import path from "node:path";
 import { buildArgs, loadModel } from "../../src/server/llamaServer";
+import { getAppDataDir } from "../../src/server/persistence/db";
 import type { ModelLoadConfig } from "../../src/shared/types";
 
 const baseConfig: ModelLoadConfig = {
@@ -62,9 +62,7 @@ describe("llamaServer", () => {
     expect(args).toContain("--chat-template-file");
     expect(args[args.indexOf("--chat-template-file") + 1]).toBe("/tmp/custom.jinja");
     expect(args).toContain("--media-path");
-    expect(args[args.indexOf("--media-path") + 1]).toBe(
-      `${path.join(os.homedir(), ".llamaforge")}${path.sep}`,
-    );
+    expect(args[args.indexOf("--media-path") + 1]).toBe(`${getAppDataDir()}${path.sep}`);
   });
 
   it("adds optional arguments when provided", () => {

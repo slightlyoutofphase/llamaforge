@@ -6,39 +6,16 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import fs from "node:fs/promises";
 import { addMessage, createChat, getChat, updateChat } from "../../src/server/persistence/chatRepo";
 import { getDb, initDb, resetDb } from "../../src/server/persistence/db";
 import { createInferencePreset } from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
 import { proxyCompletion } from "../../src/server/streamProxy";
 import { cancelPendingApprovals, resolveToolApproval } from "../../src/server/tools";
+import * as llamaServerModule from "../../src/server/llamaServer";
 
 let mockPdfText = "PDF text";
-
-// Mock the llamaServer
-mock.module("../../src/server/llamaServer", () => ({
-  getServerStatus: () => ({
-    status: "running",
-    port: 8080,
-    config: { modelPath: "test.gguf", contextSize: 4096 },
-  }),
-  getCurrentConfig: () => ({
-    primaryPath: "test.gguf",
-  }),
-}));
-
-mock.module("node:fs/promises", () => ({
-  default: {
-    mkdir: async () => {},
-    writeFile: async () => {},
-    readFile: async (_path: string) => Buffer.from("abc"),
-    access: async () => {},
-  },
-  mkdir: async () => {},
-  writeFile: async () => {},
-  readFile: async (_path: string) => Buffer.from("abc"),
-  access: async () => {},
-}));
 
 mock.module("pdfjs-dist", () => ({
   getDocument: () => ({
@@ -102,16 +79,28 @@ function chatStop(finishReason: string = "stop"): object {
 describe("streamProxy", () => {
   let capturedEndpoint: string | null;
   let capturedBody: any;
+  let writeFileSpy: ReturnType<typeof spyOn<typeof fs, "writeFile">>;
 
   beforeEach(async () => {
+    spyOn(llamaServerModule, "getServerStatus").mockReturnValue({
+      status: "running",
+      port: 8080,
+      config: { modelPath: "test.gguf", contextSize: 4096 } as any,
+    });
+    spyOn(llamaServerModule, "getActiveThinkingTagOverride").mockReturnValue(undefined);
+    spyOn(fs, "mkdir").mockResolvedValue(undefined);
+    writeFileSpy = spyOn(fs, "writeFile").mockResolvedValue(undefined as never);
+
     await initDb(":memory:");
     capturedEndpoint = null;
     capturedBody = null;
   });
 
   afterEach(() => {
+    writeFileSpy.mockRestore();
     cancelPendingApprovals();
     resetDb();
+    mock.restore();
   });
 
   it("ALWAYS sends requests to /v1/chat/completions, never /completion", async () => {
@@ -241,6 +230,42 @@ describe("streamProxy", () => {
     expect(assistantMsg?.metrics?.tokensPerSecond).toBe(50);
   });
 
+  it("broadcasts the persisted user message so clients can reconcile optimistic ids", async () => {
+    const stream = buildSSEStream([chatDelta("Reply!"), chatStop()]);
+    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
+    globalThis.fetch = fetchMock;
+
+    const wsHubModule = await import("../../src/server/wsHub");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
+
+    try {
+      const chat = await createChat("Broadcast User Test");
+      await proxyCompletion({
+        chatId: chat.id,
+        content: "Hello there",
+        attachments: [],
+      });
+
+      await new Promise((r) => setTimeout(r, 200));
+
+      const userMessageFrame = broadcastSpy.mock.calls
+        .map((call) => call[0])
+        .find(
+          (frame) =>
+            frame.type === "message" && frame.chatId === chat.id && frame.message.role === "user",
+        );
+
+      expect(userMessageFrame).toBeDefined();
+      if (userMessageFrame?.type === "message") {
+        expect(userMessageFrame.message.id.startsWith("temp-")).toBe(false);
+        expect(userMessageFrame.message.content).toBe("Hello there");
+        expect(userMessageFrame.message.rawContent).toBe("Hello there");
+      }
+    } finally {
+      broadcastSpy.mockRestore();
+    }
+  });
+
   it("ignores malformed persisted toolCallsJson when preparing a follow-up request", async () => {
     const stream = buildSSEStream([chatDelta("Recovered"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
@@ -312,6 +337,12 @@ describe("streamProxy", () => {
 
   it("builds image_url multimodal payloads for image attachments", async () => {
     const stream = buildSSEStream([chatDelta("I see an image"), chatStop()]);
+    spyOn(Bun, "file").mockImplementation(
+      () =>
+        ({
+          exists: async () => true,
+        }) as any,
+    );
 
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
@@ -874,5 +905,42 @@ describe("streamProxy", () => {
     expect(assistantMsg).toBeUndefined();
 
     errorSpy.mockRestore();
+  });
+
+  it("includes llama-server exit diagnostics when transport fails before headers", async () => {
+    const wsHubModule = await import("../../src/server/wsHub");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
+    spyOn(llamaServerModule, "getProc").mockReturnValue({ exitCode: 23 } as any);
+    spyOn(llamaServerModule, "getRecentServerLogs").mockReturnValue(["fatal multimodal failure"]);
+
+    const fetchMock = mock().mockRejectedValue(new Error("socket hang up"));
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Transport Error Test");
+    const messageId = await proxyCompletion({
+      chatId: chat.id,
+      content: "trigger transport error",
+      attachments: [],
+    });
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    const errorFrame = broadcastSpy.mock.calls
+      .map((call) => call[0])
+      .find(
+        (frame) =>
+          frame.type === "error" && frame.chatId === chat.id && frame.messageId === messageId,
+      );
+
+    expect(errorFrame).toBeDefined();
+    if (errorFrame?.type === "error") {
+      expect(errorFrame.message).toContain("socket hang up");
+      expect(errorFrame.message).toContain("llama-server exited with code 23");
+      expect(errorFrame.message).toContain("Last server log: fatal multimodal failure");
+    }
+
+    const reloaded = await getChat(chat.id);
+    const assistantMsg = reloaded?.messages?.find((m) => m.id === messageId);
+    expect(assistantMsg).toBeUndefined();
   });
 });

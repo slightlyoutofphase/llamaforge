@@ -4,7 +4,6 @@
  */
 
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type {
   ChatMessage,
@@ -14,9 +13,7 @@ import type {
 } from "../../shared/types";
 import { sanitizeToolCallsJson } from "../../shared/toolCalls";
 import { logError, logWarn } from "../logger";
-import { getDb } from "./db";
-
-const APP_ROOT = path.join(os.homedir(), ".llamaforge");
+import { getAppDataDir, getDb, resolveAppDataPath } from "./db";
 type ChatMessageRow = Omit<ChatMessage, "metrics"> & {
   metricsJson?: string | null;
 };
@@ -69,8 +66,9 @@ function resolveAttachmentPath(relativePath: string): string | null {
   const normalized = path.normalize(relativePath);
   if (normalized.startsWith(`..${path.sep}`) || normalized === "..") return null;
 
-  const absPath = path.join(APP_ROOT, normalized);
-  const relative = path.relative(APP_ROOT, absPath);
+  const appRoot = getAppDataDir();
+  const absPath = path.join(appRoot, normalized);
+  const relative = path.relative(appRoot, absPath);
   if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
   return absPath;
 }
@@ -455,7 +453,7 @@ export async function deleteChat(id: string): Promise<void> {
   for (const row of attachRows) {
     try {
       const fullPath = resolveAttachmentPath(row.file_path);
-      if (fullPath) await fs.unlink(fullPath);
+      if (fullPath) await Bun.file(fullPath).delete();
     } catch (e) {
       // S13 fix: log file deletion failures for debugging
       logWarn("[chatRepo] Failed to delete attachment file during chat cleanup", {
@@ -468,7 +466,7 @@ export async function deleteChat(id: string): Promise<void> {
 
   // Also clean out the chat directory cleanly
   try {
-    const chatDir = path.join(os.homedir(), ".llamaforge", "attachments", id);
+    const chatDir = resolveAppDataPath("attachments", id);
     await fs.rm(chatDir, { recursive: true, force: true });
   } catch (e) {
     // S13 fix: log directory cleanup failures
@@ -558,7 +556,7 @@ export async function deleteMessagesAfter(chatId: string, position: number): Pro
   for (const row of attachRows) {
     try {
       const fullPath = resolveAttachmentPath(row.file_path);
-      if (fullPath) await fs.unlink(fullPath);
+      if (fullPath) await Bun.file(fullPath).delete();
     } catch {}
   }
 }
@@ -598,7 +596,7 @@ export async function deleteMessageAndSubsequent(chatId: string, messageId: stri
     for (const attach of attachRows) {
       try {
         const fullPath = resolveAttachmentPath(attach.file_path);
-        if (fullPath) await fs.unlink(fullPath);
+        if (fullPath) await Bun.file(fullPath).delete();
       } catch {}
     }
   }
@@ -732,7 +730,7 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
       for (const att of attachments) {
         const ext = path.extname(sanitizeFileName(att.fileName)) || "";
         const safeName = Bun.randomUUIDv7() + ext;
-        const newAppDir = path.join(APP_ROOT, "attachments", newChatId, newMsgId);
+        const newAppDir = resolveAppDataPath("attachments", newChatId, newMsgId);
         const newFilePath = path.join(newAppDir, safeName);
         const oldFilePath = resolveAttachmentPath(att.filePath);
         if (!oldFilePath) {
@@ -745,7 +743,7 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
         }
         fileOperations.push({ oldPath: oldFilePath, newPath: newFilePath });
 
-        const relPath = path.relative(APP_ROOT, newFilePath).split(path.sep).join("/");
+        const relPath = path.relative(getAppDataDir(), newFilePath).split(path.sep).join("/");
 
         insertAttachment.run(
           Bun.randomUUIDv7(),
@@ -961,10 +959,10 @@ export async function importChat(jsonContent: string): Promise<string> {
             const attId = Bun.randomUUIDv7();
             const ext = path.extname(sanitizeFileName(att.fileName)) || "";
             const safeName = Bun.randomUUIDv7() + ext;
-            const appData = path.join(APP_ROOT, "attachments", newChatId, newMsgId);
+            const appData = resolveAppDataPath("attachments", newChatId, newMsgId);
 
             const filePath = path.join(appData, safeName);
-            const relPath = path.relative(APP_ROOT, filePath).split(path.sep).join("/");
+            const relPath = path.relative(getAppDataDir(), filePath).split(path.sep).join("/");
 
             // M3 fix: defer attachment record insertion until file write succeeds
             fileWrites.push({

@@ -3,20 +3,18 @@
  * Tests for multimodal attachment processing and upload handling.
  */
 
-import { describe, expect, it, mock } from "bun:test";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { getAppDataDir, getDb, initDb, resetDb } from "../../src/server/persistence/db";
+import { buildContentParts, processUpload } from "../../src/server/multimodal";
 
-// Mock fs/promises for any remaining directory operations
-mock.module("node:fs/promises", () => ({
-  default: {
-    mkdir: async () => {},
-  },
-  mkdir: async () => {},
-}));
+const encoder = new TextEncoder();
+let mkdirSpy: ReturnType<typeof spyOn<typeof fs, "mkdir">>;
+let writeFileSpy: ReturnType<typeof spyOn<typeof fs, "writeFile">>;
 
-import { spyOn, afterAll } from "bun:test";
-
-const fileSpy = spyOn(Bun, "file").mockImplementation((path: string | URL) => {
-  const pathStr = path.toString();
+const fileSpy = spyOn(Bun, "file").mockImplementation((filePath: string | URL) => {
+  const pathStr = filePath.toString();
   return {
     exists: async () => true,
     size: 100,
@@ -31,21 +29,56 @@ const fileSpy = spyOn(Bun, "file").mockImplementation((path: string | URL) => {
       throw new Error(`File not found: ${pathStr}`);
     },
     arrayBuffer: async () => {
-      if (pathStr.includes("img.png")) return Buffer.from("abc").buffer;
-      if (pathStr.includes("audio.wav")) return Buffer.from("def").buffer;
-      if (pathStr.includes("pic.jpg")) return Buffer.from("ghi").buffer;
-      if (pathStr.includes("text.txt")) return Buffer.from("Hello text file").buffer;
+      if (pathStr.includes("img.png")) return encoder.encode("abc").buffer;
+      if (pathStr.includes("audio.wav")) return encoder.encode("def").buffer;
+      if (pathStr.includes("pic.jpg")) return encoder.encode("ghi").buffer;
+      if (pathStr.includes("text.txt")) return encoder.encode("Hello text file").buffer;
       throw new Error(`File not found: ${pathStr}`);
     },
   } as any;
 });
-
-import { buildContentParts } from "../../src/server/multimodal";
-
 describe("multimodal", () => {
+  beforeEach(async () => {
+    mkdirSpy = spyOn(fs, "mkdir").mockResolvedValue(undefined);
+    writeFileSpy = spyOn(fs, "writeFile").mockResolvedValue(undefined as never);
+    await initDb(":memory:");
+  });
+
+  afterEach(() => {
+    resetDb();
+    mkdirSpy.mockRestore();
+    writeFileSpy.mockRestore();
+  });
+
   it("returns string when no media attachments", async () => {
     const res = await buildContentParts("test", []);
     expect(res).toBe("test");
+  });
+
+  it("stores uploaded attachments beneath the effective test app data dir", async () => {
+    const db = getDb(":memory:");
+    db.prepare("INSERT INTO chats (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)").run(
+      "chat-a",
+      "Chat A",
+      1,
+      1,
+    );
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, role, content, raw_content, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run("msg-a", "chat-a", "user", "hello", "hello", 0, 1);
+
+    const attachment = await processUpload(
+      "chat-a",
+      "msg-a",
+      "note.txt",
+      "text/plain",
+      Uint8Array.from([97, 98, 99]).buffer,
+    );
+
+    const lastCall = writeFileSpy.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+    expect(String(lastCall?.[0]).startsWith(path.join(getAppDataDir(), "attachments"))).toBe(true);
+    expect(attachment.filePath.startsWith("attachments/chat-a/msg-a/")).toBe(true);
   });
 
   it("appends extracted text to string output", async () => {

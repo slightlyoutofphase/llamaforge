@@ -36,7 +36,7 @@ beforeEach(async () => {
     createChat,
   }));
 
-  const queries = await import("../../src/client/queries");
+  const queries = await import(`../../src/client/queries.ts?cachebust=${Date.now()}`);
   useInfiniteChats = queries.useInfiniteChats;
   useCreateChat = queries.useCreateChat;
 });

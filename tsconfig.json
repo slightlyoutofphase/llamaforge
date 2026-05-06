@@ -8,7 +8,7 @@
     "jsx": "react-jsx",
     "outDir": "dist/client",
     "rootDir": "src",
-    "paths": { "@shared/*": ["./src/shared/*"] },
+    "paths": { "@/*": ["./*"], "@shared/*": ["./src/shared/*"] },
 
     "strict": true,
     "noImplicitAny": true,

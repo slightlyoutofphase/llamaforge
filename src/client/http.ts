@@ -1,122 +1,114 @@
 /**
  * @packageDocumentation
- * Client-side HTTP helpers with a production mutation fallback for browser runtimes.
+ * Client-side HTTP helpers with consistent fetch-based timeout handling.
  */
 
 type RequestOptions = RequestInit & {
   timeoutMs?: number;
 };
 
-type ResponseLike = Pick<Response, "status" | "ok" | "text" | "json">;
-
 /**
- * Reads the current runtime environment name from the browser or Bun global scope.
+ * Builds a normalized timeout error for request cancellations triggered by the helper.
  *
- * @returns The current `NODE_ENV` value when it can be resolved, or `undefined` otherwise.
+ * @param timeoutMs - Timeout budget in milliseconds.
+ * @returns Error instance tagged with the `TimeoutError` name.
  */
-function getRuntimeNodeEnv(): string | undefined {
-  try {
-    return (globalThis as any).process?.env?.NODE_ENV ?? (globalThis as any).Bun?.env?.NODE_ENV;
-  } catch {
-    return undefined;
-  }
+function createTimeoutError(timeoutMs: number): Error {
+  const timeoutError = new Error(`Request timed out after ${timeoutMs}ms`);
+  timeoutError.name = "TimeoutError";
+  return timeoutError;
 }
 
 /**
- * Determines whether a request should use the XMLHttpRequest mutation fallback.
+ * Builds a normalized abort error for caller-initiated request cancellation.
  *
- * @param method - Normalized HTTP method for the outbound request.
- * @returns `true` when the request should avoid `fetch()` and use XHR instead.
+ * @returns Error instance tagged with the `AbortError` name.
  */
-function shouldUseXhr(method: string): boolean {
-  if (method === "GET" || method === "HEAD") return false;
-  if (typeof XMLHttpRequest === "undefined") return false;
-  return getRuntimeNodeEnv() !== "test";
+function createAbortError(): Error {
+  const abortError = new Error("Request aborted");
+  abortError.name = "AbortError";
+  return abortError;
 }
 
 /**
- * Converts supported header inputs into a mutable plain-object record.
+ * Determines whether a timeout value should arm the helper's abort timer.
  *
- * @param headers - Request headers supplied through the Fetch API shape.
- * @returns A plain object containing normalized header keys and values.
+ * @param timeoutMs - Requested timeout budget.
+ * @returns `true` when the helper should enforce a timeout.
  */
-function normalizeHeaders(headers?: HeadersInit): Record<string, string> {
-  if (!headers) return {};
-  if (headers instanceof Headers) {
-    return Object.fromEntries(headers.entries());
-  }
-  if (Array.isArray(headers)) {
-    return Object.fromEntries(headers);
-  }
-  return { ...headers };
+function hasFiniteTimeout(timeoutMs: number): boolean {
+  return Number.isFinite(timeoutMs) && timeoutMs > 0;
 }
 
 /**
- * Builds a minimal response-like object for the XHR fallback path.
+ * Connects an external abort signal to an internal request controller.
  *
- * @param status - HTTP status code reported by the XHR request.
- * @param bodyText - Raw response body text.
- * @returns A subset of the `Response` interface consumed by the client API layer.
+ * @param controller - Internal controller used for the outbound fetch.
+ * @param signal - Optional caller-provided abort signal.
+ * @returns Cleanup callback that detaches the external listener.
  */
-function buildResponseLike(status: number, bodyText: string): ResponseLike {
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    text: async () => bodyText,
-    json: async () => JSON.parse(bodyText),
+function bindAbortSignal(
+  controller: AbortController,
+  signal: AbortSignal | null | undefined,
+): () => void {
+  if (!signal) return () => {};
+
+  const abortRequest = () => {
+    if (!controller.signal.aborted) {
+      controller.abort(signal.reason);
+    }
+  };
+
+  if (signal.aborted) {
+    abortRequest();
+    return () => {};
+  }
+
+  signal.addEventListener("abort", abortRequest, { once: true });
+  return () => {
+    signal.removeEventListener("abort", abortRequest);
   };
 }
 
 /**
- * Issues a browser request through `XMLHttpRequest` for mutation operations.
+ * Normalizes fetch rejections back to the helper's stable timeout/abort error shapes.
  *
- * @param url - Relative or absolute endpoint URL to request.
- * @param options - Request options including headers, body, and timeout overrides.
- * @returns A response-like object exposing the status and body readers used by the client.
- * @throws {Error} If the request fails, times out, or is aborted.
+ * @param error - Error thrown by `fetch()`.
+ * @param controller - Internal request controller.
+ * @param signal - Optional caller-provided abort signal.
+ * @param timeoutMs - Timeout budget in milliseconds.
+ * @returns The error that should be rethrown.
  */
-async function xhrRequest(url: string, options: RequestOptions): Promise<ResponseLike> {
-  const method = (options.method ?? "GET").toUpperCase();
-  const headers = normalizeHeaders(options.headers);
-  const timeoutMs = options.timeoutMs ?? 60000;
+function normalizeFetchError(
+  error: unknown,
+  controller: AbortController,
+  signal: AbortSignal | null | undefined,
+  timeoutMs: number,
+): unknown {
+  if (signal?.aborted) {
+    return createAbortError();
+  }
 
-  return new Promise<ResponseLike>((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open(method, url, true);
-    xhr.timeout = timeoutMs;
-
-    for (const [key, value] of Object.entries(headers)) {
-      xhr.setRequestHeader(key, value);
+  if (controller.signal.aborted) {
+    const reason = controller.signal.reason;
+    if (reason instanceof Error && reason.name === "TimeoutError") {
+      return reason;
     }
+    if (hasFiniteTimeout(timeoutMs)) {
+      return createTimeoutError(timeoutMs);
+    }
+  }
 
-    xhr.onload = () => {
-      resolve(buildResponseLike(xhr.status, xhr.responseText ?? ""));
-    };
-    xhr.onerror = () => {
-      reject(new Error(`XHR request failed for ${method} ${url}`));
-    };
-    xhr.ontimeout = () => {
-      const timeoutError = new Error(`Request timed out after ${timeoutMs}ms`);
-      timeoutError.name = "TimeoutError";
-      reject(timeoutError);
-    };
-    xhr.onabort = () => {
-      const abortError = new Error("Request aborted");
-      abortError.name = "AbortError";
-      reject(abortError);
-    };
-
-    xhr.send((options.body as XMLHttpRequestBodyInit | null | undefined) ?? null);
-  });
+  return error;
 }
 
 /**
- * Sends an HTTP request to the backend using `fetch()` or the XHR mutation fallback.
+ * Sends an HTTP request to the backend using `fetch()` with timeout and abort support.
  *
  * @param url - Relative or absolute endpoint URL to request.
  * @param options - Request options including method, headers, body, and timeout override.
- * @returns A response-like object exposing status, `text()`, and `json()` readers.
- * @throws {Error} If the XHR fallback fails, times out, or is aborted.
+ * @returns Native fetch response object.
+ * @throws {Error} If the request fails, times out, or is aborted.
  * @example
  * ```ts
  * const response = await request("/api/settings", {
@@ -126,12 +118,34 @@ async function xhrRequest(url: string, options: RequestOptions): Promise<Respons
  * });
  * ```
  */
-export async function request(url: string, options: RequestOptions = {}): Promise<ResponseLike> {
-  const method = (options.method ?? "GET").toUpperCase();
-  if (shouldUseXhr(method)) {
-    return xhrRequest(url, options);
+export async function request(url: string, options: RequestOptions = {}): Promise<Response> {
+  const { timeoutMs = 60000, signal, ...fetchOptions } = options;
+
+  if (signal?.aborted) {
+    throw createAbortError();
   }
 
-  const { timeoutMs: _timeoutMs, ...fetchOptions } = options;
-  return fetch(url, fetchOptions);
+  const controller = new AbortController();
+  const unbindSignal = bindAbortSignal(controller, signal);
+  const timeoutId = hasFiniteTimeout(timeoutMs)
+    ? setTimeout(() => {
+        if (!controller.signal.aborted) {
+          controller.abort(createTimeoutError(timeoutMs));
+        }
+      }, timeoutMs)
+    : null;
+
+  try {
+    return await fetch(url, {
+      ...fetchOptions,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    throw normalizeFetchError(error, controller, signal, timeoutMs);
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+    unbindSignal();
+  }
 }

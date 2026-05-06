@@ -3,8 +3,9 @@
  * Tests for database initialization and schema layout.
  */
 
+import path from "node:path";
 import { beforeEach, describe, expect, it } from "bun:test";
-import { getDb, initDb } from "../../src/server/persistence/db";
+import { getAppDataDir, getDb, initDb } from "../../src/server/persistence/db";
 
 describe("db configuration", () => {
   beforeEach(async () => {
@@ -44,5 +45,9 @@ describe("db configuration", () => {
     const parsed = JSON.parse(row?.config_json ?? "{}");
     expect(parsed.config?.flashAttn).toBe("on");
     expect(parsed.config?.flashAttention).toBeUndefined();
+  });
+
+  it("resolves the effective app data dir inside tests/data", () => {
+    expect(getAppDataDir()).toBe(path.resolve(import.meta.dir, "../data/.llamaforge"));
   });
 });

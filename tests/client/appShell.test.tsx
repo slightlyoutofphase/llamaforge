@@ -3,27 +3,16 @@
  * Focused tests for root app-shell settings behavior.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
 
 let App: typeof import("../../src/client/App").default;
-let originalFetch: typeof global.fetch;
 let navigateSpy = mock();
-
-mock.module("@tanstack/react-router", () => ({
-  useLocation: () => ({ pathname: "/" }),
-  useNavigate: () => navigateSpy,
-  useParams: () => ({}),
-  Link: ({ children, className, to, ...props }: any) => (
-    <a href={to} className={className} {...props}>
-      {children}
-    </a>
-  ),
-  Outlet: () => <div data-testid="app-outlet">Outlet</div>,
-}));
+let queryClient: QueryClient;
+let originalFetch: typeof global.fetch;
 
 const appSettings = {
   theme: "dark",
@@ -50,69 +39,81 @@ const defaultAppState = {
   currentChatId: null,
 };
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { retry: false },
-    mutations: { retry: false },
-  },
-});
-
 describe("App shell settings", () => {
-  beforeAll(async () => {
+  beforeEach(() => {
     originalFetch = global.fetch;
+  });
+
+  beforeEach(async () => {
+    mock.restore();
+    cleanup();
+    queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+    document.documentElement.style.fontSize = "";
+    document.documentElement.className = "";
+    navigateSpy = mock();
     global.fetch = mock((input, init) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/api/settings")) {
+      if (url.endsWith("/api/settings")) {
         return Promise.resolve(
           new Response(JSON.stringify(appSettings), {
             headers: { "Content-Type": "application/json" },
           }),
         );
       }
-      if (url.includes("/api/chats") && init?.method === "POST") {
+      if (url.includes("/api/chats") && (init?.method ?? "GET") === "POST") {
         return Promise.resolve(
           new Response(JSON.stringify({ id: "created-chat", name: "New Chat" }), {
             headers: { "Content-Type": "application/json" },
           }),
         );
       }
-      if (
-        url.includes("/api/chats") ||
-        url.includes("/api/presets/load") ||
-        url.includes("/api/presets/inference") ||
-        url.includes("/api/presets/system")
-      ) {
+      if (url.includes("/api/presets/load") || url.includes("/api/presets/inference")) {
         return Promise.resolve(
           new Response(JSON.stringify([]), {
             headers: { "Content-Type": "application/json" },
           }),
         );
       }
+
       return Promise.resolve(
-        new Response(JSON.stringify({}), { headers: { "Content-Type": "application/json" } }),
+        new Response(JSON.stringify({}), {
+          headers: { "Content-Type": "application/json" },
+        }),
       );
-    });
+    }) as typeof global.fetch;
 
-    const appModule = await import("../../src/client/App");
-    App = appModule.default;
-  });
+    await mock.module("@tanstack/react-router", () => ({
+      useLocation: () => ({ pathname: "/" }),
+      useNavigate: () => navigateSpy,
+      useParams: () => ({}),
+      Link: ({ children, className, to, ...props }: any) => (
+        <a href={to} className={className} {...props}>
+          {children}
+        </a>
+      ),
+      Outlet: () => <div data-testid="app-outlet">Outlet</div>,
+    }));
 
-  beforeEach(() => {
-    cleanup();
-    queryClient.clear();
-    document.documentElement.style.fontSize = "";
-    navigateSpy = mock();
     useAppStore.setState(defaultAppState);
     useUiStore.setState({ rightPanelView: null, activePresetId: null, isConsoleVisible: false });
+
+    const appModule = await import(`../../src/client/App.tsx?cachebust=${Date.now()}`);
+    App = appModule.default;
   });
 
   afterEach(() => {
     cleanup();
+    mock.restore();
+    global.fetch = originalFetch;
   });
 
   afterAll(() => {
     mock.restore();
-    global.fetch = originalFetch;
   });
 
   it("applies the configured root font size and opens the console on startup", async () => {
