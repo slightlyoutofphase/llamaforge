@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit --project tsconfig.json && tsc --noEmit --project tsconfig.server.json",
     "lint": "biome lint . --max-diagnostics 500 && eslint",
     "clean": "bun run scripts/clean.mjs",
-    "docs": "typedoc"
+    "docs": "typedoc --html ./docs_html"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",

@@ -94,7 +94,7 @@ const activeGenerations = new Map<string, GenerationSession>();
  * @returns Message-level metrics suitable for persistence and UI display.
  */
 function buildMessageMetrics(
-  timings: import("@shared/types.js").LlamaTimings,
+  timings: import("../shared/types").LlamaTimings,
   promptTokensCount: number,
 ): MessageMetrics {
   return {
@@ -784,7 +784,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               }[];
               content?: string;
               stop?: boolean;
-              timings?: import("@shared/types.js").LlamaTimings;
+              timings?: import("../shared/types").LlamaTimings;
               stopped_limit?: boolean;
             };
             try {
@@ -878,7 +878,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                     messageId: assistantMessageId,
                     generationId,
                     stopReason: "error",
-                    timings: parsed.timings || ({} as import("@shared/types.js").LlamaTimings),
+                    timings: parsed.timings || ({} as import("../shared/types").LlamaTimings),
                     fullContent: prevContent,
                     fullRawContent,
                     fullThinking: prevThinking,
@@ -920,7 +920,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               }
 
               if (!shouldStop) {
-                const timings = parsed.timings || ({} as import("@shared/types.js").LlamaTimings);
+                const timings = parsed.timings || ({} as import("../shared/types").LlamaTimings);
                 if (toolRecursionDepth >= MAX_TOOL_RECURSION_DEPTH) {
                   const recursionMessage = `Tool recursion limit (${MAX_TOOL_RECURSION_DEPTH}) reached for chat ${chatId}.`;
                   logWarn(recursionMessage);
@@ -1022,7 +1022,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                 prompt_per_second: 0,
                 prompt_per_token_ms: 0,
               };
-              let stopReason: import("@shared/types.js").WsStopFrame["stopReason"] = "eos";
+              let stopReason: import("../shared/types").WsStopFrame["stopReason"] = "eos";
               if (finishReason === "length") stopReason = "max_tokens";
               if (finishReason === "tool_calls") stopReason = "tool_calls";
 

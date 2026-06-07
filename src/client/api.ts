@@ -131,7 +131,7 @@ export async function fetchChats(
   q?: string,
   limit?: number,
   offset?: number,
-): Promise<import("@shared/types.js").ChatSession[]> {
+): Promise<import("../shared/types").ChatSession[]> {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (limit !== undefined) params.set("limit", limit.toString());
@@ -150,8 +150,8 @@ export async function fetchChats(
  * @returns A promise resolving to the created {@link ChatSession}.
  */
 export async function createChat(
-  data: Partial<import("@shared/types.js").ChatSession> = {},
-): Promise<import("@shared/types.js").ChatSession> {
+  data: Partial<import("../shared/types").ChatSession> = {},
+): Promise<import("../shared/types").ChatSession> {
   const res = await request("/api/chats", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -167,7 +167,7 @@ export async function createChat(
  * @param id - The unique UUID of the chat session.
  * @returns A promise resolving to the {@link ChatSession}.
  */
-export async function fetchChat(id: string): Promise<import("@shared/types.js").ChatSession> {
+export async function fetchChat(id: string): Promise<import("../shared/types").ChatSession> {
   const res = await fetch(`/api/chats/${id}`);
   if (!res.ok) throw new Error("Failed to fetch chat");
   return res.json();
@@ -182,7 +182,7 @@ export async function fetchChat(id: string): Promise<import("@shared/types.js").
  */
 export async function updateChat(
   id: string,
-  updates: Partial<import("@shared/types.js").ChatSession>,
+  updates: Partial<import("../shared/types").ChatSession>,
 ): Promise<void> {
   const res = await request(`/api/chats/${id}`, {
     method: "PUT",
@@ -250,7 +250,7 @@ export async function deleteChat(id: string): Promise<void> {
 export async function branchChat(
   id: string,
   messageId: string,
-): Promise<import("@shared/types.js").ChatSession> {
+): Promise<import("../shared/types").ChatSession> {
   const res = await request(`/api/chats/${id}/branch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -414,7 +414,7 @@ export async function updateSettings(updates: any): Promise<void> {
  */
 export async function optimizeHardware(
   modelPath: string,
-): Promise<Partial<import("@shared/types.js").ModelLoadConfig>> {
+): Promise<Partial<import("../shared/types").ModelLoadConfig>> {
   const res = await request("/api/hardware/optimize", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
