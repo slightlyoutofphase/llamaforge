@@ -1,10 +1,9 @@
 {
   "$schema": "https://typedoc.org/schema.json",
-  "entryPoints": ["src/server/index.ts", "src/client/main.tsx", "src/shared/types.ts"],
+  "entryPoints": ["src"],
   "entryPointStrategy": "expand",
   "tsconfig": "tsconfig.docs.json",
-  "out": "docs",
-  "plugin": ["typedoc-plugin-markdown"],
+  "out": "docs_html",
   "name": "LlamaForge Technical Documentation",
   "includeVersion": true,
   "theme": "default",

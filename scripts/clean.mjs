@@ -5,6 +5,7 @@ const buildArtifactPaths = [
   "out",
   "dist",
   "docs",
+  "docs_html",
   ".tmp-compiled-smoke",
   ".playwright",
   ".tmp-tests",
