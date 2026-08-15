@@ -223,6 +223,7 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
   }
 
   args.push("--cache-reuse", String(config.cacheReuse ?? 0));
+  args.push("--ctx-checkpoints", String(config.contextCheckpoints ?? 32));
 
   if (config.mmProjPath) {
     args.push("--mmproj", config.mmProjPath);
@@ -258,6 +259,23 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
 
   if (config.kvUnified !== undefined) {
     args.push(config.kvUnified ? "--kv-unified" : "--no-kv-unified");
+  }
+
+  // Speculative decoding flags
+  if (config.specType && config.specType !== "off") {
+    args.push("--spec-type", config.specType);
+    if (config.specDraftModelPath) {
+      args.push("--spec-draft-model", config.specDraftModelPath);
+    }
+    if (config.specDraftNMax !== undefined) {
+      args.push("--spec-draft-n-max", String(config.specDraftNMax));
+    }
+    if (config.specDraftNMin !== undefined) {
+      args.push("--spec-draft-n-min", String(config.specDraftNMin));
+    }
+    if (config.specDraftPMin !== undefined) {
+      args.push("--spec-draft-p-min", String(config.specDraftPMin));
+    }
   }
 
   // Pass --media-path to allow local file URLs for multimodal requests

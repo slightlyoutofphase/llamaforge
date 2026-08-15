@@ -57,7 +57,12 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
   const settings = await loadSettings();
 
   // Scans locally at startup and returns raw model entries quickly.
-  const rawModels = await scanModels(settings.modelsPath);
+  let rawModels: Awaited<ReturnType<typeof scanModels>> = [];
+  try {
+    rawModels = await scanModels(settings.modelsPath);
+  } catch (e) {
+    logError("Model directory scan failed:", e);
+  }
 
   // Populate metadata and generate any missing default presets synchronously at startup.
   try {

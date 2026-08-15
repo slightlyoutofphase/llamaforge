@@ -220,6 +220,17 @@ export const MessageBubble = React.memo(
                   </audio>
                 );
               }
+              if (att.mimeType.startsWith("video/")) {
+                return (
+                  <video
+                    key={att.id}
+                    src={`/api/attachments/${att.filePath}`}
+                    controls
+                    className="max-h-32 rounded-xl border border-[var(--color-border)] object-contain bg-black/20">
+                    <track kind="captions" src="" label="No captions available" />
+                  </video>
+                );
+              }
               return (
                 <div
                   key={att.id}

@@ -73,22 +73,23 @@ export function ModelSelector() {
           contextSize: 4096,
           contextShift: false,
           gpuLayers: 33,
-          threads: 4,
-          batchSize: 512,
-          microBatchSize: 128,
+          threads: 3,
+          batchSize: 2048,
+          microBatchSize: 512,
           ropeScaling: "none",
-          ropeFreqBase: 10000,
+          ropeFreqBase: 0,
           ropeFreqScale: 1.0,
           kvCacheTypeK: "f16",
           kvCacheTypeV: "f16",
-          mlock: false,
+          mlock: true,
           noMmap: false,
           contBatching: true,
-          flashAttn: "on",
+          flashAttn: "auto",
           swaFull: false,
           kvUnified: true,
           noKvOffload: false,
           cacheReuse: 0,
+          contextCheckpoints: 32,
         };
 
     // Always override the path to the selected model
@@ -99,6 +100,13 @@ export function ModelSelector() {
       ...(preset?.id ? { presetId: preset.id } : {}),
       ...(preset?.thinkingTagOverride ? { thinkingTagOverride: preset.thinkingTagOverride } : {}),
     };
+
+    if (
+      (config.specType === "draft-simple" || config.specType === "draft-eagle3") &&
+      model.draftModelPath
+    ) {
+      request.specDraftModelPath = model.draftModelPath;
+    }
 
     const defaultTemplate = model.metadata?.chatTemplate;
     if (
@@ -114,7 +122,9 @@ export function ModelSelector() {
     const hasAudio = !!model.metadata?.hasAudioEncoder;
 
     const visionMsgs = messages.filter((m) =>
-      m.attachments?.some((a) => a.mimeType.startsWith("image/")),
+      m.attachments?.some(
+        (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("video/"),
+      ),
     );
     const audioMsgs = messages.filter((m) =>
       m.attachments?.some((a) => a.mimeType.startsWith("audio/")),
@@ -206,131 +216,140 @@ export function ModelSelector() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {models.length === 0 ? (
+          {models.filter((m) => !m.metadata?.isDraftModel).length === 0 ? (
             <div className="flex flex-col items-center justify-center py-24 text-[var(--color-text-muted)] bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl border-dashed">
               <Database size={48} className="opacity-30 mb-4" />
               <p className="text-sm font-mono">No localized GGUF structures detected in ~/Models</p>
             </div>
           ) : (
-            models.map((model) => {
-              const isLoaded = loadedModel?.primaryPath === model.primaryPath;
+            models
+              .filter((m) => !m.metadata?.isDraftModel)
+              .map((model) => {
+                const isLoaded = loadedModel?.primaryPath === model.primaryPath;
 
-              return (
-                <div
-                  key={model.primaryPath}
-                  className={clsx(
-                    "flex flex-col gap-4 p-5 rounded-2xl border transition-all overflow-hidden w-full min-w-0",
-                    isLoaded
-                      ? "bg-[var(--color-surface-elevated)] border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/50"
-                      : "bg-[var(--color-surface)] border-[var(--color-border)] hover:border-gray-500",
-                  )}>
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 min-w-0 w-full">
-                    <div
-                      className={clsx(
-                        "p-3 rounded-xl flex-shrink-0",
-                        isLoaded
-                          ? "bg-[var(--color-accent)] text-white"
-                          : "bg-[var(--color-surface-elevated)] text-[var(--color-text-muted)]",
-                      )}>
-                      <Cpu size={24} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 min-w-0 w-full">
-                        <h3 className="font-bold text-lg text-[var(--color-text-primary)] truncate min-w-0 max-w-full">
-                          {model.modelName}
-                        </h3>
-                        {isLoaded && (
-                          <span className="px-2 py-0.5 rounded-full bg-[var(--color-accent)] text-white text-[10px] font-bold uppercase tracking-widest">
-                            Active
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-secondary)] font-mono min-w-0">
-                        <span className="truncate max-w-full">
-                          {model.publisher || "Unknown Publisher"}
-                        </span>
-                        <span className="text-[var(--color-border)]">•</span>
-                        <span className="truncate max-w-full">
-                          {model.metadata?.architecture || "Unknown Architecture"}
-                        </span>
-                        <span className="text-[var(--color-border)]">•</span>
-                        <span className="truncate max-w-full">
-                          {model.metadata?.fileSizeBytes
-                            ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-                            : "Unknown Size"}
-                        </span>
-                        {model.metadata?.hasVisionEncoder && (
-                          <span className="text-blue-400 truncate max-w-full">VISION ENABLED</span>
-                        )}
-                        {model.metadata?.hasAudioEncoder && (
-                          <span className="text-purple-400 truncate max-w-full">AUDIO ENABLED</span>
-                        )}
-                      </div>
-
+                return (
+                  <div
+                    key={model.primaryPath}
+                    className={clsx(
+                      "flex flex-col gap-4 p-5 rounded-2xl border transition-all overflow-hidden w-full min-w-0",
+                      isLoaded
+                        ? "bg-[var(--color-surface-elevated)] border-[var(--color-accent)] ring-1 ring-[var(--color-accent)]/50"
+                        : "bg-[var(--color-surface)] border-[var(--color-border)] hover:border-gray-500",
+                    )}>
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 min-w-0 w-full">
                       <div
-                        className="mt-2 text-[10px] text-[var(--color-text-muted)] break-all whitespace-pre-wrap"
-                        title={model.primaryPath}>
-                        {model.primaryPath}
+                        className={clsx(
+                          "p-3 rounded-xl flex-shrink-0",
+                          isLoaded
+                            ? "bg-[var(--color-accent)] text-white"
+                            : "bg-[var(--color-surface-elevated)] text-[var(--color-text-muted)]",
+                        )}>
+                        <Cpu size={24} />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 min-w-0 w-full">
+                          <h3 className="font-bold text-lg text-[var(--color-text-primary)] truncate min-w-0 max-w-full">
+                            {model.modelName}
+                          </h3>
+                          {isLoaded && (
+                            <span className="px-2 py-0.5 rounded-full bg-[var(--color-accent)] text-white text-[10px] font-bold uppercase tracking-widest">
+                              Active
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-secondary)] font-mono min-w-0">
+                          <span className="truncate max-w-full">
+                            {model.publisher || "Unknown Publisher"}
+                          </span>
+                          <span className="text-[var(--color-border)]">•</span>
+                          <span className="truncate max-w-full">
+                            {model.metadata?.architecture || "Unknown Architecture"}
+                          </span>
+                          <span className="text-[var(--color-border)]">•</span>
+                          <span className="truncate max-w-full">
+                            {model.metadata?.fileSizeBytes
+                              ? `${(model.metadata.fileSizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+                              : "Unknown Size"}
+                          </span>
+                          {model.metadata?.hasVisionEncoder && (
+                            <span className="text-blue-400 truncate max-w-full">
+                              VISION ENABLED
+                            </span>
+                          )}
+                          {model.metadata?.hasAudioEncoder && (
+                            <span className="text-purple-400 truncate max-w-full">
+                              AUDIO ENABLED
+                            </span>
+                          )}
+                          {model.modelName.toLowerCase().includes("mtp") && (
+                            <span className="text-green-400 truncate max-w-full">MTP ENABLED</span>
+                          )}
+                        </div>
+
+                        <div
+                          className="mt-2 text-[10px] text-[var(--color-text-muted)] break-all whitespace-pre-wrap"
+                          title={model.primaryPath}>
+                          {model.primaryPath}
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="flex flex-col sm:flex-row sm:justify-between gap-3 items-stretch sm:items-center w-full min-w-0">
-                    <div className="relative w-full sm:max-w-[22rem] min-w-0">
-                      <select
+                    <div className="flex flex-col sm:flex-row sm:justify-between gap-3 items-stretch sm:items-center w-full min-w-0">
+                      <div className="relative w-full sm:max-w-[22rem] min-w-0">
+                        <select
+                          disabled={serverStatus !== "idle" || isLoaded}
+                          value={
+                            selectedPresets[model.primaryPath] ||
+                            loadPresets?.find((p) => p.modelPath === model.primaryPath)?.id ||
+                            loadPresets?.find((p) => p.isDefault)?.id ||
+                            ""
+                          }
+                          onChange={(e) =>
+                            setSelectedPresets((prev) => ({
+                              ...prev,
+                              [model.primaryPath]: e.target.value,
+                            }))
+                          }
+                          className="w-full appearance-none bg-[var(--color-bg)] border border-[var(--color-border)] text-xs font-medium px-4 py-2 pr-8 rounded-xl disabled:opacity-50 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] outline-none cursor-pointer">
+                          {loadPresets
+                            ?.filter((p) => !p.modelPath || p.modelPath === model.primaryPath)
+                            .map((p) => (
+                              <option key={p.id} value={p.id} title={p.name}>
+                                {p.name} {p.isDefault && "(Default)"}
+                              </option>
+                            ))}
+                        </select>
+                        <ChevronDown
+                          size={14}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] pointer-events-none"
+                        />
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => handleLoadGuard(model)}
                         disabled={serverStatus !== "idle" || isLoaded}
-                        value={
-                          selectedPresets[model.primaryPath] ||
-                          loadPresets?.find((p) => p.modelPath === model.primaryPath)?.id ||
-                          loadPresets?.find((p) => p.isDefault)?.id ||
-                          ""
-                        }
-                        onChange={(e) =>
-                          setSelectedPresets((prev) => ({
-                            ...prev,
-                            [model.primaryPath]: e.target.value,
-                          }))
-                        }
-                        className="w-full appearance-none bg-[var(--color-bg)] border border-[var(--color-border)] text-xs font-medium px-4 py-2 pr-8 rounded-xl disabled:opacity-50 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] outline-none cursor-pointer">
-                        {loadPresets
-                          ?.filter((p) => !p.modelPath || p.modelPath === model.primaryPath)
-                          .map((p) => (
-                            <option key={p.id} value={p.id} title={p.name}>
-                              {p.name} {p.isDefault && "(Default)"}
-                            </option>
-                          ))}
-                      </select>
-                      <ChevronDown
-                        size={14}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--color-text-muted)] pointer-events-none"
-                      />
+                        className={clsx(
+                          "inline-flex items-center justify-center w-full sm:w-auto px-6 py-2 rounded-xl font-bold text-sm transition-all",
+                          isLoaded
+                            ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)] cursor-default"
+                            : "bg-[var(--color-accent)] text-white hover:shadow-lg hover:shadow-[var(--color-accent)]/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed",
+                        )}
+                        title="Load weights">
+                        {isLoaded ? (
+                          "LOADED"
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Play size={14} fill="currentColor" />
+                            <span>LOAD</span>
+                          </div>
+                        )}
+                      </button>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={() => handleLoadGuard(model)}
-                      disabled={serverStatus !== "idle" || isLoaded}
-                      className={clsx(
-                        "inline-flex items-center justify-center w-full sm:w-auto px-6 py-2 rounded-xl font-bold text-sm transition-all",
-                        isLoaded
-                          ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)] cursor-default"
-                          : "bg-[var(--color-accent)] text-white hover:shadow-lg hover:shadow-[var(--color-accent)]/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed",
-                      )}
-                      title="Load weights">
-                      {isLoaded ? (
-                        "LOADED"
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <Play size={14} fill="currentColor" />
-                          <span>LOAD</span>
-                        </div>
-                      )}
-                    </button>
                   </div>
-                </div>
-              );
-            })
+                );
+              })
           )}
         </div>
       </div>

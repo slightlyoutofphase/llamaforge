@@ -13,6 +13,16 @@ export interface ModelLoadConfig {
   modelPath: string;
   /** Optional path to a multimodal projection file (for vision/audio). */
   mmProjPath?: string | undefined;
+  /** Speculative decoding mode. */
+  specType?: "off" | "draft-mtp" | "draft-simple" | "draft-eagle3" | undefined;
+  /** Absolute path to the draft model GGUF file. */
+  specDraftModelPath?: string | undefined;
+  /** Maximum number of draft tokens to generate. */
+  specDraftNMax?: number | undefined;
+  /** Minimum number of draft tokens to generate. */
+  specDraftNMin?: number | undefined;
+  /** Minimum probability for draft token acceptance. */
+  specDraftPMin?: number | undefined;
   /** Size of the context window in tokens. */
   contextSize: number;
   /** Whether to enable context shifting (KV cache reuse). */
@@ -53,6 +63,8 @@ export interface ModelLoadConfig {
   noKvOffload: boolean;
   /** Cache reuse. */
   cacheReuse: number;
+  /** Max number of context checkpoints per slot (ctx-checkpoints). */
+  contextCheckpoints?: number;
   /** ID of the main GPU to use. */
   mainGpu?: number;
   /** Tensor split ratios across multiple GPUs. */
@@ -108,6 +120,8 @@ export interface GgufDisplayMetadata {
   hasVisionEncoder: boolean;
   /** Whether the model contains an audio encoder. */
   hasAudioEncoder: boolean;
+  /** Whether the model is a draft/assistant model for speculative decoding. */
+  isDraftModel: boolean;
   /** Recommended temperature default from the model metadata. */
   defaultTemperature: number | undefined;
   /** Recommended top-k default. */
@@ -138,6 +152,8 @@ export interface ModelEntry {
   primaryPath: string;
   /** Optional path to an associated multimodal projection file. */
   mmProjPath?: string | undefined;
+  /** Optional path to an associated draft model for speculative decoding. */
+  draftModelPath?: string | undefined;
   /** Optional metadata extracted from the GGUF file. */
   metadata?: GgufDisplayMetadata | undefined;
 }
@@ -241,12 +257,7 @@ export interface WsStopFrame {
   generationId?: string | undefined;
   /** Reason the generation stopped. */
   stopReason:
-    | "eos"
-    | "max_tokens"
-    | "stop_string"
-    | "error"
-    | "contextLengthReached"
-    | "tool_calls";
+    "eos" | "max_tokens" | "stop_string" | "error" | "contextLengthReached" | "tool_calls";
   /** Timing metrics for the completed generation. */
   timings: LlamaTimings;
   /** Optional total prompt tokens used. */
@@ -539,6 +550,8 @@ export interface InferencePreset {
   contextOverflowPolicy?: ContextOverflowPolicy;
   /** Whether thinking tags are enabled. */
   thinkingEnabled?: boolean;
+  /** Whether to preserve thinking content in history (template-dependent). */
+  preserveThinking?: boolean;
   /** Preset creation timestamp. */
   createdAt: number;
   /** Preset last update timestamp. */

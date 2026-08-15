@@ -122,4 +122,24 @@ describe("server index startup", () => {
     );
     server.stop();
   });
+
+  it("survives a fatal scanModels error and still starts the server", async () => {
+    spyOn(dbModule, "initDb").mockResolvedValue();
+    spyOn(settingsRepoModule, "loadSettings").mockResolvedValue(productionSettings);
+    const scanSpy = spyOn(modelScannerModule, "scanModels").mockImplementation(async () => {
+      throw new Error("mprotect failed: 487");
+    });
+    spyOn(presetRepoModule, "ensureModelDefaultPresets").mockResolvedValue();
+    spyOn(cleanupModule, "cleanupOrphanedAttachments").mockResolvedValue();
+    spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+    const logErrorSpy = spyOn(loggerModule, "logError").mockImplementation(() => {});
+    spyOn(loggerModule, "logInfo").mockImplementation(() => {});
+
+    const server = await startServer({ scheduleRecurringCleanup: false });
+
+    expect(scanSpy).toHaveBeenCalledTimes(1);
+    expect(logErrorSpy).toHaveBeenCalled();
+    expect(server.port).toBe(14001);
+    server.stop();
+  });
 });

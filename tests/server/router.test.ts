@@ -544,6 +544,141 @@ describe("router", () => {
     }
   });
 
+  it("POST /api/server/load auto-populates specDraftModelPath for draft-simple mode", async () => {
+    await saveSettings({
+      modelsPath: settings.modelsPath,
+      llamaServerPath: settings.llamaServerPath,
+      llamaPortRangeMin: settings.llamaPortRangeMin,
+      llamaPortRangeMax: settings.llamaPortRangeMax,
+    });
+
+    const router = createRouter(settings);
+    const modelScannerModule = await import("../../src/server/modelScanner.ts");
+    const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
+
+    const scanSpy = spyOn(modelScannerModule, "scanModels").mockResolvedValue([
+      {
+        publisher: "Test Publisher",
+        modelName: "Main Model",
+        primaryPath: "/tmp/models/main.gguf",
+        draftModelPath: "/tmp/models/main-assistant.gguf",
+      },
+    ]);
+    const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(null);
+    const loadSpy = spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+
+    try {
+      const res = await router.fetch(
+        new Request("http://localhost/api/server/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            modelPath: "/tmp/models/main.gguf",
+            contextSize: 4096,
+            contextShift: false,
+            gpuLayers: 0,
+            threads: 4,
+            batchSize: 512,
+            microBatchSize: 128,
+            ropeScaling: "none",
+            ropeFreqBase: 10000,
+            ropeFreqScale: 1,
+            kvCacheTypeK: "f16",
+            kvCacheTypeV: "f16",
+            mlock: false,
+            noMmap: false,
+            contBatching: true,
+            flashAttn: "off",
+            swaFull: false,
+            noKvOffload: false,
+            cacheReuse: 0,
+            specType: "draft-simple",
+          }),
+        }),
+        {},
+      );
+
+      expect(res?.status).toBe(200);
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+      expect(loadSpy.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          modelPath: "/tmp/models/main.gguf",
+          specDraftModelPath: "/tmp/models/main-assistant.gguf",
+        }),
+      );
+    } finally {
+      scanSpy.mockRestore();
+      metadataSpy.mockRestore();
+      loadSpy.mockRestore();
+    }
+  });
+
+  it("POST /api/server/load does not auto-populate specDraftModelPath for draft-mtp mode", async () => {
+    await saveSettings({
+      modelsPath: settings.modelsPath,
+      llamaServerPath: settings.llamaServerPath,
+      llamaPortRangeMin: settings.llamaPortRangeMin,
+      llamaPortRangeMax: settings.llamaPortRangeMax,
+    });
+
+    const router = createRouter(settings);
+    const modelScannerModule = await import("../../src/server/modelScanner.ts");
+    const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
+
+    const scanSpy = spyOn(modelScannerModule, "scanModels").mockResolvedValue([
+      {
+        publisher: "Test Publisher",
+        modelName: "Main Model",
+        primaryPath: "/tmp/models/main.gguf",
+        draftModelPath: "/tmp/models/main-assistant.gguf",
+      },
+    ]);
+    const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(null);
+    const loadSpy = spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+
+    try {
+      const res = await router.fetch(
+        new Request("http://localhost/api/server/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            modelPath: "/tmp/models/main.gguf",
+            contextSize: 4096,
+            contextShift: false,
+            gpuLayers: 0,
+            threads: 4,
+            batchSize: 512,
+            microBatchSize: 128,
+            ropeScaling: "none",
+            ropeFreqBase: 10000,
+            ropeFreqScale: 1,
+            kvCacheTypeK: "f16",
+            kvCacheTypeV: "f16",
+            mlock: false,
+            noMmap: false,
+            contBatching: true,
+            flashAttn: "off",
+            swaFull: false,
+            noKvOffload: false,
+            cacheReuse: 0,
+            specType: "draft-mtp",
+          }),
+        }),
+        {},
+      );
+
+      expect(res?.status).toBe(200);
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+      const mtpCall = loadSpy.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(mtpCall?.modelPath).toBe("/tmp/models/main.gguf");
+      expect(mtpCall).not.toHaveProperty("specDraftModelPath");
+    } finally {
+      scanSpy.mockRestore();
+      metadataSpy.mockRestore();
+      loadSpy.mockRestore();
+    }
+  });
+
   it("POST /api/server/unload responds before teardown finishes", async () => {
     const router = createRouter(settings);
     const unloadSpy = spyOn(llamaServerModule, "requestUnloadModel").mockImplementation(

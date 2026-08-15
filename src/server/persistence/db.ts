@@ -37,10 +37,9 @@ function hasColumn(db: Database, tableName: string, columnName: string): boolean
  */
 function hasTable(db: Database, tableName: string): boolean {
   const table = db
-    .query<
-      { name: string },
-      [string]
-    >("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1")
+    .query<{ name: string }, [string]>(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+    )
     .get(tableName);
   return Boolean(table?.name);
 }
@@ -204,7 +203,17 @@ export function getDb(path?: string): Database {
   }
 
   if (currentVersion < LATEST_DB_VERSION) {
-    logInfo(`Migrating database from version ${currentVersion} to ${LATEST_DB_VERSION}...`);
+    // Skip migration noise for brand-new databases that have no tables yet.
+    const row = _db
+      .query<{ count: number }, []>(
+        "SELECT count(*) as count FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+      )
+      .get();
+    const hasAnyTables = row !== null && row.count > 0;
+
+    if (hasAnyTables) {
+      logInfo(`Migrating database from version ${currentVersion} to ${LATEST_DB_VERSION}...`);
+    }
     try {
       _db.exec("BEGIN TRANSACTION;");
       for (let i = currentVersion; i < LATEST_DB_VERSION; i++) {
@@ -213,7 +222,9 @@ export function getDb(path?: string): Database {
       }
       _db.exec(`PRAGMA user_version = ${LATEST_DB_VERSION};`);
       _db.exec("COMMIT;");
-      logInfo(`Migration to version ${LATEST_DB_VERSION} complete.`);
+      if (hasAnyTables) {
+        logInfo(`Migration to version ${LATEST_DB_VERSION} complete.`);
+      }
     } catch (e) {
       _db.exec("ROLLBACK;");
       logError("Database migration failed:", e);
@@ -421,17 +432,32 @@ export async function initDb(path?: string): Promise<void> {
           contextSize: 4096,
           contextShift: false,
           gpuLayers: 0,
-          threads: 4,
-          batchSize: 512,
+          threads: 3,
+          threadsBatch: -1,
+          batchSize: 2048,
           microBatchSize: 512,
           ropeScaling: "none",
           ropeFreqBase: 0,
-          ropeFreqScale: 1,
+          ropeFreqScale: 0,
           kvCacheTypeK: "f16",
           kvCacheTypeV: "f16",
           mlock: true,
           noMmap: false,
-          flashAttn: "on",
+          contBatching: true,
+          flashAttn: "auto",
+          swaFull: false,
+          kvUnified: true,
+          noKvOffload: false,
+          cacheReuse: 0,
+          contextCheckpoints: 32,
+          imageMaxTokens: 560,
+          logLevel: 3,
+          seedOverride: -1,
+          specType: "off",
+          specDraftNMax: 8,
+          specDraftNMin: 1,
+          specDraftPMin: 0.75,
+          specDraftModelPath: "",
         },
       }),
       created_at: Date.now(),

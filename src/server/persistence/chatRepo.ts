@@ -46,10 +46,9 @@ function normalizeToolCallsJson(
 export function getNextPosition(chatId: string): number {
   const db = getDb();
   const row = db
-    .query<
-      { max_pos: number | null },
-      [string]
-    >("SELECT MAX(position) as max_pos FROM messages WHERE chat_id = ?")
+    .query<{ max_pos: number | null }, [string]>(
+      "SELECT MAX(position) as max_pos FROM messages WHERE chat_id = ?",
+    )
     .get(chatId);
   return (row?.max_pos ?? -1) + 1;
 }
@@ -571,10 +570,9 @@ export async function deleteMessagesAfter(chatId: string, position: number): Pro
 export async function deleteMessageAndSubsequent(chatId: string, messageId: string): Promise<void> {
   const db = getDb();
   const row = db
-    .query<
-      { position: number },
-      [string, string]
-    >("SELECT position FROM messages WHERE id = ? AND chat_id = ?")
+    .query<{ position: number }, [string, string]>(
+      "SELECT position FROM messages WHERE id = ? AND chat_id = ?",
+    )
     .get(messageId, chatId);
   if (row) {
     const attachRows = db
@@ -614,10 +612,9 @@ export async function cachedGgufMetadata(
   mtime: number,
 ): Promise<GgufDisplayMetadata | null> {
   const row = getDb()
-    .query<
-      { metadata_json: string },
-      [string, number]
-    >("SELECT metadata_json FROM model_cache WHERE file_path = ? AND mtime = ?")
+    .query<{ metadata_json: string }, [string, number]>(
+      "SELECT metadata_json FROM model_cache WHERE file_path = ? AND mtime = ?",
+    )
     .get(filePath, mtime);
   return row ? JSON.parse(row.metadata_json) : null;
 }
@@ -630,10 +627,9 @@ export async function cachedGgufMetadata(
  */
 export async function getMetadataForPath(filePath: string): Promise<GgufDisplayMetadata | null> {
   const row = getDb()
-    .query<
-      { metadata_json: string },
-      [string]
-    >("SELECT metadata_json FROM model_cache WHERE file_path = ? ORDER BY mtime DESC LIMIT 1")
+    .query<{ metadata_json: string }, [string]>(
+      "SELECT metadata_json FROM model_cache WHERE file_path = ? ORDER BY mtime DESC LIMIT 1",
+    )
     .get(filePath);
   return row ? JSON.parse(row.metadata_json) : null;
 }

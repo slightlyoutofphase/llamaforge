@@ -5,7 +5,12 @@
  */
 
 import { markdown } from "@codemirror/lang-markdown";
-import type { LoadPreset, ModelLoadConfig, ThinkingTagConfig } from "../../../shared/types";
+import type {
+  LoadPreset,
+  ModelEntry,
+  ModelLoadConfig,
+  ThinkingTagConfig,
+} from "../../../shared/types";
 import CodeMirror from "@uiw/react-codemirror";
 import { ChevronDown, ChevronRight, Copy, Plus, Save, Trash2, X, Zap } from "lucide-react";
 import type React from "react";
@@ -42,6 +47,28 @@ function detectThinkingTagOverride(architecture?: string): ThinkingTagConfig {
   return architecture?.toLowerCase() === "gemma4"
     ? GEMMA4_THINKING_TAG_CONFIG
     : DEFAULT_THINKING_TAG_CONFIG;
+}
+
+/**
+ * Computes which speculative decoding modes are available for a given model.
+ *
+ * @param model - The primary model entry (may be undefined).
+ * @param allModels - Full list of scanned models.
+ * @returns Flags indicating whether draft-model and MTP modes are allowed.
+ */
+function getSpeculativeDecodingAvailability(
+  model: ModelEntry | undefined,
+  allModels: ModelEntry[],
+): { draftModel: boolean; mtp: boolean } {
+  if (!model) return { draftModel: false, mtp: false };
+  const modelDir = model.primaryPath.substring(0, model.primaryPath.lastIndexOf("/") + 1);
+  const hasDraftModel = allModels.some(
+    (m) => m.metadata?.isDraftModel && m.primaryPath.startsWith(modelDir),
+  );
+  if (hasDraftModel) return { draftModel: true, mtp: false };
+  const hasMtp = model.modelName?.toLowerCase().includes("mtp") ?? false;
+  if (hasMtp) return { draftModel: false, mtp: true };
+  return { draftModel: false, mtp: false };
 }
 
 /**
@@ -200,7 +227,7 @@ export function LoadPresetEditor() {
         contextSize: 4096,
         contextShift: false,
         gpuLayers: -1,
-        threads: -1,
+        threads: 3,
         threadsBatch: -1,
         batchSize: 2048,
         microBatchSize: 512,
@@ -209,7 +236,7 @@ export function LoadPresetEditor() {
         ropeFreqScale: 0,
         kvCacheTypeK: "f16",
         kvCacheTypeV: "f16",
-        mlock: false,
+        mlock: true,
         noMmap: false,
         contBatching: true,
         flashAttn: "auto",
@@ -217,9 +244,15 @@ export function LoadPresetEditor() {
         kvUnified: true,
         noKvOffload: false,
         cacheReuse: 0,
+        contextCheckpoints: 32,
         imageMaxTokens: 560,
         logLevel: 3,
         seedOverride: -1,
+        specType: "off",
+        specDraftNMax: 8,
+        specDraftNMin: 1,
+        specDraftPMin: 0.75,
+        specDraftModelPath: "",
       },
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -284,7 +317,7 @@ export function LoadPresetEditor() {
           )}
           <button
             type="button"
-            onClick={() => setRightPanelView(null)}
+            onClick={() => setRightPanelView("settings")}
             className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
             <X size={18} />
           </button>
@@ -575,6 +608,20 @@ export function LoadPresetEditor() {
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
 
+            <label htmlFor="contextCheckpoints" className="block font-medium mt-2">
+              Context Checkpoints
+            </label>
+            <input
+              id="contextCheckpoints"
+              type="number"
+              value={config.contextCheckpoints ?? 32}
+              onChange={(e) =>
+                updateConfigField("contextCheckpoints", parseInt(e.target.value, 10))
+              }
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
+            />
+
             <div className="mt-2 text-xs border-t border-[var(--color-border)] pt-2 space-y-2">
               <label htmlFor="kvCacheK" className="block font-medium">
                 KV Cache Type (K)
@@ -668,6 +715,139 @@ export function LoadPresetEditor() {
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
             />
+          </div>
+        </Accordion>
+
+        <Accordion title="Speculative Decoding">
+          <div className="space-y-2 text-xs">
+            {(() => {
+              const availability = getSpeculativeDecodingAvailability(matchingModel, models);
+              const currentType = config.specType ?? "off";
+              const isInvalid =
+                (currentType === "draft-simple" && !availability.draftModel) ||
+                (currentType === "draft-mtp" && !availability.mtp);
+              return (
+                <>
+                  <label htmlFor="specType" className="block font-medium">
+                    Mode
+                  </label>
+                  <select
+                    id="specType"
+                    value={currentType}
+                    onChange={(e) => {
+                      const val = e.target.value as ModelLoadConfig["specType"];
+                      updateConfigField("specType", val);
+                      if (val !== "off" && val !== "draft-mtp") {
+                        updateConfigField("specDraftModelPath", "");
+                      }
+                    }}
+                    disabled={isReadonly}
+                    className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded">
+                    <option value="off">Off</option>
+                    <option value="draft-mtp" disabled={!availability.mtp}>
+                      MTP {availability.mtp ? "" : "(no MTP model found)"}
+                    </option>
+                    <option value="draft-simple" disabled={!availability.draftModel}>
+                      Draft Model {availability.draftModel ? "" : "(no draft model found)"}
+                    </option>
+                  </select>
+                  {isInvalid && (
+                    <p className="text-[11px] text-red-400">
+                      Selected mode is not available for this model. Switching to Off.
+                    </p>
+                  )}
+
+                  <div className="space-y-1 pt-2">
+                    <label
+                      htmlFor="specDraftNMax"
+                      className="text-xs font-medium flex justify-between">
+                      <span>Max Draft Tokens</span>
+                      <span className="text-[var(--color-text-muted)] font-mono">
+                        {config.specDraftNMax ?? 8}
+                      </span>
+                    </label>
+                    <input
+                      id="specDraftNMax"
+                      type="range"
+                      min="1"
+                      max="16"
+                      step="1"
+                      value={config.specDraftNMax ?? 8}
+                      onChange={(e) =>
+                        updateConfigField("specDraftNMax", parseInt(e.target.value, 10))
+                      }
+                      disabled={isReadonly || currentType === "off"}
+                      className="w-full"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="specDraftNMin"
+                      className="text-xs font-medium flex justify-between">
+                      <span>Min Draft Tokens</span>
+                      <span className="text-[var(--color-text-muted)] font-mono">
+                        {config.specDraftNMin ?? 1}
+                      </span>
+                    </label>
+                    <input
+                      id="specDraftNMin"
+                      type="range"
+                      min="1"
+                      max="16"
+                      step="1"
+                      value={config.specDraftNMin ?? 1}
+                      onChange={(e) =>
+                        updateConfigField("specDraftNMin", parseInt(e.target.value, 10))
+                      }
+                      disabled={isReadonly || currentType === "off"}
+                      className="w-full"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <label
+                      htmlFor="specDraftPMin"
+                      className="text-xs font-medium flex justify-between">
+                      <span>Draft Probability Min</span>
+                      <span className="text-[var(--color-text-muted)] font-mono">
+                        {(config.specDraftPMin ?? 0.75).toFixed(2)}
+                      </span>
+                    </label>
+                    <input
+                      id="specDraftPMin"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={config.specDraftPMin ?? 0.75}
+                      onChange={(e) =>
+                        updateConfigField("specDraftPMin", parseFloat(e.target.value))
+                      }
+                      disabled={isReadonly || currentType === "off"}
+                      className="w-full"
+                    />
+                  </div>
+
+                  {(currentType === "draft-simple" || currentType === "draft-eagle3") && (
+                    <div className="space-y-1 pt-2">
+                      <label htmlFor="specDraftModelPath" className="block font-medium">
+                        Draft Model Path
+                      </label>
+                      <input
+                        id="specDraftModelPath"
+                        type="text"
+                        value={config.specDraftModelPath || ""}
+                        onChange={(e) => updateConfigField("specDraftModelPath", e.target.value)}
+                        disabled={isReadonly}
+                        placeholder="Auto-detected if blank"
+                        className="w-full font-mono bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md disabled:opacity-50 text-xs"
+                      />
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </Accordion>
 

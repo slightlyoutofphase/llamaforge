@@ -134,6 +134,25 @@ function buildLocalImageChatRequest(
   };
 }
 
+function _buildLocalVideoChatRequest(
+  inferencePreset: InferencePreset,
+  mediaUrl: string,
+  prompt: string,
+) {
+  return {
+    ...buildChatRequestBase(inferencePreset),
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: prompt },
+          { type: "input_video", input_video: { url: mediaUrl } },
+        ],
+      },
+    ],
+  };
+}
+
 async function stageMediaFixture(fileName: string, messageId: string): Promise<string> {
   const relativePath = `attachments/${REAL_MEDIA_CHAT_ID}/${messageId}/${fileName}`;
   const absolutePath = path.join(TEST_APP_DATA_DIR, ...relativePath.split("/"));

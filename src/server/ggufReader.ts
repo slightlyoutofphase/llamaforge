@@ -89,6 +89,7 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
         : undefined,
     hasVisionEncoder: hasVision,
     hasAudioEncoder: hasAudio,
+    isDraftModel: false,
     defaultTemperature:
       typeof metadata?.["tokenizer.ggml.sampling.temperature"] === "number"
         ? (metadata["tokenizer.ggml.sampling.temperature"] as number)

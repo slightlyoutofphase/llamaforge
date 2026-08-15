@@ -285,10 +285,9 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
 export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>): Promise<void> {
   const db = getDb();
   const existing = db
-    .query<
-      { config_json: string; name: string; model_path: string | null },
-      [string]
-    >("SELECT config_json, name, model_path FROM load_presets WHERE id = ?")
+    .query<{ config_json: string; name: string; model_path: string | null }, [string]>(
+      "SELECT config_json, name, model_path FROM load_presets WHERE id = ?",
+    )
     .get(id);
   if (!existing) return;
   const currentConfig = parseLoadPresetPayload(existing.config_json);
@@ -373,10 +372,9 @@ export async function updateInferencePreset(
 ): Promise<void> {
   const db = getDb();
   const existingRow = db
-    .query<
-      { config_json: string; name: string },
-      [string]
-    >("SELECT config_json, name FROM inference_presets WHERE id = ?")
+    .query<{ config_json: string; name: string }, [string]>(
+      "SELECT config_json, name FROM inference_presets WHERE id = ?",
+    )
     .get(id);
   if (!existingRow) return;
 
@@ -503,7 +501,7 @@ export async function ensureModelDefaultPresets(
     if (!existingLoadPaths.has(m.primaryPath)) {
       const newLoadPreset: LoadPreset = {
         id: Bun.randomUUIDv7(),
-        name: "Default (from GGUF)",
+        name: `Default (from GGUF) for ${m.modelName}`,
         modelPath: m.primaryPath,
         isDefault: true,
         isReadonly: true,
@@ -515,7 +513,7 @@ export async function ensureModelDefaultPresets(
           contextSize: m.metadata.contextLength || 4096,
           contextShift: false,
           gpuLayers: -1,
-          threads: -1,
+          threads: 3,
           batchSize: 2048,
           microBatchSize: 512,
           ropeScaling: "none",
@@ -523,7 +521,7 @@ export async function ensureModelDefaultPresets(
           ropeFreqScale: 0.0,
           kvCacheTypeK: "f16",
           kvCacheTypeV: "f16",
-          mlock: false,
+          mlock: true,
           noMmap: false,
           contBatching: true,
           flashAttn: "auto",
@@ -531,6 +529,7 @@ export async function ensureModelDefaultPresets(
           kvUnified: true,
           noKvOffload: false,
           cacheReuse: 0,
+          contextCheckpoints: 32,
           imageMaxTokens: 560,
         },
         createdAt: Date.now(),
@@ -542,16 +541,21 @@ export async function ensureModelDefaultPresets(
 
     // Default Inference Preset
     if (!existingInfPaths.has(m.primaryPath)) {
+      const hasCoreSamplingParams =
+        m.metadata.defaultTemperature !== undefined &&
+        m.metadata.defaultTopK !== undefined &&
+        m.metadata.defaultTopP !== undefined;
+
       const newInfPreset: import("../../shared/types").InferencePreset = {
         id: Bun.randomUUIDv7(),
-        name: "Default (from GGUF)",
+        name: `Default (from GGUF) for ${m.modelName}`,
         sourceModelPath: m.primaryPath,
         isDefault: true,
         temperature: m.metadata.defaultTemperature ?? 0.8,
         topK: m.metadata.defaultTopK ?? 40,
         topP: m.metadata.defaultTopP ?? 0.95,
-        minP: m.metadata.defaultMinP ?? 0.05,
-        repeatPenalty: m.metadata.defaultRepeatPenalty ?? 1.1,
+        minP: m.metadata.defaultMinP ?? (hasCoreSamplingParams ? 0 : 0.05),
+        repeatPenalty: m.metadata.defaultRepeatPenalty ?? (hasCoreSamplingParams ? 1.0 : 1.1),
         repeatLastN: 64,
 
         typicalP: 1.0,

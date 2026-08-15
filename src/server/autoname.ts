@@ -19,7 +19,7 @@ const activeAutonames = new Set<string>();
  */
 export async function triggerAutoname(chatId: string): Promise<void> {
   const chat = await getChat(chatId);
-  if (!chat || chat.name !== "New Chat" || !chat.messages || chat.messages.length < 2) return;
+  if (chat?.name !== "New Chat" || !chat.messages || chat.messages.length < 2) return;
 
   if (activeAutonames.has(chatId)) return;
   activeAutonames.add(chatId);
@@ -30,7 +30,7 @@ export async function triggerAutoname(chatId: string): Promise<void> {
 
     // Re-verify the name hasn't changed manually or by another trigger during the sleep
     const latestChat = await getChat(chatId);
-    if (!latestChat || latestChat.name !== "New Chat" || !latestChat.messages) {
+    if (latestChat?.name !== "New Chat" || !latestChat.messages) {
       return;
     }
 

@@ -6,7 +6,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ModelEntry } from "../shared/types";
-import { parseGgufMetadata } from "./ggufReader";
+import * as ggufReader from "./ggufReader";
 import { logError, logInfo, logWarn } from "./logger";
 import { cachedGgufMetadata, setCachedGgufMetadata } from "./persistence/chatRepo";
 
@@ -16,6 +16,18 @@ const DEFAULT_SCAN_MAX_ENTRIES = 10000;
 const IGNORED_COMPANION_TOKENS = new Set(["model", "mmproj", "mmproject", "projector", "clip"]);
 const QUANTIZATION_TOKEN_PATTERN =
   /^(?:q\d(?:_\d)?|iq\d.*|f16|f32|bf16|fp16|fp32|int\d+|mxfp4|qwen|k|m|s|l|xl)$/i;
+
+/**
+ * Determines whether a GGUF architecture string indicates a draft/assistant model
+ * for speculative decoding.
+ *
+ * @param architecture - The architecture string from GGUF metadata.
+ * @returns `true` if the model is a draft model (assistant or eagle3 architecture).
+ */
+function isDraftModelArchitecture(architecture: string): boolean {
+  const lower = architecture.toLowerCase();
+  return lower.includes("assistant") || lower.includes("eagle3");
+}
 
 /**
  * Builds a normalized token key used to match main GGUF files with mmproj companions.
@@ -71,6 +83,30 @@ function findMatchingMmproj(primaryPath: string, mmprojFiles: string[]): string 
   if (globalMatches.length > 1) {
     logWarn(
       `Ambiguous mmproj companions for ${primaryPath}: ${globalMatches.join(", ")}. Leaving mmProjPath unset.`,
+    );
+  }
+
+  return undefined;
+}
+
+/**
+ * Finds the best draft model companion for a primary GGUF model.
+ * Only considers draft models in the same directory as the primary model.
+ *
+ * @param primaryPath - Absolute path to the primary model file.
+ * @param draftModels - Candidate draft model paths discovered during the scan.
+ * @returns The matching draft model file path, or `undefined` when no unique match exists.
+ */
+function findMatchingDraftModel(primaryPath: string, draftModels: string[]): string | undefined {
+  const primaryDir = path.dirname(primaryPath);
+
+  const sameDirMatches = draftModels.filter((candidate) => path.dirname(candidate) === primaryDir);
+  if (sameDirMatches.length === 1) {
+    return sameDirMatches[0];
+  }
+  if (sameDirMatches.length > 1) {
+    logWarn(
+      `Ambiguous draft models for ${primaryPath}: ${sameDirMatches.join(", ")}. Leaving draftModelPath unset.`,
     );
   }
 
@@ -177,7 +213,32 @@ export async function scanModels(
       (f) => !path.basename(f).toUpperCase().includes("MMPROJ"),
     );
 
-    for (const primaryPath of primaryGgufs) {
+    // Detect draft models by parsing GGUF metadata (architecture contains "assistant" or "eagle3")
+    const draftModelPaths = new Set<string>();
+    for (const filePath of primaryGgufs) {
+      try {
+        const stat = await fs.stat(filePath);
+        let metadata = await cachedGgufMetadata(filePath, stat.mtimeMs);
+        if (!metadata) {
+          metadata = await ggufReader.parseGgufMetadata(filePath);
+          metadata.fileSizeBytes = stat.size;
+          metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
+          await setCachedGgufMetadata(filePath, stat.mtimeMs, metadata);
+        } else if (typeof metadata.isDraftModel === "undefined") {
+          metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
+          await setCachedGgufMetadata(filePath, stat.mtimeMs, metadata);
+        }
+        if (metadata.isDraftModel) {
+          draftModelPaths.add(filePath);
+        }
+      } catch (err: any) {
+        logWarn(`Failed to detect draft model for ${filePath}: ${err?.message || String(err)}`);
+      }
+    }
+
+    const mainModels = primaryGgufs.filter((f) => !draftModelPaths.has(f));
+
+    for (const primaryPath of mainModels) {
       const relPath = path.relative(rootPath, primaryPath);
       const pathParts = relPath.split(path.sep);
 
@@ -194,12 +255,14 @@ export async function scanModels(
       }
 
       const mmProjPath = findMatchingMmproj(primaryPath, mmprojFiles);
+      const draftModelPath = findMatchingDraftModel(primaryPath, [...draftModelPaths]);
 
       entries.push({
         publisher,
         modelName,
         primaryPath,
         mmProjPath,
+        draftModelPath,
       });
     }
   } catch (err: any) {
@@ -227,12 +290,13 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
     let metadata = await cachedGgufMetadata(entry.primaryPath, mtime);
     if (!metadata) {
       try {
-        metadata = await parseGgufMetadata(entry.primaryPath);
+        metadata = await ggufReader.parseGgufMetadata(entry.primaryPath);
         metadata.fileSizeBytes = stat.size;
+        metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
 
         if (entry.mmProjPath) {
           try {
-            const mmProjMetadata = await parseGgufMetadata(entry.mmProjPath);
+            const mmProjMetadata = await ggufReader.parseGgufMetadata(entry.mmProjPath);
             metadata.hasVisionEncoder = mmProjMetadata.hasVisionEncoder;
             metadata.hasAudioEncoder = mmProjMetadata.hasAudioEncoder;
           } catch (mmErr: any) {
@@ -248,6 +312,9 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
           `Failed to parse GGUF metadata for ${entry.primaryPath}: ${err?.message || String(err)}`,
         );
       }
+    } else if (typeof metadata.isDraftModel === "undefined") {
+      metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
+      await setCachedGgufMetadata(entry.primaryPath, mtime, metadata);
     }
 
     return metadata ? { ...entry, metadata } : entry;

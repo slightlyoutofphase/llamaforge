@@ -140,9 +140,13 @@ describe("presetRepo", () => {
     const wrappedPreset = presets.find((preset) => preset.id === "legacy-wrapped");
 
     expect(flatPreset?.config.flashAttn).toBe("on");
-    expect((flatPreset?.config as Record<string, unknown>).flashAttention).toBeUndefined();
     expect(wrappedPreset?.config.flashAttn).toBe("off");
-    expect((wrappedPreset?.config as Record<string, unknown>).flashAttention).toBeUndefined();
+    if (flatPreset) {
+      expect((flatPreset.config as Record<string, unknown>).flashAttention).toBeUndefined();
+    }
+    if (wrappedPreset) {
+      expect((wrappedPreset.config as Record<string, unknown>).flashAttention).toBeUndefined();
+    }
   });
 
   it("handles inference presets CRUD", async () => {
@@ -226,7 +230,7 @@ describe("presetRepo", () => {
     );
 
     expect(loadPreset).toBeDefined();
-    expect(loadPreset?.name).toBe("Default (from GGUF)");
+    expect(loadPreset?.name).toBe("Default (from GGUF) for Gemma");
     expect(loadPreset?.isDefault).toBe(true);
     expect(loadPreset?.isReadonly).toBe(true);
     expect(loadPreset?.chatTemplateOverride).toBe("gguf-template");
@@ -234,7 +238,130 @@ describe("presetRepo", () => {
     expect(loadPreset?.config.imageMaxTokens).toBe(560);
 
     expect(inferencePreset).toBeDefined();
-    expect(inferencePreset?.name).toBe("Default (from GGUF)");
+    expect(inferencePreset?.name).toBe("Default (from GGUF) for Gemma");
     expect(inferencePreset?.isDefault).toBe(true);
+  });
+
+  it("uses relaxed minP/repeatPenalty defaults when all three core sampling params are present in GGUF", async () => {
+    await ensureModelDefaultPresets([
+      {
+        publisher: "Publisher",
+        modelName: "FullSampling",
+        primaryPath: "/models/full.gguf",
+        metadata: {
+          architecture: "llama",
+          name: "Full Sampling",
+          fileSizeBytes: 1,
+          contextLength: 4096,
+          embeddingLength: undefined,
+          attentionHeadCount: undefined,
+          attentionHeadCountKv: undefined,
+          blockCount: undefined,
+          feedForwardLength: undefined,
+          quantType: undefined,
+          hasVisionEncoder: false,
+          hasAudioEncoder: false,
+          defaultTemperature: 0.7,
+          defaultTopK: 40,
+          defaultTopP: 0.95,
+          defaultMinP: undefined,
+          defaultRepeatPenalty: undefined,
+          chatTemplate: undefined,
+          bosToken: undefined,
+          eosToken: undefined,
+        },
+      },
+    ]);
+
+    const inferencePresets = await getInferencePresets();
+    const preset = inferencePresets.find((p) => p.sourceModelPath === "/models/full.gguf");
+
+    expect(preset).toBeDefined();
+    expect(preset?.temperature).toBe(0.7);
+    expect(preset?.topK).toBe(40);
+    expect(preset?.topP).toBe(0.95);
+    expect(preset?.minP).toBe(0);
+    expect(preset?.repeatPenalty).toBe(1.0);
+  });
+
+  it("preserves explicitly provided minP/repeatPenalty even when all three core sampling params are present", async () => {
+    await ensureModelDefaultPresets([
+      {
+        publisher: "Publisher",
+        modelName: "ExplicitOverrides",
+        primaryPath: "/models/explicit.gguf",
+        metadata: {
+          architecture: "llama",
+          name: "Explicit Overrides",
+          fileSizeBytes: 1,
+          contextLength: 4096,
+          embeddingLength: undefined,
+          attentionHeadCount: undefined,
+          attentionHeadCountKv: undefined,
+          blockCount: undefined,
+          feedForwardLength: undefined,
+          quantType: undefined,
+          hasVisionEncoder: false,
+          hasAudioEncoder: false,
+          defaultTemperature: 0.7,
+          defaultTopK: 40,
+          defaultTopP: 0.95,
+          defaultMinP: 0.02,
+          defaultRepeatPenalty: 1.15,
+          chatTemplate: undefined,
+          bosToken: undefined,
+          eosToken: undefined,
+        },
+      },
+    ]);
+
+    const inferencePresets = await getInferencePresets();
+    const preset = inferencePresets.find((p) => p.sourceModelPath === "/models/explicit.gguf");
+
+    expect(preset).toBeDefined();
+    expect(preset?.minP).toBe(0.02);
+    expect(preset?.repeatPenalty).toBe(1.15);
+  });
+
+  it("uses regular minP/repeatPenalty defaults when core sampling params are missing from GGUF", async () => {
+    await ensureModelDefaultPresets([
+      {
+        publisher: "Publisher",
+        modelName: "PartialSampling",
+        primaryPath: "/models/partial.gguf",
+        metadata: {
+          architecture: "llama",
+          name: "Partial Sampling",
+          fileSizeBytes: 1,
+          contextLength: 4096,
+          embeddingLength: undefined,
+          attentionHeadCount: undefined,
+          attentionHeadCountKv: undefined,
+          blockCount: undefined,
+          feedForwardLength: undefined,
+          quantType: undefined,
+          hasVisionEncoder: false,
+          hasAudioEncoder: false,
+          defaultTemperature: 0.7,
+          defaultTopK: undefined,
+          defaultTopP: 0.95,
+          defaultMinP: undefined,
+          defaultRepeatPenalty: undefined,
+          chatTemplate: undefined,
+          bosToken: undefined,
+          eosToken: undefined,
+        },
+      },
+    ]);
+
+    const inferencePresets = await getInferencePresets();
+    const preset = inferencePresets.find((p) => p.sourceModelPath === "/models/partial.gguf");
+
+    expect(preset).toBeDefined();
+    expect(preset?.temperature).toBe(0.7);
+    expect(preset?.topP).toBe(0.95);
+    expect(preset?.topK).toBe(40);
+    expect(preset?.minP).toBe(0.05);
+    expect(preset?.repeatPenalty).toBe(1.1);
   });
 });

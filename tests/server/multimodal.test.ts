@@ -210,7 +210,7 @@ describe("multimodal", () => {
     expect(res).toBe("Look at this");
   });
 
-  it("builds audio parts correctly using image_url media parts", async () => {
+  it("builds audio parts correctly using input_audio media parts", async () => {
     const attachments = [
       {
         id: "1",
@@ -226,10 +226,50 @@ describe("multimodal", () => {
     const res = await buildContentParts("Listen to this", attachments, metadata);
     expect(Array.isArray(res)).toBe(true);
     const parts = res as any[];
-    expect(parts[0].type).toBe("image_url");
-    expect(parts[0].image_url.url).toBe("file://attachments/audio.wav");
+    expect(parts[0].type).toBe("input_audio");
+    expect(parts[0].input_audio.url).toBe("file://attachments/audio.wav");
     expect(parts[1].type).toBe("text");
     expect(parts[1].text).toBe("Listen to this");
+  });
+
+  it("builds video parts correctly using input_video media parts", async () => {
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(Array.isArray(res)).toBe(true);
+    const parts = res as any[];
+    expect(parts[0].type).toBe("input_video");
+    expect(parts[0].input_video.url).toBe("file://attachments/video.mp4");
+    expect(parts[1].type).toBe("text");
+    expect(parts[1].text).toBe("Watch this");
+  });
+
+  it("skips video if model has no vision encoder", async () => {
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: false } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(typeof res).toBe("string");
+    expect(res).toBe("Watch this");
   });
 
   it("builds gemma4 image_url payloads without per-attachment budget fields", async () => {

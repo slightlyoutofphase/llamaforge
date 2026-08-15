@@ -170,7 +170,7 @@ export function SystemPresetEditor() {
           </button>
           <button
             type="button"
-            onClick={() => setRightPanelView(null)}
+            onClick={() => setRightPanelView("settings")}
             className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
             <X size={18} />
           </button>

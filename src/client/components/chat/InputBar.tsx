@@ -21,7 +21,9 @@ interface PendingAttachment {
  * @returns An object URL for image attachments, or `null` when no preview should be shown.
  */
 function createPreviewUrl(file: File): string | null {
-  return file.type.startsWith("image/") ? URL.createObjectURL(file) : null;
+  return file.type.startsWith("image/") || file.type.startsWith("video/")
+    ? URL.createObjectURL(file)
+    : null;
 }
 
 /**
@@ -113,6 +115,7 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     accept: {
       "image/*": [],
       "audio/*": [],
+      "video/*": [],
       "application/pdf": [],
       "text/*": [],
     },
@@ -207,7 +210,7 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
           onClick={open}
           disabled={!isActive || isGenerating}
           className="p-2 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-elevated)] rounded-xl transition-all mr-2 shrink-0 mb-1 disabled:opacity-50 disabled:cursor-not-allowed"
-          title="Attach files (Images, Audio, PDF, Text)">
+          title="Attach files (Images, Audio, Video, PDF, Text)">
           <Plus size={20} />
         </button>
 

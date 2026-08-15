@@ -265,7 +265,11 @@ export async function processUpload(
         );
       }
     }
-  } else if (!mimeType.startsWith("image/") && !mimeType.startsWith("audio/")) {
+  } else if (
+    !mimeType.startsWith("image/") &&
+    !mimeType.startsWith("audio/") &&
+    !mimeType.startsWith("video/")
+  ) {
     // text, markdown, csv, json, xml, code...
     assignExtractedText(attachment, Buffer.from(buffer).toString("utf-8"));
   }
@@ -381,7 +385,11 @@ export async function buildContentParts(
       }
     }
 
-    if (!attachment.mimeType.startsWith("image/") && !attachment.mimeType.startsWith("audio/")) {
+    if (
+      !attachment.mimeType.startsWith("image/") &&
+      !attachment.mimeType.startsWith("audio/") &&
+      !attachment.mimeType.startsWith("video/")
+    ) {
       const absPath = resolveStoredAttachmentPath(attachment.filePath);
       if (!absPath) return undefined;
       try {
@@ -406,7 +414,11 @@ export async function buildContentParts(
       continue;
     }
 
-    if (a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/")) {
+    if (
+      a.mimeType.startsWith("image/") ||
+      a.mimeType.startsWith("audio/") ||
+      a.mimeType.startsWith("video/")
+    ) {
       try {
         const absPath = resolveStoredAttachmentPath(a.filePath);
         if (!absPath) {
@@ -420,16 +432,20 @@ export async function buildContentParts(
 
         if (a.mimeType.startsWith("image/") && metadata && !metadata.hasVisionEncoder) continue;
         if (a.mimeType.startsWith("audio/") && metadata && !metadata.hasAudioEncoder) continue;
+        if (a.mimeType.startsWith("video/") && metadata && !metadata.hasVisionEncoder) continue;
 
         const url = toLocalMediaUrl(a.filePath);
         if (!url) {
           logWarn(`Invalid attachment media URL path: ${a.filePath}`);
           continue;
         }
-        const mediaPart: any = {
-          type: "image_url",
-          image_url: { url },
-        };
+        const isAudio = a.mimeType.startsWith("audio/");
+        const isVideo = a.mimeType.startsWith("video/");
+        const mediaPart: any = isAudio
+          ? { type: "input_audio", input_audio: { url } }
+          : isVideo
+            ? { type: "input_video", input_video: { url } }
+            : { type: "image_url", image_url: { url } };
         logInfo(`Pushing media URL path: ${url}`);
         parts.push(mediaPart);
       } catch (e) {

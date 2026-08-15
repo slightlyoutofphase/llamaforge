@@ -8,6 +8,9 @@ import { Template } from "@huggingface/jinja";
 import type { ChatMessage, ThinkingTagConfig } from "../shared/types";
 import { logWarn } from "./logger";
 
+export { analyzeTemplateCapabilities } from "../shared/templateCapabilities";
+export type { TemplateCapabilityInfo } from "../shared/templateCapabilities";
+
 /**
  * Configuration specifically for the Gemma 4 architectures regarding their unique formatting.
  */

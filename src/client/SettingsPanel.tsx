@@ -4,17 +4,14 @@
  */
 
 import type { AppSettings } from "@shared/types";
-import { Loader2, X } from "lucide-react";
+import { FolderOpen, Loader2, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSettings, useUpdateSettings } from "./queries";
 import { useAppStore } from "./store";
 import { useUiStore } from "./uiStore";
 
 type NumericDraftKey =
-  | "llamaPortRangeMin"
-  | "llamaPortRangeMax"
-  | "requestTimeoutSeconds"
-  | "serverPort";
+  "llamaPortRangeMin" | "llamaPortRangeMax" | "requestTimeoutSeconds" | "serverPort";
 
 type NumericDraftState = Record<NumericDraftKey, string>;
 
@@ -40,6 +37,21 @@ function createNumericDrafts(settings?: Partial<AppSettings>): NumericDraftState
     ),
     serverPort: String(settings?.serverPort ?? NUMERIC_DEFAULTS.serverPort),
   };
+}
+
+/**
+ * Returns the full path to an executable inside a directory, appending `.exe`
+ * on Windows and using the correct path separator.
+ *
+ * @param dirPath - Directory selected by the user.
+ * @param baseName - Executable name without extension.
+ * @returns Combined path string.
+ */
+function getExecutablePath(dirPath: string, baseName: string): string {
+  const isWindows = dirPath.includes("\\");
+  const sep = isWindows ? "\\" : "/";
+  const fileName = isWindows ? `${baseName}.exe` : baseName;
+  return dirPath.endsWith(sep) ? dirPath + fileName : dirPath + sep + fileName;
 }
 
 /**
@@ -181,103 +193,258 @@ export function SettingsPanel() {
             <label htmlFor="llamaServerPath" className="text-sm font-medium">
               llama-server Path
             </label>
-            <input
-              id="llamaServerPath"
-              type="text"
-              value={localState.llamaServerPath || ""}
-              onChange={(e) =>
-                setLocalState((prev) => ({ ...prev, llamaServerPath: e.target.value }))
-              }
-              placeholder="/usr/local/bin/llama-server"
-              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
-            />
+            <div className="flex gap-2">
+              <input
+                id="llamaServerPath"
+                type="text"
+                value={localState.llamaServerPath || ""}
+                onChange={(e) =>
+                  setLocalState((prev) => ({ ...prev, llamaServerPath: e.target.value }))
+                }
+                placeholder="/usr/local/bin/llama-server"
+                className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+              />
+              <button
+                type="button"
+                aria-label="Browse for llama-server"
+                onClick={async () => {
+                  try {
+                    if ("showDirectoryPicker" in window) {
+                      const handle = await (window as any).showDirectoryPicker();
+                      const dirPath = (handle as any).path || handle.name;
+                      const filePath = getExecutablePath(dirPath, "llama-server");
+                      setLocalState((prev) => ({ ...prev, llamaServerPath: filePath }));
+                    }
+                  } catch {
+                    // User cancelled or API unavailable — ignore
+                  }
+                }}
+                className="px-2 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium flex items-center gap-1">
+                <FolderOpen size={14} />
+                Browse
+              </button>
+            </div>
           </div>
           <div className="space-y-2">
             <label htmlFor="modelsPath" className="text-sm font-medium">
               Models root directory
             </label>
-            <input
-              id="modelsPath"
-              type="text"
-              value={localState.modelsPath || ""}
-              onChange={(e) => setLocalState((prev) => ({ ...prev, modelsPath: e.target.value }))}
-              placeholder="~/.llamaforge/models"
-              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
-            />
+            <div className="flex gap-2">
+              <input
+                id="modelsPath"
+                type="text"
+                value={localState.modelsPath || ""}
+                onChange={(e) => setLocalState((prev) => ({ ...prev, modelsPath: e.target.value }))}
+                placeholder="~/.llamaforge/models"
+                className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+              />
+              <button
+                type="button"
+                aria-label="Browse for models directory"
+                onClick={async () => {
+                  try {
+                    if ("showDirectoryPicker" in window) {
+                      const handle = await (window as any).showDirectoryPicker();
+                      const dirPath = (handle as any).path || handle.name;
+                      setLocalState((prev) => ({ ...prev, modelsPath: dirPath }));
+                    }
+                  } catch {
+                    // User cancelled or API unavailable — ignore
+                  }
+                }}
+                className="px-2 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium flex items-center gap-1">
+                <FolderOpen size={14} />
+                Browse
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => void useAppStore.getState().fetchModels()}
+              className="w-full mt-1 flex items-center justify-center gap-2 px-3 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium">
+              <RefreshCw size={14} />
+              Rescan Models
+            </button>
           </div>
           <div className="grid grid-cols-1 gap-3">
             <div className="space-y-2">
               <label htmlFor="nvidiaSmiPath" className="text-sm font-medium">
                 nvidia-smi Path (Optional)
               </label>
-              <input
-                id="nvidiaSmiPath"
-                type="text"
-                value={localState.nvidiaSmiPath || ""}
-                onChange={(e) =>
-                  setLocalState((prev) => ({ ...prev, nvidiaSmiPath: e.target.value }))
-                }
-                placeholder="nvidia-smi"
-                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
-              />
+              <div className="flex gap-2">
+                <input
+                  id="nvidiaSmiPath"
+                  type="text"
+                  value={localState.nvidiaSmiPath || ""}
+                  onChange={(e) =>
+                    setLocalState((prev) => ({ ...prev, nvidiaSmiPath: e.target.value }))
+                  }
+                  placeholder="nvidia-smi"
+                  className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+                />
+                <button
+                  type="button"
+                  aria-label="Browse for nvidia-smi"
+                  onClick={async () => {
+                    try {
+                      if ("showDirectoryPicker" in window) {
+                        const handle = await (window as any).showDirectoryPicker();
+                        const dirPath = (handle as any).path || handle.name;
+                        const filePath = getExecutablePath(dirPath, "nvidia-smi");
+                        setLocalState((prev) => ({ ...prev, nvidiaSmiPath: filePath }));
+                      }
+                    } catch {
+                      // User cancelled or API unavailable — ignore
+                    }
+                  }}
+                  className="px-2 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium flex items-center gap-1">
+                  <FolderOpen size={14} />
+                  Browse
+                </button>
+              </div>
             </div>
             <div className="space-y-2">
               <label htmlFor="rocmSmiPath" className="text-sm font-medium">
                 rocm-smi Path (Optional)
               </label>
-              <input
-                id="rocmSmiPath"
-                type="text"
-                value={localState.rocmSmiPath || ""}
-                onChange={(e) =>
-                  setLocalState((prev) => ({ ...prev, rocmSmiPath: e.target.value }))
-                }
-                placeholder="rocm-smi"
-                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
-              />
+              <div className="flex gap-2">
+                <input
+                  id="rocmSmiPath"
+                  type="text"
+                  value={localState.rocmSmiPath || ""}
+                  onChange={(e) =>
+                    setLocalState((prev) => ({ ...prev, rocmSmiPath: e.target.value }))
+                  }
+                  placeholder="rocm-smi"
+                  className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+                />
+                <button
+                  type="button"
+                  aria-label="Browse for rocm-smi"
+                  onClick={async () => {
+                    try {
+                      if ("showDirectoryPicker" in window) {
+                        const handle = await (window as any).showDirectoryPicker();
+                        const dirPath = (handle as any).path || handle.name;
+                        const filePath = getExecutablePath(dirPath, "rocm-smi");
+                        setLocalState((prev) => ({ ...prev, rocmSmiPath: filePath }));
+                      }
+                    } catch {
+                      // User cancelled or API unavailable — ignore
+                    }
+                  }}
+                  className="px-2 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium flex items-center gap-1">
+                  <FolderOpen size={14} />
+                  Browse
+                </button>
+              </div>
             </div>
             <div className="space-y-2">
               <label htmlFor="sysctlPath" className="text-sm font-medium">
                 sysctl Path (Optional)
               </label>
-              <input
-                id="sysctlPath"
-                type="text"
-                value={localState.sysctlPath || ""}
-                onChange={(e) => setLocalState((prev) => ({ ...prev, sysctlPath: e.target.value }))}
-                placeholder="sysctl"
-                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
-              />
+              <div className="flex gap-2">
+                <input
+                  id="sysctlPath"
+                  type="text"
+                  value={localState.sysctlPath || ""}
+                  onChange={(e) =>
+                    setLocalState((prev) => ({ ...prev, sysctlPath: e.target.value }))
+                  }
+                  placeholder="sysctl"
+                  className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+                />
+                <button
+                  type="button"
+                  aria-label="Browse for sysctl"
+                  onClick={async () => {
+                    try {
+                      if ("showDirectoryPicker" in window) {
+                        const handle = await (window as any).showDirectoryPicker();
+                        const dirPath = (handle as any).path || handle.name;
+                        const filePath = getExecutablePath(dirPath, "sysctl");
+                        setLocalState((prev) => ({ ...prev, sysctlPath: filePath }));
+                      }
+                    } catch {
+                      // User cancelled or API unavailable — ignore
+                    }
+                  }}
+                  className="px-2 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium flex items-center gap-1">
+                  <FolderOpen size={14} />
+                  Browse
+                </button>
+              </div>
             </div>
             <div className="space-y-2">
               <label htmlFor="systemProfilerPath" className="text-sm font-medium">
                 system_profiler Path (Optional)
               </label>
-              <input
-                id="systemProfilerPath"
-                type="text"
-                value={localState.systemProfilerPath || ""}
-                onChange={(e) =>
-                  setLocalState((prev) => ({ ...prev, systemProfilerPath: e.target.value }))
-                }
-                placeholder="system_profiler"
-                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
-              />
+              <div className="flex gap-2">
+                <input
+                  id="systemProfilerPath"
+                  type="text"
+                  value={localState.systemProfilerPath || ""}
+                  onChange={(e) =>
+                    setLocalState((prev) => ({ ...prev, systemProfilerPath: e.target.value }))
+                  }
+                  placeholder="system_profiler"
+                  className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+                />
+                <button
+                  type="button"
+                  aria-label="Browse for system_profiler"
+                  onClick={async () => {
+                    try {
+                      if ("showDirectoryPicker" in window) {
+                        const handle = await (window as any).showDirectoryPicker();
+                        const dirPath = (handle as any).path || handle.name;
+                        const filePath = getExecutablePath(dirPath, "system_profiler");
+                        setLocalState((prev) => ({ ...prev, systemProfilerPath: filePath }));
+                      }
+                    } catch {
+                      // User cancelled or API unavailable — ignore
+                    }
+                  }}
+                  className="px-2 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium flex items-center gap-1">
+                  <FolderOpen size={14} />
+                  Browse
+                </button>
+              </div>
             </div>
             <div className="space-y-2">
               <label htmlFor="powershellPath" className="text-sm font-medium">
                 PowerShell Path (Optional)
               </label>
-              <input
-                id="powershellPath"
-                type="text"
-                value={localState.powershellPath || ""}
-                onChange={(e) =>
-                  setLocalState((prev) => ({ ...prev, powershellPath: e.target.value }))
-                }
-                placeholder="powershell"
-                className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
-              />
+              <div className="flex gap-2">
+                <input
+                  id="powershellPath"
+                  type="text"
+                  value={localState.powershellPath || ""}
+                  onChange={(e) =>
+                    setLocalState((prev) => ({ ...prev, powershellPath: e.target.value }))
+                  }
+                  placeholder="powershell"
+                  className="flex-1 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
+                />
+                <button
+                  type="button"
+                  aria-label="Browse for powershell"
+                  onClick={async () => {
+                    try {
+                      if ("showDirectoryPicker" in window) {
+                        const handle = await (window as any).showDirectoryPicker();
+                        const dirPath = (handle as any).path || handle.name;
+                        const filePath = getExecutablePath(dirPath, "powershell");
+                        setLocalState((prev) => ({ ...prev, powershellPath: filePath }));
+                      }
+                    } catch {
+                      // User cancelled or API unavailable — ignore
+                    }
+                  }}
+                  className="px-2 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium flex items-center gap-1">
+                  <FolderOpen size={14} />
+                  Browse
+                </button>
+              </div>
             </div>
           </div>
         </section>

@@ -14,7 +14,7 @@ import type {
 import type { ServerWebSocket } from "bun";
 import { getHardwareInfo } from "./hardwareProbe";
 import { getServerStatus, loadModel, requestUnloadModel } from "./llamaServer";
-import { logError } from "./logger";
+import { logError, logInfo } from "./logger";
 import { populateMetadata, scanModels } from "./modelScanner";
 import { getAppDataDir } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
@@ -246,21 +246,14 @@ export function createRouter(_settings: AppSettings) {
     const refreshPromise = (async () => {
       const rawModels = await scanModels(modelsPath);
       const models = withSideEffects
-        ? await Promise.all(
-            rawModels.map(async (model) => {
-              const { getMetadataForPath } = await import("./persistence/chatRepo");
-              const cachedMetadata = await getMetadataForPath(model.primaryPath);
-              return cachedMetadata
-                ? { ...model, metadata: cachedMetadata }
-                : await populateMetadata(model);
-            }),
-          )
+        ? await Promise.all(rawModels.map((model) => populateMetadata(model)))
         : await readCachedModelMetadata(rawModels);
 
       cachedModels = { modelsPath, models };
 
       if (withSideEffects) {
         try {
+          logInfo("Synchronous model metadata population complete.");
           const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
           await ensureModelDefaultPresets(models);
           const { broadcast } = await import("./wsHub");
@@ -419,6 +412,12 @@ export function createRouter(_settings: AppSettings) {
           const selectedModel = models.find((model) => model.primaryPath === modelPath);
           if (selectedModel?.mmProjPath) {
             loadConfig.mmProjPath = selectedModel.mmProjPath;
+          }
+          if (
+            (loadConfig.specType === "draft-simple" || loadConfig.specType === "draft-eagle3") &&
+            selectedModel?.draftModelPath
+          ) {
+            loadConfig.specDraftModelPath = selectedModel.draftModelPath;
           }
           const port = await loadModel(
             loadConfig,
@@ -796,7 +795,7 @@ export function createRouter(_settings: AppSettings) {
               let forwardIdx = msgIdx + 1;
               while (forwardIdx < msgs.length) {
                 const forwardMessage = msgs[forwardIdx];
-                if (!forwardMessage || forwardMessage.role !== "tool") break;
+                if (forwardMessage?.role !== "tool") break;
                 branchPoint = forwardMessage.id;
                 forwardIdx++;
               }

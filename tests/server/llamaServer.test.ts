@@ -4,7 +4,6 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import path from "node:path";
 import { buildArgs, loadModel } from "../../src/server/llamaServer";
 import { getAppDataDir } from "../../src/server/persistence/db";
 import type { ModelLoadConfig } from "../../src/shared/types";
@@ -28,6 +27,7 @@ const baseConfig: ModelLoadConfig = {
   swaFull: false,
   noKvOffload: false,
   cacheReuse: 0,
+  contextCheckpoints: 32,
 };
 
 describe("llamaServer", () => {
@@ -59,10 +59,12 @@ describe("llamaServer", () => {
     expect(args).toContain("--kv-offload");
     expect(args).toContain("--cache-reuse");
     expect(args[args.indexOf("--cache-reuse") + 1]).toBe("0");
+    expect(args).toContain("--ctx-checkpoints");
+    expect(args[args.indexOf("--ctx-checkpoints") + 1]).toBe("32");
     expect(args).toContain("--chat-template-file");
     expect(args[args.indexOf("--chat-template-file") + 1]).toBe("/tmp/custom.jinja");
     expect(args).toContain("--media-path");
-    expect(args[args.indexOf("--media-path") + 1]).toBe(`${getAppDataDir()}${path.sep}`);
+    expect(args[args.indexOf("--media-path") + 1]).toBe(getAppDataDir());
   });
 
   it("adds optional arguments when provided", () => {
@@ -91,6 +93,56 @@ describe("llamaServer", () => {
 
     expect(args).toContain("--seed");
     expect(args[args.indexOf("--seed") + 1]).toBe("42");
+  });
+
+  it("adds speculative decoding flags when configured", () => {
+    const config: ModelLoadConfig = {
+      ...baseConfig,
+      specType: "draft-mtp",
+      specDraftNMax: 12,
+      specDraftNMin: 2,
+      specDraftPMin: 0.85,
+    };
+
+    const args = buildArgs(config, 8080);
+
+    expect(args).toContain("--spec-type");
+    expect(args[args.indexOf("--spec-type") + 1]).toBe("draft-mtp");
+    expect(args).toContain("--spec-draft-n-max");
+    expect(args[args.indexOf("--spec-draft-n-max") + 1]).toBe("12");
+    expect(args).toContain("--spec-draft-n-min");
+    expect(args[args.indexOf("--spec-draft-n-min") + 1]).toBe("2");
+    expect(args).toContain("--spec-draft-p-min");
+    expect(args[args.indexOf("--spec-draft-p-min") + 1]).toBe("0.85");
+  });
+
+  it("adds draft model path for draft-simple mode", () => {
+    const config: ModelLoadConfig = {
+      ...baseConfig,
+      specType: "draft-simple",
+      specDraftModelPath: "/models/draft.gguf",
+      specDraftNMax: 8,
+    };
+
+    const args = buildArgs(config, 8080);
+
+    expect(args).toContain("--spec-type");
+    expect(args[args.indexOf("--spec-type") + 1]).toBe("draft-simple");
+    expect(args).toContain("--spec-draft-model");
+    expect(args[args.indexOf("--spec-draft-model") + 1]).toBe("/models/draft.gguf");
+  });
+
+  it("omits speculative decoding flags when mode is off", () => {
+    const config: ModelLoadConfig = {
+      ...baseConfig,
+      specType: "off",
+    };
+
+    const args = buildArgs(config, 8080);
+
+    expect(args).not.toContain("--spec-type");
+    expect(args).not.toContain("--spec-draft-n-max");
+    expect(args).not.toContain("--spec-draft-model");
   });
 
   it("adds image token load flags when configured", () => {

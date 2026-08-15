@@ -5,15 +5,18 @@
 
 import { json } from "@codemirror/lang-json";
 import type { InferencePreset } from "../../../shared/types";
+import { analyzeTemplateCapabilities } from "../../../shared/templateCapabilities";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   useCreateInferencePreset,
   useDeleteInferencePreset,
   useInferencePresets,
+  useLoadPresets,
   useUpdateInferencePreset,
 } from "../../queries";
+import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 
 /**
@@ -25,6 +28,8 @@ import { useUiStore } from "../../uiStore";
 export function InferencePresetEditor() {
   const { setRightPanelView, activePresetId } = useUiStore();
   const { data: presets } = useInferencePresets();
+  const { data: loadPresets } = useLoadPresets();
+  const { loadedModel } = useAppStore();
   const createMut = useCreateInferencePreset();
   const updateMut = useUpdateInferencePreset();
   const deleteMut = useDeleteInferencePreset();
@@ -32,6 +37,14 @@ export function InferencePresetEditor() {
   const activePreset = presets?.find((p) => p.id === activePresetId) || presets?.[0];
 
   const [localState, setLocalState] = useState<Partial<InferencePreset> | null>(null);
+
+  const templateCapabilities = useMemo(() => {
+    const loadPreset = loadPresets?.find((p) => p.modelPath === loadedModel?.primaryPath);
+    const effectiveTemplate =
+      loadPreset?.chatTemplateOverride ?? loadedModel?.metadata?.chatTemplate;
+    if (!effectiveTemplate) return null;
+    return analyzeTemplateCapabilities(effectiveTemplate);
+  }, [loadPresets, loadedModel]);
 
   useEffect(() => {
     if (!activePreset) return;
@@ -185,7 +198,7 @@ export function InferencePresetEditor() {
           )}
           <button
             type="button"
-            onClick={() => setRightPanelView(null)}
+            onClick={() => setRightPanelView("settings")}
             className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
             <X size={18} />
           </button>
@@ -202,7 +215,6 @@ export function InferencePresetEditor() {
             type="text"
             value={localState.name || ""}
             onChange={(e) => updateField("name", e.target.value)}
-            disabled={localState.isDefault}
             className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md disabled:opacity-50"
           />
         </div>
@@ -743,13 +755,44 @@ export function InferencePresetEditor() {
               type="checkbox"
               checked={localState.thinkingEnabled ?? true}
               onChange={(e) => updateField("thinkingEnabled", e.target.checked)}
-              disabled={localState.isDefault}
               className="accent-[var(--color-accent)]"
             />
           </h3>
           <p className="text-xs text-[var(--color-text-muted)] mt-2">
             Tag parsing is controlled by the active load preset. This toggle only controls whether
             `enable_thinking` is requested on subsequent generations.
+          </p>
+        </section>
+
+        <section className="space-y-4">
+          <h3
+            className={`text-xs font-bold uppercase tracking-wider flex items-center justify-between ${
+              templateCapabilities?.hasPreserveThinking
+                ? "text-[var(--color-text-muted)]"
+                : "text-[var(--color-text-muted)] opacity-50"
+            }`}>
+            <label
+              htmlFor="preserveThinking"
+              title="Passes preserve_thinking = true/false to the Jinja chat template">
+              Preserve Thinking
+            </label>
+            <input
+              id="preserveThinking"
+              type="checkbox"
+              disabled={!templateCapabilities?.hasPreserveThinking}
+              checked={
+                localState.preserveThinking ??
+                templateCapabilities?.preserveThinkingDefault ??
+                false
+              }
+              onChange={(e) => updateField("preserveThinking", e.target.checked)}
+              className="accent-[var(--color-accent)] disabled:opacity-30"
+            />
+          </h3>
+          <p className="text-xs text-[var(--color-text-muted)] mt-2">
+            {templateCapabilities?.hasPreserveThinking
+              ? "Controls whether the template preserves reasoning content in the conversation history."
+              : "The active model's chat template does not support preserve_thinking."}
           </p>
         </section>
 
@@ -792,7 +835,6 @@ export function InferencePresetEditor() {
         <button
           type="button"
           onClick={handleSave}
-          disabled={localState.isDefault}
           className="flex-1 flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md active:scale-95 active:shadow-none transition-all disabled:opacity-50">
           <Save size={16} /> Save Changes
         </button>

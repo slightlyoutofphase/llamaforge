@@ -9,11 +9,7 @@ import { create } from "zustand";
  * Valid views for the right-hand context sidebar.
  */
 export type RightPanelView =
-  | "loadPreset"
-  | "inferencePreset"
-  | "systemPreset"
-  | "settings"
-  | "modelLibrary";
+  "loadPreset" | "inferencePreset" | "systemPreset" | "settings" | "modelLibrary";
 
 /**
  * Interface for the UI state store.

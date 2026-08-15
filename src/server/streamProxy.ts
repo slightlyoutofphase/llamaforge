@@ -45,6 +45,7 @@ type ChatCompletionMessage = {
   tool_calls?: unknown[];
   tool_call_id?: string;
   name?: string;
+  reasoning_content?: string;
 };
 
 type ChatCompletionRequestBody = {
@@ -80,7 +81,7 @@ type ChatCompletionRequestBody = {
     type: "json_schema";
     json_schema: Record<string, unknown>;
   };
-  chat_template_kwargs?: { enable_thinking: true };
+  chat_template_kwargs?: { enable_thinking: true; preserve_thinking?: boolean };
   reasoning_format?: "none";
 };
 
@@ -454,7 +455,10 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const requestThinkingConfig =
     (infPreset?.thinkingEnabled ?? true)
       ? {
-          chat_template_kwargs: { enable_thinking: true as const },
+          chat_template_kwargs: {
+            enable_thinking: true as const,
+            preserve_thinking: infPreset?.preserveThinking ?? false,
+          },
           reasoning_format: "none" as const,
         }
       : undefined;
@@ -472,7 +476,10 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     for (const m of messages) {
       const mediaAtts =
         m.attachments?.filter(
-          (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("audio/"),
+          (a) =>
+            a.mimeType.startsWith("image/") ||
+            a.mimeType.startsWith("audio/") ||
+            a.mimeType.startsWith("video/"),
         ) || [];
 
       const hasMediaAttachments = mediaAtts.length > 0;
@@ -485,6 +492,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       const hasUnsupportedMedia = mediaAtts.some((a) => {
         if (a.mimeType.startsWith("image/") && !modelMeta?.hasVisionEncoder) return true;
         if (a.mimeType.startsWith("audio/") && !modelMeta?.hasAudioEncoder) return true;
+        if (a.mimeType.startsWith("video/") && !modelMeta?.hasVisionEncoder) return true;
         return false;
       });
 
@@ -504,6 +512,15 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       }
 
       const apiMsg: ChatCompletionMessage = { role: m.role, content: finalContent };
+
+      // Include previous thinking content in history when preserve_thinking is enabled
+      if (
+        m.role === "assistant" &&
+        requestThinkingConfig?.chat_template_kwargs?.preserve_thinking &&
+        m.thinkingContent
+      ) {
+        apiMsg.reasoning_content = m.thinkingContent;
+      }
 
       const parsedToolCalls = parseToolCallsJson(m.toolCallsJson);
       if (parsedToolCalls) {

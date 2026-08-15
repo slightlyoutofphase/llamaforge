@@ -13,6 +13,7 @@ import { useUiStore } from "../../src/client/uiStore";
 
 let InferencePresetEditor: typeof import("../../src/client/components/preset/InferencePresetEditor").InferencePresetEditor;
 let LoadPresetEditor: typeof import("../../src/client/components/preset/LoadPresetEditor").LoadPresetEditor;
+let SystemPresetEditor: typeof import("../../src/client/components/preset/SystemPresetEditor").SystemPresetEditor;
 
 let queryClient: QueryClient;
 
@@ -33,6 +34,16 @@ const mockInferencePreset = {
   toolCallsEnabled: false,
   tools: [],
   structuredOutput: { enabled: false, schema: {} },
+};
+
+/**
+ * Fixture: A sample system preset for testing.
+ */
+const mockSystemPreset = {
+  id: "test-sys-id",
+  name: "Test System",
+  isDefault: true,
+  content: "You are a helpful assistant.",
 };
 
 /**
@@ -65,6 +76,8 @@ describe("Preset Editors Integration", () => {
     InferencePresetEditor = inferenceModule.InferencePresetEditor;
     const loadModule = await import("../../src/client/components/preset/LoadPresetEditor");
     LoadPresetEditor = loadModule.LoadPresetEditor;
+    const systemModule = await import("../../src/client/components/preset/SystemPresetEditor");
+    SystemPresetEditor = systemModule.SystemPresetEditor;
   });
 
   beforeEach(() => {
@@ -77,7 +90,7 @@ describe("Preset Editors Integration", () => {
 
     queryClient.setQueryData(queryKeys.presetsInference(), [mockInferencePreset]);
     queryClient.setQueryData(queryKeys.presetsLoad(), [mockLoadPreset]);
-    queryClient.setQueryData(queryKeys.presetsSystem(), []);
+    queryClient.setQueryData(queryKeys.presetsSystem(), [mockSystemPreset]);
 
     useUiStore.setState({
       rightPanelView: null,
@@ -150,5 +163,134 @@ describe("Preset Editors Integration", () => {
     fireEvent.click(screen.getByRole("button", { name: "Thinking Tag Override" }));
     expect(screen.getByLabelText("Open Tag")).toBeDefined();
     expect(screen.getByRole("button", { name: /Detect from architecture/i })).toBeDefined();
+  });
+
+  it("InferencePresetEditor: close button returns to settings panel", async () => {
+    useUiStore.setState({ rightPanelView: "inferencePreset", activePresetId: "test-inf-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InferencePresetEditor />
+      </QueryClientProvider>,
+    );
+
+    const closeButton = document.querySelector(".lucide-x")?.closest("button") as HTMLButtonElement;
+    expect(closeButton).toBeTruthy();
+    fireEvent.click(closeButton);
+
+    expect(useUiStore.getState().rightPanelView).toBe("settings");
+  });
+
+  it("LoadPresetEditor: close button returns to settings panel", async () => {
+    useUiStore.setState({ rightPanelView: "loadPreset", activePresetId: "test-load-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LoadPresetEditor />
+      </QueryClientProvider>,
+    );
+
+    const closeButton = document.querySelector(".lucide-x")?.closest("button") as HTMLButtonElement;
+    expect(closeButton).toBeTruthy();
+    fireEvent.click(closeButton);
+
+    expect(useUiStore.getState().rightPanelView).toBe("settings");
+  });
+
+  it("SystemPresetEditor: close button returns to settings panel", async () => {
+    useUiStore.setState({ rightPanelView: "systemPreset", activePresetId: null });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <SystemPresetEditor />
+      </QueryClientProvider>,
+    );
+
+    const closeButton = document.querySelector(".lucide-x")?.closest("button") as HTMLButtonElement;
+    expect(closeButton).toBeTruthy();
+    fireEvent.click(closeButton);
+
+    expect(useUiStore.getState().rightPanelView).toBe("settings");
+  });
+
+  it("InferencePresetEditor: preserve thinking checkbox is disabled when template does not support it", async () => {
+    useUiStore.setState({ activePresetId: "test-inf-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InferencePresetEditor />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
+
+    const preserveCheckbox = screen.getByLabelText(/Preserve Thinking/i) as HTMLInputElement;
+    expect(preserveCheckbox).toBeDefined();
+    expect(preserveCheckbox.disabled).toBe(true);
+    expect(screen.getByText(/does not support preserve_thinking/i)).toBeDefined();
+  });
+
+  it("InferencePresetEditor: preserve thinking checkbox is enabled when template supports it", async () => {
+    const modelWithPreserveThinking = {
+      primaryPath: "/models/test.gguf",
+      metadata: {
+        name: "test-model",
+        chatTemplate: "{%- set preserve_thinking = preserve_thinking | default(false) -%}",
+      } as any,
+      mmprojPath: undefined,
+      mtime: Date.now(),
+    };
+    useAppStore.setState({
+      models: [modelWithPreserveThinking],
+      loadedModel: modelWithPreserveThinking,
+    });
+    useUiStore.setState({ activePresetId: "test-inf-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InferencePresetEditor />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
+
+    const preserveCheckbox = screen.getByLabelText(/Preserve Thinking/i) as HTMLInputElement;
+    expect(preserveCheckbox).toBeDefined();
+    expect(preserveCheckbox.disabled).toBe(false);
+    expect(screen.getByText(/preserves reasoning content/i)).toBeDefined();
+  });
+
+  it("InferencePresetEditor: preserve thinking checkbox can be toggled when enabled", async () => {
+    const modelWithPreserveThinking = {
+      primaryPath: "/models/test.gguf",
+      metadata: {
+        name: "test-model",
+        chatTemplate: "{%- set preserve_thinking = preserve_thinking | default(false) -%}",
+      } as any,
+      mmprojPath: undefined,
+      mtime: Date.now(),
+    };
+    useAppStore.setState({
+      models: [modelWithPreserveThinking],
+      loadedModel: modelWithPreserveThinking,
+    });
+    useUiStore.setState({ activePresetId: "test-inf-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InferencePresetEditor />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
+
+    const preserveCheckbox = screen.getByLabelText(/Preserve Thinking/i) as HTMLInputElement;
+    expect(preserveCheckbox.checked).toBe(false);
+
+    fireEvent.click(preserveCheckbox);
+    expect(preserveCheckbox.checked).toBe(true);
+
+    fireEvent.click(preserveCheckbox);
+    expect(preserveCheckbox.checked).toBe(false);
   });
 });

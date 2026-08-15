@@ -1,7 +1,7 @@
 # GOAL
 Your sole task is to complete a real full implementation of `LLAMAFORGE_PROJECT_PLAN.md`, with the correct multi file project structure exactly as the plan mandates.
 # STRICTLY PROHIBITED:
-- ANY use of PowerShell scripts WHATSOEVER for tasks that can more easily be accomplished via the specific native Agent tools that are available to you here in the specific context of the Visual Studio Code Github Copilot Extension.
+- ANY use of PowerShell scripts WHATSOEVER for tasks that can more easily be accomplished via the specific native Agent tools that are available to you here in the specific context of the Cora VSCode Extension.
 - Stub code, placeholder code, todos, simplifications, and any other kind of code that does not correctly fulfill **all** requirements of the project plan.
 # REMEMBER:
 This **IS** a real implementation. This **IS** a full implementation. The user will immediately notice any failure to implement the project plan correctly and fully.

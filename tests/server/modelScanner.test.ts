@@ -3,16 +3,55 @@
  * Tests for GGUF model scanning and filesystem discovery.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import * as ggufReaderModule from "../../src/server/ggufReader";
 import { scanModels } from "../../src/server/modelScanner";
+import { initDb } from "../../src/server/persistence/db";
+
+const baseMockMetadata = {
+  name: "Test Model",
+  fileSizeBytes: 5_368_709_120,
+  contextLength: 8192,
+  embeddingLength: 0,
+  attentionHeadCount: 32,
+  attentionHeadCountKv: 32,
+  blockCount: 48,
+  feedForwardLength: 8192,
+  quantType: "q4_0",
+  hasVisionEncoder: false,
+  hasAudioEncoder: false,
+  defaultTemperature: 0.8,
+  defaultTopK: 40,
+  defaultTopP: 0.95,
+  defaultMinP: 0.05,
+  defaultRepeatPenalty: 1.1,
+  chatTemplate: undefined,
+  bosToken: undefined,
+  eosToken: undefined,
+  isDraftModel: false,
+};
 
 describe("modelScanner", () => {
   let tmpDir: string;
 
+  let parseSpy: ReturnType<typeof spyOn>;
+
   beforeAll(async () => {
+    await initDb();
+
+    parseSpy = spyOn(ggufReaderModule, "parseGgufMetadata").mockImplementation(
+      async (filePath: string) => {
+        const isDraft = filePath.includes("assistant") || filePath.includes("eagle3");
+        return {
+          ...baseMockMetadata,
+          architecture: isDraft ? "assistant" : "llama",
+        };
+      },
+    );
+
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "llamaforge-test-"));
 
     // Create PublisherA / Model-7B
@@ -34,6 +73,7 @@ describe("modelScanner", () => {
   });
 
   afterAll(async () => {
+    parseSpy.mockRestore();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -84,5 +124,49 @@ describe("modelScanner", () => {
     const entries = await scanModels(path.join(tmpDir, "AmbiguousPublisher"));
     expect(entries).toHaveLength(1);
     expect(entries[0]?.mmProjPath).toBeUndefined();
+  });
+
+  it("excludes draft models from primary results and links them to main models", async () => {
+    const draftRoot = path.join(tmpDir, "DraftPublisher", "Model-7B");
+    await fs.mkdir(draftRoot, { recursive: true });
+    await Bun.write(path.join(draftRoot, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(draftRoot, "model-7b-q4-assistant.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "DraftPublisher"));
+    const mainModel = entries.find((e) => e.primaryPath.includes("model-7b-q4.gguf"));
+    const draftModel = entries.find((e) => e.primaryPath.includes("assistant.gguf"));
+
+    expect(entries).toHaveLength(1);
+    expect(mainModel).toBeDefined();
+    expect(draftModel).toBeUndefined();
+    expect(mainModel?.draftModelPath).toBeDefined();
+    expect(mainModel?.draftModelPath?.includes("assistant.gguf")).toBeTrue();
+  });
+
+  it("does not link draft models when filename contains mtp instead of assistant/eagle3", async () => {
+    const mtpRoot = path.join(tmpDir, "MtpPublisher", "Model-MTP");
+    await fs.mkdir(mtpRoot, { recursive: true });
+    await Bun.write(path.join(mtpRoot, "model-mtp-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "MtpPublisher"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftModelPath).toBeUndefined();
+  });
+
+  it("gracefully handles mprotect failures from parseGgufMetadata without crashing", async () => {
+    const originalImpl = parseSpy.getMockImplementation();
+    parseSpy.mockImplementation(async () => {
+      throw new Error("mprotect failed: 487");
+    });
+
+    const crashRoot = path.join(tmpDir, "CrashPublisher", "Model-7B");
+    await fs.mkdir(crashRoot, { recursive: true });
+    await Bun.write(path.join(crashRoot, "model-7b-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "CrashPublisher"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.primaryPath.includes("model-7b-q4.gguf")).toBeTrue();
+
+    parseSpy.mockImplementation(originalImpl);
   });
 });

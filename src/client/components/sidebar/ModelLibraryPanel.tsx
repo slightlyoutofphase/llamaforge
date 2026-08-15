@@ -48,8 +48,9 @@ export function ModelLibraryPanel() {
 
   const filteredModels = models.filter(
     (m) =>
-      m.modelName.toLowerCase().includes(search.toLowerCase()) ||
-      m.primaryPath.toLowerCase().includes(search.toLowerCase()),
+      !m.metadata?.isDraftModel &&
+      (m.modelName.toLowerCase().includes(search.toLowerCase()) ||
+        m.primaryPath.toLowerCase().includes(search.toLowerCase())),
   );
 
   const selectedModel = models.find((m) => m.primaryPath === selectedPath);
@@ -70,7 +71,9 @@ export function ModelLibraryPanel() {
     const hasAudio = !!selectedModel.metadata?.hasAudioEncoder;
 
     const visionMsgs = messages.filter((m) =>
-      m.attachments?.some((a) => a.mimeType.startsWith("image/")),
+      m.attachments?.some(
+        (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("video/"),
+      ),
     );
     const audioMsgs = messages.filter((m) =>
       m.attachments?.some((a) => a.mimeType.startsWith("audio/")),
@@ -93,6 +96,13 @@ export function ModelLibraryPanel() {
       presetId: preset.id,
       thinkingTagOverride: preset.thinkingTagOverride,
     };
+
+    if (
+      (preset.config.specType === "draft-simple" || preset.config.specType === "draft-eagle3") &&
+      selectedModel.draftModelPath
+    ) {
+      request.specDraftModelPath = selectedModel.draftModelPath;
+    }
 
     if (
       preset.chatTemplateOverride &&
@@ -228,6 +238,11 @@ export function ModelLibraryPanel() {
                           {model.metadata?.hasAudioEncoder && (
                             <span className="bg-purple-500/10 text-purple-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-purple-500/20 uppercase tracking-wider max-w-full break-words">
                               Audio
+                            </span>
+                          )}
+                          {model.modelName.toLowerCase().includes("mtp") && (
+                            <span className="bg-green-500/10 text-green-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-green-500/20 uppercase tracking-wider max-w-full break-words">
+                              MTP
                             </span>
                           )}
                         </div>

@@ -43,7 +43,7 @@ describe("db configuration", () => {
 
     expect(row).toBeDefined();
     const parsed = JSON.parse(row?.config_json ?? "{}");
-    expect(parsed.config?.flashAttn).toBe("on");
+    expect(parsed.config?.flashAttn).toBe("auto");
     expect(parsed.config?.flashAttention).toBeUndefined();
   });
 

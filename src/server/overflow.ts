@@ -104,6 +104,8 @@ function estimateAttachmentMediaTokens(messages: ChatMessage[]): number {
         attachmentTokens += 560;
       } else if (attachment.mimeType.startsWith("audio/")) {
         attachmentTokens += 256;
+      } else if (attachment.mimeType.startsWith("video/")) {
+        attachmentTokens += 1024;
       }
     }
   }
