@@ -121,7 +121,7 @@ export function InferencePresetEditor() {
       dryMultiplier: 0.0,
       dryBase: 1.75,
       dryAllowedLength: 2,
-      dryPenaltyLastN: -1,
+      dryPenaltyLastN: 64,
       drySequenceBreakers: ["\n", ":", '"', "*"],
       xtcProbability: 0.0,
       xtcThreshold: 0.1,
@@ -468,8 +468,8 @@ export function InferencePresetEditor() {
                 id="dryPenaltyLastN"
                 type="number"
                 step="1"
-                min="-1"
-                value={localState.dryPenaltyLastN ?? -1}
+                min="0"
+                value={localState.dryPenaltyLastN ?? 64}
                 onChange={(e) => updateField("dryPenaltyLastN", parseInt(e.target.value, 10))}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs"
               />

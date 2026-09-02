@@ -395,6 +395,20 @@ export interface WsMessageFrame {
 }
 
 /**
+ * Progress update frame broadcast during model loading to give clients real-time feedback.
+ */
+export interface WsLoadProgressFrame {
+  /** Packet type identifier for load-progress events. */
+  type: "load_progress";
+  /** Current loading phase. */
+  phase: "spawning" | "loading_weights" | "offloading" | "initializing" | "ready";
+  /** Estimated progress percentage (0–100). */
+  progress: number;
+  /** Optional human-readable detail about the current step. */
+  detail?: string | undefined;
+}
+
+/**
  * Unified type representing all potential messages a server may emit natively across connected websocket channels.
  */
 export interface WsPresetsUpdatedFrame {
@@ -411,6 +425,7 @@ export type WsFrame =
   | WsToolCallFrame
   | WsToolApprovalStateFrame
   | WsMessageFrame
+  | WsLoadProgressFrame
   | WsPresetsUpdatedFrame;
 
 /**

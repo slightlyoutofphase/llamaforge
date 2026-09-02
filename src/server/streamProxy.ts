@@ -599,7 +599,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     dry_multiplier: infPreset?.dryMultiplier ?? 0.0,
     dry_base: infPreset?.dryBase ?? 1.75,
     dry_allowed_length: infPreset?.dryAllowedLength ?? 2,
-    dry_penalty_last_n: infPreset?.dryPenaltyLastN ?? -1,
+    dry_penalty_last_n: infPreset?.dryPenaltyLastN ?? 64,
     dry_sequence_breakers: infPreset?.drySequenceBreakers ?? ["\n", ":", '"', "*"],
     xtc_probability: infPreset?.xtcProbability ?? 0.0,
     xtc_threshold: infPreset?.xtcThreshold ?? 0.1,

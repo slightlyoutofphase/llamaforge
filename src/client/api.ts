@@ -406,6 +406,18 @@ export async function updateSettings(updates: any): Promise<void> {
 }
 
 /**
+ * Triggers a forced rescan of the models directory on the server.
+ *
+ * @returns A promise resolving to the updated model list.
+ * @throws {Error} If the rescan request fails.
+ */
+export async function rescanModels(): Promise<import("../shared/types").ModelEntry[]> {
+  const res = await request("/api/models/rescan", { method: "POST" });
+  if (!res.ok) throw new Error("Failed to rescan models");
+  return res.json();
+}
+
+/**
  * Forces a hardware-aware optimization for a specific model path.
  *
  * @param modelPath - Absolute path to the .gguf model.

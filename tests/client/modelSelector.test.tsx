@@ -29,6 +29,9 @@ const defaultState = {
   loadedModel: null,
   messages: [],
   isGenerating: false,
+  loadProgress: 0,
+  loadProgressPhase: null,
+  loadProgressDetail: null,
 };
 
 mock.module("@tanstack/react-router", () => ({
@@ -197,7 +200,10 @@ describe("ModelSelector Component", () => {
       loadedModel: null,
       messages: [],
       isGenerating: false,
-    });
+      loadProgress: 0,
+      loadProgressPhase: null,
+      loadProgressDetail: null,
+    } as any);
 
     global.fetch = mock((input) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -277,5 +283,31 @@ describe("ModelSelector Component", () => {
       }),
     );
     expect(loadModelSpy.mock.calls[0]?.[0]?.chatTemplateFile).toBeUndefined();
+  });
+
+  it("shows load progress instead of the static splash while a model is loading", () => {
+    useAppStore.setState({
+      models: [],
+      loadModel: () => {},
+      unloadModel: () => {},
+      serverStatus: "loading",
+      loadedModel: null,
+      messages: [],
+      isGenerating: false,
+      loadProgress: 42,
+      loadProgressPhase: "loading_weights",
+      loadProgressDetail: "Loading tensor blocks",
+    } as any);
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ModelSelector />
+      </QueryClientProvider>,
+    );
+
+    expect(screen.queryByText("Initializing Weights")).toBeNull();
+    expect(screen.getByText("Loading model")).toBeTruthy();
+    expect(screen.getByText("42%")).toBeTruthy();
+    expect(screen.getByText("Loading tensor blocks")).toBeTruthy();
   });
 });

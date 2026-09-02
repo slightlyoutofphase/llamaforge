@@ -69,6 +69,7 @@ export function SettingsPanel() {
   const [numericDrafts, setNumericDrafts] = useState<NumericDraftState>(NUMERIC_DEFAULTS);
   const lastPersistedStateRef = useRef<Partial<AppSettings> | null>(null);
   const hasHydratedRef = useRef(false);
+  const saveTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (settings) {
@@ -158,6 +159,7 @@ export function SettingsPanel() {
         },
       });
     }, 250);
+    saveTimeoutRef.current = timeoutId;
 
     return () => window.clearTimeout(timeoutId);
   }, [localState, updateMut]);
@@ -259,8 +261,20 @@ export function SettingsPanel() {
             </div>
             <button
               type="button"
-              onClick={() => void useAppStore.getState().fetchModels()}
-              className="w-full mt-1 flex items-center justify-center gap-2 px-3 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] transition-colors text-xs font-medium">
+              onClick={() => {
+                if (saveTimeoutRef.current !== null) {
+                  window.clearTimeout(saveTimeoutRef.current);
+                  saveTimeoutRef.current = null;
+                }
+                const pendingState = localState;
+                updateMut.mutate(pendingState, {
+                  onSuccess: () => {
+                    lastPersistedStateRef.current = pendingState;
+                    void useAppStore.getState().rescanModels();
+                  },
+                });
+              }}
+              className="w-full mt-1 flex items-center justify-center gap-2 px-3 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] active:bg-[var(--color-border)] active:scale-[0.98] transition-colors text-xs font-medium">
               <RefreshCw size={14} />
               Rescan Models
             </button>

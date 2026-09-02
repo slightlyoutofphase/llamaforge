@@ -11,7 +11,7 @@ import { type Subprocess, spawn } from "bun";
 import { logDebug, logError, logInfo, logWarn, shouldEmitLog } from "./logger";
 import { getAppDataDir } from "./persistence/db";
 import { findFreePort } from "./utils/network";
-import { broadcastLog, broadcastStatus } from "./wsHub";
+import { broadcastLoadProgress, broadcastLog, broadcastStatus } from "./wsHub";
 
 let proc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
 let activePort: number | null = null;
@@ -24,6 +24,74 @@ let unloadPromise: Promise<void> | null = null;
 const BOOT_LOG_CAPACITY = 1000;
 let bootLogBuffer: string[] = [];
 let bootLogWriteIndex = 0;
+
+// Load-progress tracking state
+let currentLoadPhase: "spawning" | "loading_weights" | "offloading" | "initializing" | "ready" =
+  "spawning";
+let currentLoadProgress = 0;
+const loadPhaseLogCounts: Record<string, number> = {};
+
+/**
+ * Resets the load-progress tracker to its initial state.
+ *
+ * @returns No return value.
+ */
+function resetLoadProgress(): void {
+  currentLoadPhase = "spawning";
+  currentLoadProgress = 0;
+  for (const key of Object.keys(loadPhaseLogCounts)) {
+    delete loadPhaseLogCounts[key];
+  }
+}
+
+/**
+ * Derives a loading-phase update from a raw llama-server log line and broadcasts it.
+ *
+ * @param line - Log line emitted while llama-server is starting.
+ * @returns No return value.
+ */
+function trackLoadProgressFromLog(line: string): void {
+  if (currentStatus !== "loading") return;
+
+  const lower = line.toLowerCase();
+  let didChange = false;
+
+  if (
+    lower.includes("load") &&
+    (lower.includes("model") || lower.includes("tensor") || lower.includes("gguf"))
+  ) {
+    currentLoadPhase = "loading_weights";
+    loadPhaseLogCounts["loading_weights"] = (loadPhaseLogCounts["loading_weights"] || 0) + 1;
+    currentLoadProgress = Math.min(15 + loadPhaseLogCounts["loading_weights"] * 3, 50);
+    didChange = true;
+  } else if (
+    lower.includes("offload") ||
+    lower.includes("cuda") ||
+    lower.includes("gpu") ||
+    lower.includes("vulkan") ||
+    lower.includes("metal")
+  ) {
+    currentLoadPhase = "offloading";
+    loadPhaseLogCounts["offloading"] = (loadPhaseLogCounts["offloading"] || 0) + 1;
+    currentLoadProgress = Math.min(50 + loadPhaseLogCounts["offloading"] * 3, 80);
+    didChange = true;
+  } else if (
+    lower.includes("srv") ||
+    lower.includes("http") ||
+    lower.includes("server") ||
+    lower.includes("listening") ||
+    lower.includes("health")
+  ) {
+    currentLoadPhase = "initializing";
+    loadPhaseLogCounts["initializing"] = (loadPhaseLogCounts["initializing"] || 0) + 1;
+    currentLoadProgress = Math.min(80 + loadPhaseLogCounts["initializing"] * 3, 98);
+    didChange = true;
+  }
+
+  if (didChange) {
+    broadcastLoadProgress(currentLoadPhase, currentLoadProgress, line.slice(0, 200));
+  }
+}
 
 /**
  * Appends a line to the in-memory boot log ring buffer.
@@ -339,6 +407,8 @@ export async function loadModel(
   }
   loadingLock = true;
   clearBootLogs();
+  resetLoadProgress();
+  broadcastLoadProgress("spawning", 5, "Starting model load sequence…");
 
   try {
     if (unloadPromise) {
@@ -403,6 +473,7 @@ export async function loadModel(
       throw new Error(`llama-server failed to become ready. Last logs:\n${lastError}`);
     }
 
+    broadcastLoadProgress("ready", 100, "Model server ready");
     setStatus("running");
     logInfo("Model server running", { port, model: config.modelPath });
 
@@ -429,8 +500,13 @@ async function waitForHealthCheck(
   target: Subprocess<"ignore", "pipe", "pipe">,
   port: number,
 ): Promise<boolean> {
-  const maxAttempts = 480; // 120s at 250ms
-  for (let i = 0; i < maxAttempts; i++) {
+  // Aggressive early polling to detect readiness faster, then back off.
+  const FAST_ATTEMPTS = 50; // 5s at 100ms
+  const MID_ATTEMPTS = 80; // 20s at 250ms
+  const SLOW_ATTEMPTS = 70; // 35s at 500ms
+  let attempt = 0;
+
+  while (attempt < FAST_ATTEMPTS + MID_ATTEMPTS + SLOW_ATTEMPTS) {
     if (proc !== target || target.exitCode !== null) {
       return false; // Process died, no need to keep polling
     }
@@ -441,7 +517,17 @@ async function waitForHealthCheck(
     } catch {
       // Ignore network errors while booting
     }
-    await new Promise((r) => setTimeout(r, 250));
+
+    let delay: number;
+    if (attempt < FAST_ATTEMPTS) {
+      delay = 100;
+    } else if (attempt < FAST_ATTEMPTS + MID_ATTEMPTS) {
+      delay = 250;
+    } else {
+      delay = 500;
+    }
+    await new Promise((r) => setTimeout(r, delay));
+    attempt++;
   }
   return false;
 }
@@ -506,6 +592,9 @@ async function consumeLogs(
 
         // Rolling buffer for boot error reporting
         pushBootLog(line);
+
+        // Derive load-progress from structured or unstructured boot logs
+        trackLoadProgressFromLog(line);
 
         if (line.startsWith("{") && line.endsWith("}")) {
           try {

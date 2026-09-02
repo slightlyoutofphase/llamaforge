@@ -20,8 +20,18 @@ import { useAppStore } from "./store";
  * @returns The rendered React element.
  */
 export function ModelSelector() {
-  const { models, loadModel, unloadModel, serverStatus, loadedModel, messages, isGenerating } =
-    useAppStore();
+  const {
+    models,
+    loadModel,
+    unloadModel,
+    serverStatus,
+    loadedModel,
+    messages,
+    isGenerating,
+    loadProgress,
+    loadProgressPhase,
+    loadProgressDetail,
+  } = useAppStore();
   const { data: loadPresets } = useLoadPresets();
   const createChatMut = useCreateChat();
   const navigate = useNavigate();
@@ -182,13 +192,54 @@ export function ModelSelector() {
       <div className="w-full max-w-full mx-auto space-y-6">
         {/* Loading Overlay */}
         {serverStatus === "loading" && (
-          <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in">
-            <Loader2 size={64} className="text-[var(--color-accent)] animate-spin mb-4" />
-            <div className="text-xl font-bold text-white tracking-widest uppercase">
-              Initializing Weights
-            </div>
-            <div className="text-sm text-gray-300 font-mono mt-2">
-              Allocating VRAM and verifying structures...
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in px-6">
+            <div className="w-full max-w-2xl rounded-2xl border border-white/10 bg-[color:rgba(15,23,42,0.92)] p-6 shadow-2xl shadow-black/40">
+              <div className="flex items-start gap-4">
+                <Loader2
+                  size={32}
+                  className="mt-1 text-[var(--color-accent)] animate-spin shrink-0"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-lg font-semibold text-white">Loading model</div>
+                      <div className="text-xs uppercase tracking-[0.24em] text-gray-400 mt-1">
+                        {loadProgressPhase === "spawning"
+                          ? "Spawning llama-server"
+                          : loadProgressPhase === "loading_weights"
+                            ? "Loading weights"
+                            : loadProgressPhase === "offloading"
+                              ? "Offloading to GPU"
+                              : loadProgressPhase === "initializing"
+                                ? "Initializing runtime"
+                                : loadProgressPhase === "ready"
+                                  ? "Ready"
+                                  : "Loading"}
+                      </div>
+                    </div>
+                    <div className="text-2xl font-bold text-white tabular-nums">
+                      {loadProgress}%
+                    </div>
+                  </div>
+
+                  <div className="mt-4 h-3 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-300 ease-out"
+                      style={{ width: `${Math.max(0, Math.min(100, loadProgress))}%` }}
+                    />
+                  </div>
+
+                  <div className="mt-4 flex items-center gap-3 text-sm text-gray-200">
+                    <Loader2
+                      size={16}
+                      className="text-[var(--color-accent)] animate-spin shrink-0"
+                    />
+                    <span className="font-mono truncate">
+                      {loadProgressDetail || "Starting model load sequence…"}
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}

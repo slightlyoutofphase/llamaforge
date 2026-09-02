@@ -32,7 +32,10 @@ describe("SettingsPanel", () => {
       useUpdateSettings: () => ({ mutate: updateSettingsMutate, isPending: false }),
     }));
 
-    useAppStore.setState({ fetchModels: mock().mockResolvedValue(undefined) });
+    useAppStore.setState({
+      fetchModels: mock().mockResolvedValue(undefined),
+      rescanModels: mock().mockResolvedValue(undefined),
+    });
 
     const imported = await import("../../src/client/SettingsPanel");
     SettingsPanel = imported.SettingsPanel;
@@ -190,12 +193,17 @@ describe("SettingsPanel", () => {
     expect(showDirectoryPicker).toHaveBeenCalled();
   });
 
-  it("has a rescan models button that triggers fetchModels immediately", async () => {
-    const fetchModelsSpy = mock().mockResolvedValue(undefined);
-    useAppStore.setState({ fetchModels: fetchModelsSpy });
+  it("saves settings and triggers rescanModels when rescan button is clicked with a changed path", async () => {
+    const rescanModelsSpy = mock().mockResolvedValue(undefined);
+    useAppStore.setState({ rescanModels: rescanModelsSpy });
 
     await act(async () => {
       render(<SettingsPanel />);
+    });
+
+    const modelsInput = await screen.findByDisplayValue("/home/user/models");
+    await act(async () => {
+      fireEvent.change(modelsInput, { target: { value: "/updated/models" } });
     });
 
     const rescanButton = screen.getByRole("button", { name: /rescan models/i });
@@ -205,7 +213,20 @@ describe("SettingsPanel", () => {
       fireEvent.click(rescanButton);
     });
 
-    expect(fetchModelsSpy).toHaveBeenCalled();
+    expect(updateSettingsMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ modelsPath: "/updated/models" }),
+      expect.anything(),
+    );
+    expect(rescanModelsSpy).toHaveBeenCalled();
+  });
+
+  it("rescan models button has active press visual feedback classes", async () => {
+    await act(async () => {
+      render(<SettingsPanel />);
+    });
+
+    const rescanButton = screen.getByRole("button", { name: /rescan models/i });
+    expect(rescanButton.className).toContain("active:");
   });
 
   it("renders browse buttons for all optional binary path fields", async () => {

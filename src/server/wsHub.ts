@@ -128,6 +128,22 @@ export function broadcastStatus(status: LlamaServerStatus): void {
 }
 
 /**
+ * Broadcasts a model-loading progress update to all connected clients.
+ *
+ * @param phase - The current loading phase.
+ * @param progress - Estimated progress percentage (0–100).
+ * @param detail - Optional human-readable detail about the current step.
+ * @returns No return value.
+ */
+export function broadcastLoadProgress(
+  phase: "spawning" | "loading_weights" | "offloading" | "initializing" | "ready",
+  progress: number,
+  detail?: string,
+): void {
+  broadcast({ type: "load_progress", phase, progress, detail });
+}
+
+/**
  * Broadcasts a system log message to all clients.
  *
  * @param level - The severity level of the log.

@@ -42,6 +42,13 @@ interface AppState {
   hardware: HardwareInfo | null;
   /** Lifecycle state of the llama-server process. */
   serverStatus: LlamaServerStatus;
+  /** Current load progress percentage while the server is starting. */
+  loadProgress: number;
+  /** Current load phase while the server is starting. */
+  loadProgressPhase:
+    "spawning" | "loading_weights" | "offloading" | "initializing" | "ready" | null;
+  /** Human-readable detail for the current load step. */
+  loadProgressDetail: string | null;
   /** List of all models found in the models directory. */
   models: ModelEntry[];
   /** Reference to the currently loaded model, if any. */
@@ -134,6 +141,8 @@ interface AppState {
   fetchHardware: () => Promise<void>;
   /** Triggers a scan and fetch of available models. */
   fetchModels: () => Promise<void>;
+  /** Forces a rescan of the models directory and updates the model list. */
+  rescanModels: () => Promise<void>;
   /** Refreshes server and model load status. */
   fetchServerStatus: () => Promise<void>;
   /** Fetches prompt cache statistics for a specific chat. */
@@ -294,6 +303,9 @@ function isCurrentChatLoadRequest(requestId: number, chatId: string): boolean {
 export const useAppStore = create<AppState>((set, get) => ({
   hardware: null,
   serverStatus: "idle",
+  loadProgress: 0,
+  loadProgressPhase: null,
+  loadProgressDetail: null,
   models: [],
   loadedModel: null,
   isConnected: false,
@@ -417,6 +429,9 @@ export const useAppStore = create<AppState>((set, get) => ({
               updates.isWaitingForToolApproval = false;
               updates.currentGenerationId = null;
               updates.errorMessage = null;
+              updates.loadProgress = 0;
+              updates.loadProgressPhase = null;
+              updates.loadProgressDetail = null;
             }
             return updates;
           });
@@ -428,6 +443,12 @@ export const useAppStore = create<AppState>((set, get) => ({
           ) {
             void get().fetchServerStatus();
           }
+        } else if (frame.type === "load_progress") {
+          set({
+            loadProgress: frame.progress,
+            loadProgressPhase: frame.phase,
+            loadProgressDetail: frame.detail ?? null,
+          });
         } else if (frame.type === "log") {
           set((state) => ({ logs: appendLogLine(state.logs, `[${frame.level}] ${frame.body}`) }));
         } else if (frame.type === "token") {
@@ -1029,6 +1050,21 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  rescanModels: async () => {
+    try {
+      const models = await import("./api").then((m) => m.rescanModels());
+      set({ models, errorMessage: null });
+    } catch (e: unknown) {
+      logError("Rescan models failed", e);
+      get().addNotification(
+        e instanceof Error ? e.message : "Failed to rescan models.",
+        "error",
+        "Retry",
+        () => get().rescanModels(),
+      );
+    }
+  },
+
   fetchServerStatus: async () => {
     try {
       const res = await fetch("/api/server/status");
@@ -1116,7 +1152,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadModel: async (config: LoadModelRequest): Promise<boolean> => {
-    set({ serverStatus: "loading" });
+    set({
+      serverStatus: "loading",
+      loadProgress: 0,
+      loadProgressPhase: "spawning",
+      loadProgressDetail: "Starting model load sequence…",
+    });
     try {
       const res = await fetch("/api/server/load", {
         method: "POST",
@@ -1135,7 +1176,12 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (action) {
           action();
         }
-        set({ serverStatus: "idle" });
+        set({
+          serverStatus: "idle",
+          loadProgress: 0,
+          loadProgressPhase: null,
+          loadProgressDetail: null,
+        });
         get().setError(errorMessage, action ? "Settings" : null, action);
         return false;
       } else {
@@ -1146,6 +1192,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch (e: unknown) {
       set({
         serverStatus: "idle",
+        loadProgress: 0,
+        loadProgressPhase: null,
+        loadProgressDetail: null,
         errorMessage: e instanceof Error ? e.message : "Model load failed.",
       });
       return false;

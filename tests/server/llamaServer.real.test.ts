@@ -91,7 +91,7 @@ function buildChatRequestBase(inferencePreset: InferencePreset) {
     dry_multiplier: inferencePreset.dryMultiplier ?? 0,
     dry_base: inferencePreset.dryBase ?? 1.75,
     dry_allowed_length: inferencePreset.dryAllowedLength ?? 2,
-    dry_penalty_last_n: inferencePreset.dryPenaltyLastN ?? -1,
+    dry_penalty_last_n: inferencePreset.dryPenaltyLastN ?? 64,
     dry_sequence_breakers: inferencePreset.drySequenceBreakers ?? ["\n", ":", '"', "*"],
     xtc_probability: inferencePreset.xtcProbability ?? 0,
     xtc_threshold: inferencePreset.xtcThreshold ?? 0.1,
