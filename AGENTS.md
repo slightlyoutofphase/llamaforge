@@ -3,10 +3,11 @@
 - Stub code, placeholder code, todos, simplifications, and any other kind of deficient code.
 - Using any Git command whatsoever without explicit user permission
 # REMEMBER:
-This **IS** a real implementation. This **IS** a full implementation. The user will immediately notice any failure to implement the project correctly and fully.
-You **ABSOLUTELY MUST AT ALL TIMES** consider edge cases and handle them properly. "Happy path only" programming is **NOT** acceptable.
-This is a **SINGLE-USER OFFLINE APPLICATION.** Do not write or suggest code that optimizes for non-existent multi-user concurrency while sacrificing any aspect of the intended single-user experience.
-**DO NOT** use Node.js APIs if a native Bun API providing the same functionality, which should be used instead, specifically exists.
+- This **IS** a real implementation. This **IS** a full implementation. The user will immediately notice any failure to implement the project correctly and fully.
+- You **ABSOLUTELY MUST AT ALL TIMES** consider edge cases and handle them properly. "Happy path only" programming is **NOT** acceptable.
+- This is a **SINGLE-USER OFFLINE APPLICATION.** Do not write or suggest code that optimizes for non-existent multi-user concurrency while sacrificing any aspect of the intended single-user experience.
+- **DO NOT** use Node.js APIs if a native Bun API providing the same functionality, which should be used instead, specifically exists.
+- All code requires proper TypeDoc documentation.
 # ULTIMATE SOURCES OF TRUTH:
 The complete latest documentation for the llama-server CLI executable itself are in the `llama-server-docs.md` file which can be found in the top-level workspace directory.
 Gemma 4 prompt formatting docs:
