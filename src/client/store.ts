@@ -130,13 +130,15 @@ interface AppState {
   /** Clears unread activity for a chat. */
   clearUnreadChat: (chatId: string) => void;
   /** Sends a message to the active chat via the streamProxy. */
-  sendMessage: (content: string, files?: File[]) => void;
+  sendMessage: (content: string, files?: File[]) => Promise<void>;
   /** Interrupts an ongoing generation. */
   stopGeneration: () => void;
   /** Loads a chat session and its message history from the backend. */
   loadChat: (chatId: string) => Promise<void>;
   /** Clears active chat state. */
   unloadChat: () => void;
+  /** Drops buffered WebSocket frames for a chat that is no longer needed. */
+  discardPendingChatFrames: (chatId: string) => void;
   /** Fetches hardware info from the API. */
   fetchHardware: () => Promise<void>;
   /** Triggers a scan and fetch of available models. */
@@ -149,8 +151,16 @@ interface AppState {
   fetchPromptCacheStats: (chatId: string) => Promise<void>;
   /** Spawns the llama-server process with the given configuration. */
   loadModel: (config: LoadModelRequest) => Promise<boolean>;
-  /** Loads older messages for the current chat (M10 pagination). */
+  /** Loads older messages for the current chat using the oldest loaded position as a cursor. */
   loadMoreMessages: () => Promise<void>;
+  /** Patches metadata for the currently open chat without refetching the transcript. */
+  patchCurrentChatMetadata: (
+    updates: Partial<{
+      systemPresetId?: string | null;
+      inferencePresetId?: string | null;
+      name?: string | null;
+    }>,
+  ) => void;
   /** Terminates the active llama-server process. */
   unloadModel: () => Promise<void>;
   /** Sends a tool call resolution (approval/rejection) back to the server. */
@@ -168,6 +178,21 @@ const MAX_RECONNECT_DELAY = 30000;
 const MAX_LOG_LINES = 5000;
 let reconnectTimer: number | null = null;
 const pendingChatFrames = new Map<string, WsFrame[]>();
+const MAX_PENDING_CHAT_FRAMES = 64;
+
+function compactTokenFrame(
+  existing: Extract<WsFrame, { type: "token" }>,
+  incoming: Extract<WsFrame, { type: "token" }>,
+): Extract<WsFrame, { type: "token" }> {
+  return {
+    ...incoming,
+    delta: existing.delta + incoming.delta,
+    thinkingDelta:
+      incoming.thinkingDelta !== undefined || existing.thinkingDelta !== undefined
+        ? (existing.thinkingDelta || "") + (incoming.thinkingDelta || "")
+        : undefined,
+  };
+}
 // M6 fix: guard against duplicate sends from rapid clicks
 let sendInProgress = false;
 let activeChatLoadRequestId = 0;
@@ -205,7 +230,18 @@ function frameHasChatId(frame: WsFrame): frame is WsFrame & { chatId: string } {
 function bufferChatFrame(frame: WsFrame) {
   if (!frameHasChatId(frame)) return;
   const queued = pendingChatFrames.get(frame.chatId) || [];
+  if (frame.type === "token") {
+    const last = queued[queued.length - 1];
+    if (last?.type === "token" && last.messageId === frame.messageId) {
+      queued[queued.length - 1] = compactTokenFrame(last, frame);
+      pendingChatFrames.set(frame.chatId, queued);
+      return;
+    }
+  }
   queued.push(frame);
+  if (queued.length > MAX_PENDING_CHAT_FRAMES) {
+    queued.splice(0, queued.length - MAX_PENDING_CHAT_FRAMES);
+  }
   pendingChatFrames.set(frame.chatId, queued);
 }
 
@@ -464,7 +500,7 @@ export const useAppStore = create<AppState>((set, get) => ({
               };
             }
             const messages = [...state.messages];
-            const lastMsg = messages[messages.length - 1];
+            const targetIndex = messages.findIndex((m) => m.id === frame.messageId);
             const stats = {
               tokensCached: frame.tokensCached ?? state.generationStats?.tokensCached ?? 0,
               totalPredicted: (state.generationStats?.totalPredicted ?? 0) + 1,
@@ -474,14 +510,14 @@ export const useAppStore = create<AppState>((set, get) => ({
               stopReason: state.generationStats?.stopReason,
             };
 
-            if (lastMsg && lastMsg.role === "assistant") {
-              const nextMsg = { ...lastMsg };
+            if (targetIndex >= 0) {
+              const nextMsg = { ...messages[targetIndex] } as ChatMessage;
               nextMsg.content += frame.delta;
               nextMsg.rawContent += frame.delta;
               if (frame.thinkingDelta !== undefined) {
                 nextMsg.thinkingContent = (nextMsg.thinkingContent || "") + frame.thinkingDelta;
               }
-              messages[messages.length - 1] = nextMsg;
+              messages[targetIndex] = nextMsg;
             } else {
               messages.push({
                 id: frame.messageId,
@@ -515,12 +551,13 @@ export const useAppStore = create<AppState>((set, get) => ({
               };
             }
             const nextMessages = [...state.messages];
-            const lastMsg = nextMessages[nextMessages.length - 1];
-            if (lastMsg && lastMsg.id === frame.messageId) {
-              if (frame.fullContent !== undefined) lastMsg.content = frame.fullContent;
-              if (frame.fullRawContent !== undefined) lastMsg.rawContent = frame.fullRawContent;
-              if (frame.fullThinking !== undefined) lastMsg.thinkingContent = frame.fullThinking;
-              lastMsg.metrics = {
+            const targetIndex = nextMessages.findIndex((m) => m.id === frame.messageId);
+            if (targetIndex >= 0) {
+              const nextMsg = { ...nextMessages[targetIndex] } as ChatMessage;
+              if (frame.fullContent !== undefined) nextMsg.content = frame.fullContent;
+              if (frame.fullRawContent !== undefined) nextMsg.rawContent = frame.fullRawContent;
+              if (frame.fullThinking !== undefined) nextMsg.thinkingContent = frame.fullThinking;
+              nextMsg.metrics = {
                 predictedTokens: frame.timings.predicted_n,
                 tokensPerSecond: frame.timings.predicted_per_second,
                 promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
@@ -528,6 +565,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 cachedPromptTokens: frame.timings.tokens_cached,
                 evaluatedPromptTokens: frame.timings.tokens_evaluated,
               };
+              nextMessages[targetIndex] = nextMsg;
             }
             return {
               isGenerating: false,
@@ -563,9 +601,11 @@ export const useAppStore = create<AppState>((set, get) => ({
               };
             }
             const messages = [...state.messages];
-            const lastMsg = messages[messages.length - 1];
-            if (lastMsg && lastMsg.role === "assistant" && lastMsg.id === frame.messageId) {
-              lastMsg.toolCallsJson = JSON.stringify(frame.toolCalls);
+            const targetIndex = messages.findIndex((m) => m.id === frame.messageId);
+            if (targetIndex >= 0) {
+              const nextMsg = { ...messages[targetIndex] } as ChatMessage;
+              nextMsg.toolCallsJson = JSON.stringify(frame.toolCalls);
+              messages[targetIndex] = nextMsg;
             }
             return {
               messages,
@@ -634,11 +674,17 @@ export const useAppStore = create<AppState>((set, get) => ({
           window.dispatchEvent(new CustomEvent("llamaforge:presets-invalidate"));
         } else if (frame.type === "error") {
           logError("WS Error frame:", frame.message);
-          set({
-            isGenerating: false,
-            isWaitingForToolApproval: false,
-            currentGenerationId: null,
-            errorMessage: frame.message || "An unknown error occurred during generation.",
+          set((state) => {
+            if (frame.chatId && frame.chatId !== state.currentChatId) {
+              bufferChatFrame(frame);
+              return state;
+            }
+            return {
+              isGenerating: false,
+              isWaitingForToolApproval: false,
+              currentGenerationId: null,
+              errorMessage: frame.message || "An unknown error occurred during generation.",
+            };
           });
         }
       } catch (err) {
@@ -651,23 +697,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get();
     const chatId = state.currentChatId;
     if (latestRequestedChatId && latestRequestedChatId !== chatId) {
-      set({
-        errorMessage:
-          "Please wait for the selected chat to finish loading before sending a message.",
-      });
-      return;
+      const error = new Error(
+        "Please wait for the selected chat to finish loading before sending a message.",
+      );
+      set({ errorMessage: error.message });
+      throw error;
     }
     if (!chatId) {
-      set({ errorMessage: "Unable to send message: no chat selected." });
-      return;
+      const error = new Error("Unable to send message: no chat selected.");
+      set({ errorMessage: error.message });
+      throw error;
     }
     if (content.length > 25000) {
-      set({ errorMessage: "Message content exceeds maximum length of 25,000 characters." });
-      return;
+      const error = new Error("Message content exceeds maximum length of 25,000 characters.");
+      set({ errorMessage: error.message });
+      throw error;
     }
     if (sendInProgress) {
       logWarn("sendMessage blocked: send already in progress");
-      return;
+      throw new Error("A message is already being sent.");
     }
     sendInProgress = true;
     logDebug("sendMessage initiated", {
@@ -677,13 +725,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
     if (files?.length && files.length > 5) {
       sendInProgress = false;
-      set({ errorMessage: "A maximum of 5 attachments is supported per message." });
-      return;
+      const error = new Error("A maximum of 5 attachments is supported per message.");
+      set({ errorMessage: error.message });
+      throw error;
     }
     if (files?.some((f) => f.size > 10 * 1024 * 1024)) {
       sendInProgress = false;
-      set({ errorMessage: "Attachments must be 10MB or smaller." });
-      return;
+      const error = new Error("Attachments must be 10MB or smaller.");
+      set({ errorMessage: error.message });
+      throw error;
     }
     const optimisticMessageId = `temp-${crypto.randomUUID()}`;
     set((s) => ({
@@ -706,7 +756,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       generationStats: null,
     }));
 
-    const requestTimeoutMs = 60000;
+    const requestTimeoutMs = 180000;
 
     try {
       const requestUrl = `/api/chats/${chatId}/messages`;
@@ -784,6 +834,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         isWaitingForToolApproval: false,
         errorMessage: err instanceof Error ? err.message : "Message send failed.",
       }));
+      throw err;
     } finally {
       // M6 fix: always clear the send guard
       sendInProgress = false;
@@ -954,6 +1005,8 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   unloadChat: () =>
     (() => {
+      const previousChatId = get().currentChatId;
+      if (previousChatId) pendingChatFrames.delete(previousChatId);
       activeChatLoadRequestId += 1;
       latestRequestedChatId = null;
       activeChatLoadController?.abort();
@@ -969,23 +1022,29 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     })(),
 
+  discardPendingChatFrames: (chatId) => {
+    pendingChatFrames.delete(chatId);
+  },
+
   loadMoreMessages: async () => {
     const state = get();
     if (!state.currentChatId) return;
-    // M10 fix: load the next page of older messages, prepending them to the array.
     const currentCount = state.messages.length;
     if (currentCount >= state.totalMessages) return;
-    const offset = currentCount;
+    const oldestPosition = state.messages.reduce(
+      (min, message) => (message.position < min ? message.position : min),
+      Number.POSITIVE_INFINITY,
+    );
+    if (!Number.isFinite(oldestPosition)) return;
     try {
       const res = await fetch(
-        `/api/chats/${state.currentChatId}?messageLimit=500&messageOffset=${offset}`,
+        `/api/chats/${state.currentChatId}?messageLimit=500&beforePosition=${oldestPosition}`,
       );
       if (!res.ok) return;
       const chat = await res.json();
       const olderMessages = (chat.messages || []) as ChatMessage[];
       if (olderMessages.length === 0) return;
       set((s) => {
-        // Prepend older messages, deduplicating by ID
         const existingIds = new Set(s.messages.map((m) => m.id));
         const unique = olderMessages.filter((m) => !existingIds.has(m.id));
         return {
@@ -997,6 +1056,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       logError("Failed to load more messages", e);
     }
   },
+
+  patchCurrentChatMetadata: (updates) =>
+    set((state) => {
+      if (!state.currentChatMetadata) return state;
+      return {
+        currentChatMetadata: {
+          ...state.currentChatMetadata,
+          ...updates,
+        },
+      };
+    }),
 
   fetchHardware: async () => {
     try {
@@ -1103,8 +1173,6 @@ export const useAppStore = create<AppState>((set, get) => ({
                   defaultMinP: undefined,
                   defaultRepeatPenalty: undefined,
                   chatTemplate: undefined,
-                  bosToken: undefined,
-                  eosToken: undefined,
                 },
               };
             }

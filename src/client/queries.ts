@@ -56,20 +56,6 @@ export function useInfiniteChats(q?: string) {
 }
 
 /**
- * Hook to retrieve a single chat session with its full message history.
- *
- * @param id - The unique UUID of the chat session.
- * @returns A query object containing the full {@link ChatSession}.
- */
-export function useChat(id: string) {
-  return useQuery({
-    queryKey: queryKeys.chat(id),
-    queryFn: () => api.fetchChat(id),
-    enabled: !!id,
-  });
-}
-
-/**
  * Hook to create a new chat session.
  *
  * @returns A mutation object for creating a chat.

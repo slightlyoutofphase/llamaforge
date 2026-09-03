@@ -75,10 +75,15 @@ export interface ModelLoadConfig {
   logLevel?: number;
   /** Fixed seed override for reproducibility. */
   seedOverride?: number;
-  /** Path to a file containing a chat template. */
-  chatTemplateFile?: string;
+  /** Jinja chat-template body written to a temp file at load time. */
+  chatTemplateContent?: string;
   /** Maximum number of image tokens for dynamic image resolution at model load time. */
   imageMaxTokens?: number;
+  /**
+   * Optional minimum number of image tokens. Omitted unless the user sets it explicitly,
+   * and only emitted alongside `--image-max-tokens`.
+   */
+  imageMinTokens?: number;
   /** ID of the preset used to generate this config. */
   presetId?: string;
 }
@@ -134,10 +139,6 @@ export interface GgufDisplayMetadata {
   defaultRepeatPenalty: number | undefined;
   /** Optional default chat template from the model metadata. */
   chatTemplate: string | undefined;
-  /** Optional beginning-of-sequence token. */
-  bosToken: string | undefined;
-  /** Optional end-of-sequence token. */
-  eosToken: string | undefined;
 }
 
 /**
@@ -665,6 +666,8 @@ export interface Attachment {
   virBudget?: number | undefined;
   /** Creation timestamp for the attachment record. */
   createdAt: number;
+  /** Optional base64 payload used only during chat export/import. */
+  base64Data?: string | undefined;
 }
 
 /**
@@ -691,6 +694,8 @@ export interface ChatSession {
   inferencePresetId?: string | undefined;
   /** Optional messages stored in this chat session. */
   messages?: ChatMessage[] | undefined;
+  /** Total message count when the payload is a paginated window of the full transcript. */
+  totalMessages?: number | undefined;
 }
 
 /**

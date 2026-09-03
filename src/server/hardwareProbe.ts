@@ -40,11 +40,6 @@ export function __parseWindowsWmiVideoControllers(rawJson: string): GpuInfo[] {
 }
 
 /**
- * The minimum supported version constant for the external llama-server executable.
- */
-export const LLAMA_SERVER_MIN_VERSION = "0.0.0" as const;
-
-/**
  * Executes system calls to gather detailed hardware information.
  *
  * @returns A promise resolving to a {@link HardwareInfo} object containing RAM, CPU, and GPU details.
@@ -70,17 +65,6 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
     } else if (process.platform === "darwin") {
       const hwmem = await execPromise([commandPaths.sysctl, "-n", "hw.memsize"]);
       totalRamBytes = parseInt(hwmem.trim(), 10);
-    } else if (process.platform === "win32") {
-      const output = await execPromise([
-        commandPaths.powershell,
-        "-NoProfile",
-        "-Command",
-        "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
-      ]);
-      const parsed = parseInt(output.trim(), 10);
-      if (!Number.isNaN(parsed)) {
-        totalRamBytes = parsed;
-      }
     }
   } catch {
     // fallback to os.totalmem()
@@ -199,9 +183,11 @@ export async function getHardwareInfo(): Promise<HardwareInfo> {
 async function execPromise(command: string[]): Promise<string> {
   try {
     const proc = spawn(command, { stdout: "pipe", stderr: "pipe" });
-    const stdout = await new Response(proc.stdout).text();
-    const stderr = await new Response(proc.stderr).text();
-    const exitCode = await proc.exited;
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
 
     if (exitCode !== 0) {
       throw new Error(`Command ${command[0]} exited with code ${exitCode}. Stderr: ${stderr}`);

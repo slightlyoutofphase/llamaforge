@@ -4,7 +4,8 @@
  */
 
 import { json } from "@codemirror/lang-json";
-import type { InferencePreset } from "../../../shared/types";
+import type { InferencePreset, ToolDefinition } from "../../../shared/types";
+import { BUILT_IN_TOOLS, isBuiltInToolName } from "../../../shared/builtInTools";
 import { analyzeTemplateCapabilities } from "../../../shared/templateCapabilities";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
@@ -29,7 +30,8 @@ export function InferencePresetEditor() {
   const { setRightPanelView, activePresetId } = useUiStore();
   const { data: presets } = useInferencePresets();
   const { data: loadPresets } = useLoadPresets();
-  const { loadedModel } = useAppStore();
+  const loadedModel = useAppStore((s) => s.loadedModel);
+  const [schemaDraft, setSchemaDraft] = useState("{}");
   const createMut = useCreateInferencePreset();
   const updateMut = useUpdateInferencePreset();
   const deleteMut = useDeleteInferencePreset();
@@ -40,16 +42,30 @@ export function InferencePresetEditor() {
 
   const templateCapabilities = useMemo(() => {
     const loadPreset = loadPresets?.find((p) => p.modelPath === loadedModel?.primaryPath);
-    const effectiveTemplate =
-      loadPreset?.chatTemplateOverride ?? loadedModel?.metadata?.chatTemplate;
+    const ggufTemplate = loadedModel?.metadata?.chatTemplate;
+    const overrideTemplate = loadPreset?.chatTemplateOverride;
+    const effectiveTemplate = overrideTemplate ?? ggufTemplate;
     if (!effectiveTemplate) return null;
-    return analyzeTemplateCapabilities(effectiveTemplate);
+    const capabilities = analyzeTemplateCapabilities(effectiveTemplate);
+    const provenance = overrideTemplate && overrideTemplate !== ggufTemplate ? "override" : "gguf";
+    return capabilities
+      ? { ...capabilities, provenance }
+      : { hasPreserveThinking: false, provenance };
   }, [loadPresets, loadedModel]);
 
   useEffect(() => {
     if (!activePreset) return;
     setLocalState((prev) => (prev?.id === activePreset.id ? prev : activePreset));
   }, [activePreset]);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the schema editor when switching presets, not on every local keystroke
+  useEffect(() => {
+    setSchemaDraft(
+      localState?.structuredOutput?.schema
+        ? JSON.stringify(localState.structuredOutput.schema, null, 2)
+        : "{}",
+    );
+  }, [localState?.id, localState?.structuredOutput?.schema]);
 
   if (!localState) return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
 
@@ -62,6 +78,26 @@ export function InferencePresetEditor() {
    */
   const updateField = <K extends keyof InferencePreset>(k: K, v: InferencePreset[K]) => {
     setLocalState((prev) => (prev ? { ...prev, [k]: v } : null));
+  };
+
+  /**
+   * Enables or disables a built-in tool on the current inference preset.
+   * Unknown custom tools already stored on the preset are left untouched.
+   *
+   * @param tool - Built-in tool definition to toggle.
+   * @param enabled - Whether the tool should be present in the preset.
+   * @returns No return value.
+   */
+  const toggleBuiltInTool = (tool: ToolDefinition, enabled: boolean) => {
+    setLocalState((prev) => {
+      if (!prev) return prev;
+      const current = prev.tools ?? [];
+      if (enabled) {
+        if (current.some((entry) => entry.name === tool.name)) return prev;
+        return { ...prev, tools: [...current, tool] };
+      }
+      return { ...prev, tools: current.filter((entry) => entry.name !== tool.name) };
+    });
   };
 
   /**
@@ -149,10 +185,6 @@ export function InferencePresetEditor() {
     deleteMut.mutate(localState.id);
     setRightPanelView("inferencePreset", presets?.find((p) => p.id !== localState.id)?.id);
   };
-
-  const structuredOutputJson = localState.structuredOutput?.schema
-    ? JSON.stringify(localState.structuredOutput.schema, null, 2)
-    : "{}";
 
   return (
     <div className="flex flex-col h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] w-96 shadow-xl overflow-hidden shrink-0">
@@ -526,6 +558,7 @@ export function InferencePresetEditor() {
                   Tau
                 </label>
                 <input
+                  id="mirostatTau"
                   type="number"
                   value={localState.mirostatTau ?? 5.0}
                   onChange={(e) => updateField("mirostatTau", parseFloat(e.target.value))}
@@ -537,6 +570,7 @@ export function InferencePresetEditor() {
                   Eta
                 </label>
                 <input
+                  id="mirostatEta"
                   type="number"
                   value={localState.mirostatEta ?? 0.1}
                   onChange={(e) => updateField("mirostatEta", parseFloat(e.target.value))}
@@ -552,6 +586,7 @@ export function InferencePresetEditor() {
                 DynaTemp Range
               </label>
               <input
+                id="dynaTempRange"
                 type="number"
                 step="0.1"
                 value={localState.dynaTempRange ?? 0.0}
@@ -564,6 +599,7 @@ export function InferencePresetEditor() {
                 Exp
               </label>
               <input
+                id="dynaTempExp"
                 type="number"
                 step="0.1"
                 value={localState.dynaTempExponent ?? 1.0}
@@ -685,7 +721,7 @@ export function InferencePresetEditor() {
             </p>
             <select
               id="contextOverflowPolicy"
-              value={localState.contextOverflowPolicy || "StopAtLimit"}
+              value={localState.contextOverflowPolicy || "TruncateMiddle"}
               onChange={(e) =>
                 updateField(
                   "contextOverflowPolicy",
@@ -720,26 +756,28 @@ export function InferencePresetEditor() {
           </h3>
 
           {localState.structuredOutput?.enabled && (
-            <div className="border border-[var(--color-border)] rounded-md overflow-hidden">
+            <fieldset
+              className="border border-[var(--color-border)] rounded-md overflow-hidden"
+              onBlur={() => {
+                try {
+                  const parsed = JSON.parse(schemaDraft);
+                  updateField("structuredOutput", {
+                    enabled: true,
+                    schema: parsed,
+                    grammar: undefined,
+                  });
+                } catch {
+                  // keep the draft until it is valid JSON
+                }
+              }}>
               <CodeMirror
-                value={structuredOutputJson}
+                value={schemaDraft}
                 extensions={[json()]}
                 theme="dark"
-                onChange={(val) => {
-                  try {
-                    const parsed = JSON.parse(val);
-                    updateField("structuredOutput", {
-                      enabled: true,
-                      schema: parsed,
-                      grammar: undefined,
-                    });
-                  } catch {
-                    // ignore parse errors while typing
-                  }
-                }}
+                onChange={(val) => setSchemaDraft(val)}
                 className="text-xs h-40"
               />
-            </div>
+            </fieldset>
           )}
         </section>
 
@@ -792,7 +830,9 @@ export function InferencePresetEditor() {
           <p className="text-xs text-[var(--color-text-muted)] mt-2">
             {templateCapabilities?.hasPreserveThinking
               ? "Controls whether the template preserves reasoning content in the conversation history."
-              : "The active model's chat template does not support preserve_thinking."}
+              : templateCapabilities?.provenance === "gguf"
+                ? "The GGUF-embedded chat template does not support preserve_thinking. Re-download the model or paste a current template into the load-preset override to enable this control."
+                : "The active chat template override does not support preserve_thinking. Paste a current template into the load-preset override to enable this control."}
           </p>
         </section>
 
@@ -809,23 +849,62 @@ export function InferencePresetEditor() {
           </h3>
 
           {localState.toolCallsEnabled && (
-            <div className="border border-[var(--color-border)] rounded-md overflow-hidden">
-              <CodeMirror
-                value={localState.tools ? JSON.stringify(localState.tools, null, 2) : "[\n  \n]"}
-                extensions={[json()]}
-                theme="dark"
-                onChange={(val) => {
-                  try {
-                    const parsed = JSON.parse(val);
-                    if (Array.isArray(parsed)) {
-                      updateField("tools", parsed);
-                    }
-                  } catch {
-                    // ignore parse errors
-                  }
-                }}
-                className="text-xs min-h-[160px]"
-              />
+            <div className="space-y-3">
+              <p className="text-xs text-[var(--color-text-muted)] leading-tight">
+                Only built-in tools are executed. Custom JSON tools are kept if already present but
+                cannot be invoked.
+              </p>
+              {BUILT_IN_TOOLS.map((tool) => {
+                const enabled = (localState.tools ?? []).some((entry) => entry.name === tool.name);
+                const inputId = `builtin-tool-${tool.name}`;
+                return (
+                  <label
+                    key={tool.name}
+                    htmlFor={inputId}
+                    className="flex items-start gap-2 text-sm">
+                    <input
+                      id={inputId}
+                      type="checkbox"
+                      checked={enabled}
+                      onChange={(e) => toggleBuiltInTool(tool, e.target.checked)}
+                      className="mt-1 accent-[var(--color-accent)]"
+                    />
+                    <span>
+                      <span className="font-medium">{tool.name}</span>
+                      <span className="block text-xs text-[var(--color-text-muted)]">
+                        {tool.description}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+              {(localState.tools ?? []).some((entry) => !isBuiltInToolName(entry.name)) && (
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider">
+                    Custom tools (not executed)
+                  </p>
+                  {(localState.tools ?? [])
+                    .filter((entry) => !isBuiltInToolName(entry.name))
+                    .map((entry) => (
+                      <div
+                        key={entry.name}
+                        className="flex items-center justify-between gap-2 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs">
+                        <span className="truncate">{entry.name}</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateField(
+                              "tools",
+                              (localState.tools ?? []).filter((tool) => tool.name !== entry.name),
+                            )
+                          }
+                          className="text-[var(--color-text-muted)] hover:text-red-400">
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
           )}
         </section>

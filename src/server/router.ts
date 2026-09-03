@@ -5,20 +5,20 @@
 
 import path from "node:path";
 import type {
-  AppSettings,
   LoadModelRequest,
   ModelLoadConfig,
   ModelEntry,
   ThinkingTagConfig,
 } from "../shared/types";
-import type { ServerWebSocket } from "bun";
+import type { Server, ServerWebSocket } from "bun";
 import { getHardwareInfo } from "./hardwareProbe";
 import { getServerStatus, loadModel, requestUnloadModel } from "./llamaServer";
-import { logError, logInfo } from "./logger";
+import { logDebug, logError, logInfo, logWarn } from "./logger";
 import { populateMetadata, scanModels } from "./modelScanner";
+import { isAllowedMutationOrigin, isAllowedWebSocketOrigin, isMutatingMethod } from "./origin";
 import { getAppDataDir } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
-import { addConnection, recordPong, removeConnection } from "./wsHub";
+import { addConnection, getConnectionCount, recordPong, removeConnection } from "./wsHub";
 
 /**
  * Current hardware probe implementation used by backend routing.
@@ -86,6 +86,47 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function getStringField(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key];
   return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Parses a query-string integer, rejecting NaN and clamping to an inclusive range.
+ *
+ * @param raw - Raw query parameter value.
+ * @param fallback - Value used when the parameter is omitted.
+ * @param min - Inclusive minimum.
+ * @param max - Inclusive maximum.
+ * @returns The parsed integer, or `null` when the raw value is present but not a finite integer.
+ */
+function parseQueryInt(
+  raw: string | null,
+  fallback: number,
+  min: number,
+  max: number,
+): number | null {
+  if (raw === null || raw === "") return fallback;
+  if (!/^-?\d+$/.test(raw)) return null;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+/**
+ * Reads a JSON object body, returning a 400 response when parsing fails.
+ *
+ * @param req - Incoming HTTP request.
+ * @returns Parsed object, or a 400 Response.
+ */
+async function readJsonObject(req: Request): Promise<Record<string, unknown> | Response> {
+  let parsed: unknown;
+  try {
+    parsed = await req.json();
+  } catch {
+    return badRequest("Invalid JSON payload.");
+  }
+  if (!isPlainObject(parsed)) {
+    return badRequest("JSON payload must be an object.");
+  }
+  return parsed;
 }
 
 /**
@@ -180,39 +221,66 @@ function wantsHtmlDocument(req: Request): boolean {
 }
 
 /**
- * Resolves a client attachment route parameter to a safe absolute file path.
+ * Resolves `relativePath` under `root`, rejecting empty, absolute, and escaping paths.
+ *
+ * @param root - Directory that must contain the result.
+ * @param relativePath - Caller-supplied relative path (leading slashes already stripped).
+ * @returns Absolute path inside `root`, or `null` when the path is unsafe.
+ */
+function resolveContainedPath(root: string, relativePath: string): string | null {
+  if (!relativePath || typeof relativePath !== "string") return null;
+  const stripped = relativePath.replace(/^[\\/]+/, "").replace(/\\/g, "/");
+  if (!stripped) return null;
+  if (path.isAbsolute(stripped) || path.win32.isAbsolute(stripped)) return null;
+
+  const normalized = path.normalize(stripped);
+  if (normalized === ".." || normalized.startsWith(`..${path.sep}`)) return null;
+
+  const absRoot = path.resolve(root);
+  const absPath = path.resolve(absRoot, normalized);
+  const relative = path.relative(absRoot, absPath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return absPath;
+}
+
+/**
+ * Resolves a client attachment route parameter to a safe absolute file path
+ * inside the attachments directory (not the app-data root).
+ *
+ * Client `filePath` values are stored as `attachments/<chat>/<msg>/<file>`, so a
+ * leading `attachments/` prefix is stripped before joining the attachments root.
  *
  * @param attachPath - Attachment path segment from the request URL.
  * @returns Absolute attachment path, or `null` when the path is unsafe.
  */
 function normalizeAttachmentPath(attachPath: string): string | null {
   if (!attachPath || typeof attachPath !== "string") return null;
-  if (path.isAbsolute(attachPath)) return null;
-  const normalized = path.normalize(attachPath);
-  if (normalized.startsWith(`..${path.sep}`) || normalized === "..") return null;
+  if (path.isAbsolute(attachPath) || path.win32.isAbsolute(attachPath)) return null;
 
-  const root = getAppDataDir();
-  const absPath = path.join(root, normalized);
-  const relative = path.relative(root, absPath);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) return null;
-  return absPath;
+  let relative = attachPath.replace(/\\/g, "/");
+  while (relative.startsWith("attachments/")) {
+    relative = relative.slice("attachments/".length);
+  }
+  if (relative === "attachments") return null;
+
+  const attachmentsRoot = path.join(getAppDataDir(), "attachments");
+  return resolveContainedPath(attachmentsRoot, relative);
 }
 
 /**
  * Creates the main application router for HTTP and WebSocket requests.
  *
- * @param settings - Current application settings used for routing decisions.
  * @returns An object containing `fetch` and `websocket` handlers compatible with `Bun.serve`.
  * @example
  * ```typescript
- * const router = createRouter(settings);
+ * const router = createRouter();
  * Bun.serve({
  *   fetch: router.fetch,
  *   websocket: router.websocket,
  * });
  * ```
  */
-export function createRouter(_settings: AppSettings) {
+export function createRouter() {
   let cachedModels: { modelsPath: string; models: ModelEntry[] } | null = null;
   let modelsRefreshPromise: Promise<ModelEntry[]> | null = null;
 
@@ -303,16 +371,24 @@ export function createRouter(_settings: AppSettings) {
      * @param server - Bun server instance used for WebSocket upgrades.
      * @returns Response to send to the client, or `undefined` when a WebSocket upgrade succeeds.
      */
-    async fetch(req: Request, server: any): Promise<Response | undefined> {
+    async fetch(req: Request, server: Server<unknown>): Promise<Response | undefined> {
       const url = new URL(req.url);
-      const { logInfo } = await import("./logger");
-      logInfo(`API Request: ${req.method} ${url.pathname}`);
+      logDebug(`API Request: ${req.method} ${url.pathname}`);
 
       if (url.pathname === "/ws") {
-        if (server.upgrade(req)) {
+        if (!isAllowedWebSocketOrigin(req)) {
+          return jsonResponse({ error: "Forbidden origin." }, 403);
+        }
+        if (server.upgrade(req, { data: null })) {
           return; // upgrade successful
         }
         return new Response("Upgrade failed", { status: 400 });
+      }
+
+      if (isMutatingMethod(req.method) && url.pathname.startsWith("/api/")) {
+        if (!isAllowedMutationOrigin(req)) {
+          return jsonResponse({ error: "Forbidden origin." }, 403);
+        }
       }
 
       const isProd = process.env.NODE_ENV === "production" || Bun.argv[1]?.includes("dist");
@@ -321,12 +397,17 @@ export function createRouter(_settings: AppSettings) {
           return new Response("Not Found", { status: 404 });
         }
 
-        const staticRoot = path.join(process.cwd(), "dist/client");
-        const requestedPath = path.join(staticRoot, url.pathname);
-        const requestedFile = Bun.file(requestedPath);
+        const staticRoot = path.resolve(process.cwd(), "dist/client");
+        const relativeUrlPath = url.pathname.replace(/^\/+/, "");
+        const requestedPath = resolveContainedPath(staticRoot, relativeUrlPath);
 
-        if (url.pathname !== "/" && (await requestedFile.exists())) {
-          return new Response(requestedFile);
+        if (requestedPath) {
+          const requestedFile = Bun.file(requestedPath);
+          if (url.pathname !== "/" && (await requestedFile.exists())) {
+            return new Response(requestedFile);
+          }
+        } else if (isAssetLikePath(url.pathname)) {
+          return new Response("Not Found", { status: 404 });
         }
 
         const isDocumentRequest =
@@ -335,7 +416,11 @@ export function createRouter(_settings: AppSettings) {
           return new Response("Not Found", { status: 404 });
         }
 
-        const indexFile = Bun.file(path.join(staticRoot, "index.html"));
+        const indexPath = resolveContainedPath(staticRoot, "index.html");
+        if (!indexPath) {
+          return new Response("Not Found", { status: 404 });
+        }
+        const indexFile = Bun.file(indexPath);
         if (!(await indexFile.exists())) {
           return new Response("Not Found", { status: 404 });
         }
@@ -358,28 +443,31 @@ export function createRouter(_settings: AppSettings) {
       }
 
       if (req.method === "POST" && url.pathname === "/api/server/load") {
-        let body: any;
-        try {
-          body = await req.json();
-        } catch (_err: unknown) {
-          return badRequest("Invalid JSON payload for server load.");
-        }
+        const body = await readJsonObject(req);
+        if (body instanceof Response) return body;
 
-        const modelPath = isPlainObject(body) ? getStringField(body, "modelPath") : undefined;
+        const modelPath = getStringField(body, "modelPath");
         if (!modelPath) {
           return badRequest("server/load requires a valid modelPath string.");
         }
 
         let thinkingTagOverride: ThinkingTagConfig | undefined;
-        if (isPlainObject(body)) {
-          try {
-            thinkingTagOverride = getThinkingTagOverride(body);
-          } catch (err: unknown) {
-            return badRequest(err instanceof Error ? err.message : String(err));
-          }
+        try {
+          thinkingTagOverride = getThinkingTagOverride(body);
+        } catch (err: unknown) {
+          return badRequest(err instanceof Error ? err.message : String(err));
         }
 
         const curSettings = await loadSettings();
+        const modelsRoot = path.resolve(curSettings.modelsPath);
+        const resolvedModelPath = path.resolve(modelPath);
+        const relativeToModels = path.relative(modelsRoot, resolvedModelPath);
+        if (relativeToModels.startsWith("..") || path.isAbsolute(relativeToModels)) {
+          logWarn("Model load requested outside the configured models directory", {
+            modelPath: resolvedModelPath,
+            modelsPath: modelsRoot,
+          });
+        }
         if (!curSettings.llamaServerPath) {
           return jsonResponse(
             {
@@ -403,7 +491,7 @@ export function createRouter(_settings: AppSettings) {
         }
         try {
           const { thinkingTagOverride: _unusedThinkingTagOverride, ...requestBody } =
-            body as LoadModelRequest;
+            body as unknown as LoadModelRequest;
           const loadConfig: ModelLoadConfig = {
             ...(requestBody as ModelLoadConfig),
             modelPath,
@@ -450,12 +538,17 @@ export function createRouter(_settings: AppSettings) {
       }
 
       if (req.method === "POST" && url.pathname === "/api/hardware/optimize") {
-        const body: any = await req.json();
+        const body = await readJsonObject(req);
+        if (body instanceof Response) return body;
+        const modelPath = getStringField(body, "modelPath");
+        if (!modelPath) {
+          return badRequest("hardware/optimize requires a valid modelPath string.");
+        }
         const { getMetadataForPath } = await import("./persistence/chatRepo");
         const { optimizeLoadConfig } = await import("./optimizer");
 
         const hw = await getHardwareInfo();
-        const metadata = await getMetadataForPath(body.modelPath as string);
+        const metadata = await getMetadataForPath(modelPath);
         if (!metadata) return new Response("Model metadata not found", { status: 404 });
 
         const optimized = optimizeLoadConfig(hw, metadata);
@@ -468,15 +561,8 @@ export function createRouter(_settings: AppSettings) {
       }
 
       if (req.method === "PUT" && url.pathname === "/api/settings") {
-        let body: any;
-        try {
-          body = await req.json();
-        } catch (_err: unknown) {
-          return badRequest("Invalid JSON payload for settings.");
-        }
-        if (!isPlainObject(body)) {
-          return badRequest("Settings payload must be an object.");
-        }
+        const body = await readJsonObject(req);
+        if (body instanceof Response) return body;
         const { InvalidSettingsError, saveSettings } = await import("./persistence/settingsRepo");
         try {
           await saveSettings(body);
@@ -525,16 +611,8 @@ export function createRouter(_settings: AppSettings) {
               return badRequest("Invalid multipart chat message payload.");
             }
           } else {
-            let body: any;
-            try {
-              body = await req.json();
-            } catch (_jsonErr) {
-              return badRequest("Invalid JSON chat message payload.");
-            }
-
-            if (!isPlainObject(body)) {
-              return badRequest("Chat message payload must be an object.");
-            }
+            const body = await readJsonObject(req);
+            if (body instanceof Response) return body;
 
             const bodyContent = getStringField(body, "content");
             if (bodyContent !== undefined) {
@@ -556,8 +634,11 @@ export function createRouter(_settings: AppSettings) {
             const { proxyCompletion } = await import("./streamProxy");
             const messageId = await proxyCompletion({ chatId, content, attachments });
             return jsonResponse({ messageId });
-          } catch (e: any) {
-            return jsonResponse({ error: e?.message || "Chat message send failed." }, 500);
+          } catch (e: unknown) {
+            return jsonResponse(
+              { error: e instanceof Error ? e.message : "Chat message send failed." },
+              500,
+            );
           }
         }
       }
@@ -565,13 +646,10 @@ export function createRouter(_settings: AppSettings) {
       const { getChats } = await import("./persistence/chatRepo");
       if (req.method === "GET" && url.pathname === "/api/chats") {
         const q = url.searchParams.get("q") || undefined;
-        let limit = 300;
-        let offset = 0;
-        if (url.searchParams.has("limit")) {
-          limit = parseInt(url.searchParams.get("limit") || "300", 10);
-        }
-        if (url.searchParams.has("offset")) {
-          offset = parseInt(url.searchParams.get("offset") || "0", 10);
+        const limit = parseQueryInt(url.searchParams.get("limit"), 300, 1, 1000);
+        const offset = parseQueryInt(url.searchParams.get("offset"), 0, 0, 1_000_000);
+        if (limit === null || offset === null) {
+          return badRequest("limit and offset must be finite integers.");
         }
         const chats = await getChats(q, limit, offset);
         return jsonResponse(chats);
@@ -580,8 +658,11 @@ export function createRouter(_settings: AppSettings) {
       // Chat CRUD
       const chatRepo = await import("./persistence/chatRepo");
       if (req.method === "POST" && url.pathname === "/api/chats") {
-        const body: any = await req.json();
-        const chat = await chatRepo.createChat(body.name, body.modelPath);
+        const body = await readJsonObject(req);
+        if (body instanceof Response) return body;
+        const name = getStringField(body, "name") || "New Chat";
+        const modelPath = getStringField(body, "modelPath");
+        const chat = await chatRepo.createChat(name, modelPath);
         return jsonResponse(chat);
       }
       if (url.pathname.startsWith("/api/chats/")) {
@@ -592,26 +673,56 @@ export function createRouter(_settings: AppSettings) {
             // M10 fix: support message pagination via query params to avoid
             // loading 10,000+ messages in a single response.
             // Default to last 500 messages; client can pass ?messageLimit=0 for all.
-            const msgLimitParam = url.searchParams.get("messageLimit");
-            const msgOffsetParam = url.searchParams.get("messageOffset");
-            const messageLimit = msgLimitParam !== null ? parseInt(msgLimitParam, 10) : 500;
-            const messageOffset = msgOffsetParam !== null ? parseInt(msgOffsetParam, 10) : 0;
+            const messageLimit = parseQueryInt(
+              url.searchParams.get("messageLimit"),
+              500,
+              0,
+              10_000,
+            );
+            const messageOffset = parseQueryInt(
+              url.searchParams.get("messageOffset"),
+              0,
+              0,
+              1_000_000,
+            );
+            const beforeRaw = url.searchParams.get("beforePosition");
+            const beforePosition =
+              beforeRaw === null || beforeRaw === ""
+                ? undefined
+                : parseQueryInt(beforeRaw, 0, 0, 1_000_000);
+            if (messageLimit === null || messageOffset === null || beforePosition === null) {
+              return badRequest(
+                "messageLimit, messageOffset, and beforePosition must be finite integers.",
+              );
+            }
             const chat = await chatRepo.getChat(
               id,
               messageLimit > 0 ? messageLimit : undefined,
               messageOffset > 0 ? messageOffset : undefined,
+              beforePosition,
             );
             if (!chat) return new Response("Not Found", { status: 404 });
             return jsonResponse(chat);
           }
           if (req.method === "PUT") {
-            const body: any = await req.json();
+            const body = await readJsonObject(req);
+            if (body instanceof Response) return body;
             await chatRepo.updateChat(id, body);
             return jsonResponse({ success: true });
           }
           if (req.method === "DELETE") {
-            await chatRepo.deleteChat(id);
-            return jsonResponse({ success: true });
+            try {
+              await chatRepo.deleteChat(id);
+              return jsonResponse({ success: true });
+            } catch (err: unknown) {
+              logError("Failed to delete chat", err);
+              return jsonResponse(
+                {
+                  error: err instanceof Error ? err.message : "Failed to delete chat.",
+                },
+                500,
+              );
+            }
           }
         }
 
@@ -624,13 +735,9 @@ export function createRouter(_settings: AppSettings) {
         if (parts.length === 5 && req.method === "POST") {
           const action = parts[4] as string;
           if (action === "branch") {
-            let body: any;
-            try {
-              body = await req.json();
-            } catch (_err: unknown) {
-              return badRequest("Invalid JSON payload for branch.");
-            }
-            const messageId = isPlainObject(body) ? getStringField(body, "messageId") : undefined;
+            const body = await readJsonObject(req);
+            if (body instanceof Response) return body;
+            const messageId = getStringField(body, "messageId");
             if (!messageId) {
               return badRequest("Branch creation requires a valid messageId.");
             }
@@ -638,10 +745,18 @@ export function createRouter(_settings: AppSettings) {
             return jsonResponse({ id: newId });
           }
           if (action === "export") {
-            const body: any = await req.json();
-            const format = body.format || "json";
+            const body = await readJsonObject(req);
+            if (body instanceof Response) return body;
+            const format = getStringField(body, "format") === "markdown" ? "markdown" : "json";
             const exported = await chatRepo.exportChat(id, format);
-            return jsonResponse({ content: exported });
+            return new Response(exported, {
+              headers: {
+                "Content-Type":
+                  format === "markdown"
+                    ? "text/markdown; charset=utf-8"
+                    : "application/json; charset=utf-8",
+              },
+            });
           }
           if (action === "regenerate") {
             const chatForRegen = await chatRepo.getChat(id);
@@ -672,6 +787,14 @@ export function createRouter(_settings: AppSettings) {
             return jsonResponse({ messageId });
           }
           if (action === "continue") {
+            const chatForContinue = await chatRepo.getChat(id);
+            if (!chatForContinue) {
+              return jsonResponse({ error: "Chat not found" }, 404);
+            }
+            const lastMsg = chatForContinue.messages?.[chatForContinue.messages.length - 1];
+            if (!lastMsg || lastMsg.role !== "assistant") {
+              return badRequest("Continue requires the last message to be an assistant response.");
+            }
             const { proxyCompletion } = await import("./streamProxy");
             const messageId = await proxyCompletion({
               chatId: id,
@@ -682,15 +805,9 @@ export function createRouter(_settings: AppSettings) {
             return jsonResponse({ messageId });
           }
           if (action === "branch-and-regenerate") {
-            let body: any;
-            try {
-              body = await req.json();
-            } catch (_err: unknown) {
-              return badRequest("Invalid JSON payload for branch-and-regenerate.");
-            }
-            const requestedMessageId = isPlainObject(body)
-              ? getStringField(body, "messageId")
-              : undefined;
+            const body = await readJsonObject(req);
+            if (body instanceof Response) return body;
+            const requestedMessageId = getStringField(body, "messageId");
             if (!requestedMessageId) {
               return badRequest("branch-and-regenerate requires a valid messageId.");
             }
@@ -728,16 +845,10 @@ export function createRouter(_settings: AppSettings) {
             return jsonResponse({ id: newId, messageId: generatedMessageId });
           }
           if (action === "branch-and-edit") {
-            let body: any;
-            try {
-              body = await req.json();
-            } catch (_err: unknown) {
-              return badRequest("Invalid JSON payload for branch-and-edit.");
-            }
-            const requestedMessageId = isPlainObject(body)
-              ? getStringField(body, "messageId")
-              : undefined;
-            const newContent = isPlainObject(body) ? getStringField(body, "newContent") : undefined;
+            const body = await readJsonObject(req);
+            if (body instanceof Response) return body;
+            const requestedMessageId = getStringField(body, "messageId");
+            const newContent = getStringField(body, "newContent");
             if (!requestedMessageId || !newContent || newContent.length === 0) {
               return badRequest("branch-and-edit requires a valid messageId and newContent.");
             }
@@ -769,15 +880,9 @@ export function createRouter(_settings: AppSettings) {
             }
           }
           if (action === "branch-and-continue") {
-            let body: any;
-            try {
-              body = await req.json();
-            } catch (_err: unknown) {
-              return badRequest("Invalid JSON payload for branch-and-continue.");
-            }
-            const requestedMessageId = isPlainObject(body)
-              ? getStringField(body, "messageId")
-              : undefined;
+            const body = await readJsonObject(req);
+            if (body instanceof Response) return body;
+            const requestedMessageId = getStringField(body, "messageId");
             if (!requestedMessageId) {
               return badRequest("branch-and-continue requires a valid messageId.");
             }
@@ -815,8 +920,18 @@ export function createRouter(_settings: AppSettings) {
         if (parts.length === 6 && parts[4] === "messages") {
           const msgId = parts[5] as string;
           if (req.method === "PUT") {
-            const body: any = await req.json();
-            await chatRepo.updateMessage(msgId, body.content, body.content, body.thinkingContent);
+            const body = await readJsonObject(req);
+            if (body instanceof Response) return body;
+            const content = getStringField(body, "content");
+            if (!content) {
+              return badRequest("Message update requires a content string.");
+            }
+            await chatRepo.updateMessage(
+              msgId,
+              content,
+              content,
+              getStringField(body, "thinkingContent"),
+            );
             return jsonResponse({ success: true });
           }
           if (req.method === "DELETE") {
@@ -826,15 +941,18 @@ export function createRouter(_settings: AppSettings) {
         }
       }
       if (req.method === "POST" && url.pathname === "/api/chats/import") {
-        let body: any;
-        try {
-          body = await req.json();
-        } catch (_err: unknown) {
-          return badRequest("Invalid JSON payload for chat import.");
+        const contentLength = Number(req.headers.get("content-length") || "0");
+        if (contentLength > 50 * 1024 * 1024) {
+          return jsonResponse({ error: "Import payload exceeds 50MB." }, 413);
         }
-        const importContent = isPlainObject(body) ? getStringField(body, "content") : undefined;
+        const body = await readJsonObject(req);
+        if (body instanceof Response) return body;
+        const importContent = getStringField(body, "content");
         if (!importContent) {
           return badRequest("chat import requires a valid content string.");
+        }
+        if (importContent.length > 50 * 1024 * 1024) {
+          return jsonResponse({ error: "Import payload exceeds 50MB." }, 413);
         }
         try {
           const newId = await chatRepo.importChat(importContent);
@@ -856,63 +974,103 @@ export function createRouter(_settings: AppSettings) {
           if (type === "load") return jsonResponse(await presetRepo.getLoadPresets());
           if (type === "inference") return jsonResponse(await presetRepo.getInferencePresets());
           if (type === "system") return jsonResponse(await presetRepo.getSystemPresets());
+          return badRequest("Unknown preset type.");
         }
 
         if (parts.length === 4 && req.method === "POST") {
-          let body: any;
-          try {
-            body = await req.json();
-          } catch (_err: unknown) {
-            return badRequest("Invalid JSON payload for preset creation.");
-          }
-          const presetName = isPlainObject(body) ? getStringField(body, "name") : undefined;
+          const body = await readJsonObject(req);
+          if (body instanceof Response) return body;
+          const presetName = getStringField(body, "name");
           if (!presetName || presetName.length === 0) {
             return badRequest("Preset creation requires a name.");
           }
-          if (type === "load")
-            await presetRepo.createLoadPreset(
-              body as unknown as import("../shared/types").LoadPreset,
-            );
-          if (type === "inference")
+          if (type !== "load" && type !== "inference" && type !== "system") {
+            return badRequest("Unknown preset type.");
+          }
+          if (type === "load") {
+            try {
+              presetRepo.assertWritableLoadPreset(body);
+              await presetRepo.createLoadPreset(
+                body as unknown as import("../shared/types").LoadPreset,
+              );
+            } catch (err: unknown) {
+              if (err instanceof presetRepo.PresetValidationError) {
+                return badRequest(err.message);
+              }
+              throw err;
+            }
+          } else if (type === "inference") {
             await presetRepo.createInferencePreset(
               body as unknown as import("../shared/types").InferencePreset,
             );
-          if (type === "system")
+          } else {
             await presetRepo.createSystemPreset(
               body as unknown as import("../shared/types").SystemPromptPreset,
             );
+          }
           return jsonResponse({ success: true });
         }
 
         if (parts.length === 5 && req.method === "PUT") {
-          let body: any;
-          try {
-            body = await req.json();
-          } catch (_err: unknown) {
-            return badRequest("Invalid JSON payload for preset update.");
+          const body = await readJsonObject(req);
+          if (body instanceof Response) return body;
+          if (type !== "load" && type !== "inference" && type !== "system") {
+            return badRequest("Unknown preset type.");
           }
-          if (!isPlainObject(body)) {
-            return badRequest("Preset update requires a JSON object.");
+          let result: import("./persistence/presetRepo").PresetMutationResult = "updated";
+          if (type === "load") {
+            try {
+              if (body["config"] !== undefined) {
+                presetRepo.assertWritableLoadPresetConfig(body["config"]);
+              }
+              result = await presetRepo.updateLoadPreset(id, body);
+            } catch (err: unknown) {
+              if (err instanceof presetRepo.PresetValidationError) {
+                return badRequest(err.message);
+              }
+              throw err;
+            }
+          } else if (type === "inference") {
+            result = await presetRepo.updateInferencePreset(id, body);
+          } else {
+            result = await presetRepo.updateSystemPreset(id, body);
           }
-          if (type === "load") await presetRepo.updateLoadPreset(id, body);
-          if (type === "inference") await presetRepo.updateInferencePreset(id, body);
-          if (type === "system") await presetRepo.updateSystemPreset(id, body);
+          if (result === "not_found") {
+            return jsonResponse({ error: "Preset not found." }, 404);
+          }
           return jsonResponse({ success: true });
         }
 
         if (parts.length === 5 && req.method === "DELETE") {
-          if (type === "load") await presetRepo.deleteLoadPreset(id);
-          if (type === "inference") await presetRepo.deleteInferencePreset(id);
-          if (type === "system") await presetRepo.deleteSystemPreset(id);
+          if (type !== "load" && type !== "inference" && type !== "system") {
+            return badRequest("Unknown preset type.");
+          }
+          const result =
+            type === "load"
+              ? await presetRepo.deleteLoadPreset(id)
+              : type === "inference"
+                ? await presetRepo.deleteInferencePreset(id)
+                : await presetRepo.deleteSystemPreset(id);
+          if (result === "not_found") {
+            return jsonResponse({ error: "Preset not found." }, 404);
+          }
+          if (result === "protected") {
+            return jsonResponse({ error: "Preset is protected and cannot be deleted." }, 403);
+          }
           return jsonResponse({ success: true });
         }
       }
 
       // Autoname
       if (req.method === "POST" && url.pathname === "/api/autoname") {
-        const body: any = await req.json();
+        const body = await readJsonObject(req);
+        if (body instanceof Response) return body;
+        const chatId = getStringField(body, "chatId");
+        if (!chatId) {
+          return badRequest("autoname requires a valid chatId.");
+        }
         const autoname = await import("./autoname");
-        await autoname.triggerAutoname(body.chatId);
+        await autoname.triggerAutoname(chatId);
         return jsonResponse({ success: true });
       }
 
@@ -930,7 +1088,15 @@ export function createRouter(_settings: AppSettings) {
         }
         const file = Bun.file(absPath);
         if (await file.exists()) {
-          return new Response(file);
+          const fileName = path.basename(absPath);
+          return new Response(file, {
+            headers: {
+              "Content-Type": file.type || "application/octet-stream",
+              "X-Content-Type-Options": "nosniff",
+              "Content-Security-Policy": "default-src 'none'",
+              "Content-Disposition": `attachment; filename="${fileName.replace(/"/g, "")}"`,
+            },
+          });
         }
         return new Response("Not Found", { status: 404 });
       }
@@ -955,7 +1121,12 @@ export function createRouter(_settings: AppSettings) {
           }
           if (frame.type === "tool_approval" && frame.toolCallId) {
             import("./tools").then(({ resolveToolApproval }) => {
-              resolveToolApproval(frame.toolCallId, frame.approved, frame.editedArguments);
+              resolveToolApproval(
+                frame.toolCallId,
+                frame.approved,
+                frame.editedArguments,
+                frame.chatId,
+              );
             });
           }
         } catch (_e) {}
@@ -988,7 +1159,9 @@ export function createRouter(_settings: AppSettings) {
       close(ws: ServerWebSocket<unknown>) {
         removeConnection(ws);
         import("./tools").then(({ cancelPendingApprovals }) => {
-          cancelPendingApprovals(undefined, "disconnected");
+          if (getConnectionCount() === 0) {
+            cancelPendingApprovals(undefined, "disconnected");
+          }
         });
       },
     },

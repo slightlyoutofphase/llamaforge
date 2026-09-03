@@ -11,6 +11,8 @@ import { useAppStore } from "../../store";
  * Properties for the ToolCard component.
  */
 interface ToolCardProps {
+  /** Identifier of the assistant message that owns this tool call. */
+  messageId: string;
   /** The tool call object received from the model. */
   toolCall: {
     id: string;
@@ -29,12 +31,23 @@ interface ToolCardProps {
  * @param props - The component properties: {@link ToolCardProps}.
  * @returns The rendered React element.
  */
-export function ToolCard({ toolCall, onApprove, onReject }: ToolCardProps) {
+export function ToolCard({ messageId, toolCall, onApprove, onReject }: ToolCardProps) {
   const resultMsg = useAppStore((state) =>
     state.messages.find((m) => m.role === "tool" && m.toolCallId === toolCall.id),
   );
+  const isWaitingForToolApproval = useAppStore((state) => state.isWaitingForToolApproval);
+  const isLatestAssistant = useAppStore((state) => {
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      const candidate = state.messages[i];
+      if (candidate?.role === "assistant") {
+        return candidate.id === messageId;
+      }
+    }
+    return false;
+  });
 
   const isExecuted = !!resultMsg;
+  const canAct = !isExecuted && isWaitingForToolApproval && isLatestAssistant;
   const toolResult = resultMsg?.content;
 
   const [isEditing, setIsEditing] = useState(false);
@@ -50,10 +63,17 @@ export function ToolCard({ toolCall, onApprove, onReject }: ToolCardProps) {
           </div>
           <span className="text-sm font-bold font-mono">{toolCall.function.name}()</span>
         </div>
-        {!isExecuted && (
+        {canAct && (
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold text-yellow-500 uppercase tracking-widest bg-yellow-500/10 px-2 py-0.5 rounded-full border border-yellow-500/20">
               Awaiting Action
+            </span>
+          </div>
+        )}
+        {!isExecuted && !canAct && (
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-widest bg-[var(--color-bg)] px-2 py-0.5 rounded-full border border-[var(--color-border)]">
+              Incomplete
             </span>
           </div>
         )}
@@ -65,7 +85,7 @@ export function ToolCard({ toolCall, onApprove, onReject }: ToolCardProps) {
             <h4 className="text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-widest">
               Parameters (JSON)
             </h4>
-            {!isExecuted && !isEditing && (
+            {!isExecuted && !isEditing && canAct && (
               <button
                 type="button"
                 onClick={() => setIsEditing(true)}
@@ -88,7 +108,7 @@ export function ToolCard({ toolCall, onApprove, onReject }: ToolCardProps) {
           )}
         </div>
 
-        {!isExecuted && (
+        {canAct && (
           <div className="flex gap-2">
             {isEditing ? (
               <button

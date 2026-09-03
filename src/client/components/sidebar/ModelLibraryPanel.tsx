@@ -3,7 +3,7 @@
  * Provides the model library panel for browsing and loading GGUF models.
  */
 
-import type { LoadModelRequest, LoadPreset } from "../../../shared/types";
+import type { ChatMessage, LoadModelRequest, LoadPreset } from "../../../shared/types";
 import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import {
@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { useRef, useState } from "react";
 import { logError } from "../../logger";
-import { useCreateChat, useLoadPresets } from "../../queries";
+import { useCreateChat, useLoadPresets, useSettings } from "../../queries";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { MultimodalGuardModal } from "./MultimodalGuardModal";
@@ -31,17 +31,24 @@ import { MultimodalGuardModal } from "./MultimodalGuardModal";
  * @returns The rendered React element.
  */
 export function ModelLibraryPanel() {
-  const { models, loadModel, loadedModel, isGenerating, isWaitingForToolApproval, messages } =
-    useAppStore();
+  const models = useAppStore((s) => s.models);
+  const loadModel = useAppStore((s) => s.loadModel);
+  const loadedModel = useAppStore((s) => s.loadedModel);
+  const isGenerating = useAppStore((s) => s.isGenerating);
+  const isWaitingForToolApproval = useAppStore((s) => s.isWaitingForToolApproval);
+  const messages = useAppStore((s) => s.messages);
+  const rescanModels = useAppStore((s) => s.rescanModels);
   const { setRightPanelView } = useUiStore();
   const { data: loadPresets } = useLoadPresets();
+  const { data: settings } = useSettings();
   const createChatMut = useCreateChat();
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [guardModal, setGuardModal] = useState<{
     reason: "vision" | "audio" | "both";
-    messages: any[];
+    messages: ChatMessage[];
+    configToLoad: LoadModelRequest;
   } | null>(null);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const createChatLockRef = useRef(false);
@@ -79,17 +86,6 @@ export function ModelLibraryPanel() {
       m.attachments?.some((a) => a.mimeType.startsWith("audio/")),
     );
 
-    if (!hasVision && visionMsgs.length > 0 && !hasAudio && audioMsgs.length > 0) {
-      setGuardModal({ reason: "both", messages: [...visionMsgs, ...audioMsgs] });
-      return;
-    } else if (!hasVision && visionMsgs.length > 0) {
-      setGuardModal({ reason: "vision", messages: visionMsgs });
-      return;
-    } else if (!hasAudio && audioMsgs.length > 0) {
-      setGuardModal({ reason: "audio", messages: audioMsgs });
-      return;
-    }
-
     const request: LoadModelRequest = {
       ...preset.config,
       modelPath: selectedModel.primaryPath,
@@ -109,7 +105,22 @@ export function ModelLibraryPanel() {
       preset.chatTemplateOverride.length > 0 &&
       preset.chatTemplateOverride !== selectedModel.metadata?.chatTemplate
     ) {
-      request.chatTemplateFile = preset.chatTemplateOverride;
+      request.chatTemplateContent = preset.chatTemplateOverride;
+    }
+
+    if (!hasVision && visionMsgs.length > 0 && !hasAudio && audioMsgs.length > 0) {
+      setGuardModal({
+        reason: "both",
+        messages: [...visionMsgs, ...audioMsgs],
+        configToLoad: request,
+      });
+      return;
+    } else if (!hasVision && visionMsgs.length > 0) {
+      setGuardModal({ reason: "vision", messages: visionMsgs, configToLoad: request });
+      return;
+    } else if (!hasAudio && audioMsgs.length > 0) {
+      setGuardModal({ reason: "audio", messages: audioMsgs, configToLoad: request });
+      return;
     }
 
     loadModel(request);
@@ -128,6 +139,9 @@ export function ModelLibraryPanel() {
       const chat = await createChatMut.mutateAsync({ name: "New Chat (Model Switch)" });
       if (chat?.id) {
         navigate({ to: "/chat/$chatId", params: { chatId: chat.id } });
+      }
+      if (guardModal) {
+        loadModel(guardModal.configToLoad);
       }
     } catch (error) {
       logError("New chat creation failed:", error);
@@ -152,7 +166,7 @@ export function ModelLibraryPanel() {
           <button
             type="button"
             title="Rescan model directory"
-            onClick={() => useAppStore.getState().fetchModels()}
+            onClick={() => void rescanModels()}
             className="p-1.5 hover:bg-[var(--color-border)] rounded-lg transition-colors text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)]">
             <RefreshCw size={18} />
           </button>
@@ -317,7 +331,7 @@ export function ModelLibraryPanel() {
       </div>
 
       <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-[10px] text-[var(--color-text-muted)] italic">
-        Scanned from: ~/.llamaforge/models
+        Scanned from: {settings?.modelsPath || "the configured models directory"}
       </div>
 
       {guardModal && (

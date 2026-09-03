@@ -3,11 +3,85 @@
  * Preset repository — CRUD operations for load, inference, and system presets.
  */
 
-import type { InferencePreset, LoadPreset, SystemPromptPreset } from "../../shared/types";
-import { detectThinkingConfig } from "../chatTemplateEngine";
+import type {
+  InferencePreset,
+  LoadPreset,
+  ModelLoadConfig,
+  SystemPromptPreset,
+} from "../../shared/types";
+import { DEFAULT_IMAGE_MAX_TOKENS, defaultBatchingForImageTokens } from "../../shared/imageTokens";
+import { detectThinkingConfig } from "../../shared/thinkingTags";
 import { logWarn } from "../logger";
-import { generateGrammarFromSchema } from "../tools";
 import { getDb } from "./db";
+
+/** Thrown when a load-preset payload cannot be persisted. */
+export class PresetValidationError extends Error {
+  /**
+   * Creates a validation error for load-preset create/update requests.
+   *
+   * @param message - Human-readable reason the payload was rejected.
+   */
+  constructor(message: string) {
+    super(message);
+    this.name = "PresetValidationError";
+  }
+}
+
+const LOAD_CONFIG_KEYS = new Set([
+  "modelPath",
+  "mmProjPath",
+  "specType",
+  "specDraftModelPath",
+  "specDraftNMax",
+  "specDraftNMin",
+  "specDraftPMin",
+  "contextSize",
+  "contextShift",
+  "gpuLayers",
+  "threads",
+  "batchSize",
+  "microBatchSize",
+  "threadsBatch",
+  "ropeScaling",
+  "ropeFreqBase",
+  "ropeFreqScale",
+  "kvCacheTypeK",
+  "kvCacheTypeV",
+  "kvUnified",
+  "mlock",
+  "noMmap",
+  "contBatching",
+  "flashAttn",
+  "swaFull",
+  "noKvOffload",
+  "cacheReuse",
+  "contextCheckpoints",
+  "mainGpu",
+  "tensorSplit",
+  "numa",
+  "logLevel",
+  "seedOverride",
+  "chatTemplateContent",
+  "imageMaxTokens",
+  "imageMinTokens",
+  "presetId",
+]);
+
+const KV_CACHE_TYPES = new Set([
+  "f16",
+  "f32",
+  "bf16",
+  "q8_0",
+  "q4_0",
+  "q4_1",
+  "iq4_nl",
+  "q5_0",
+  "q5_1",
+]);
+const ROPE_SCALING_TYPES = new Set(["none", "linear", "yarn"]);
+const FLASH_ATTN_TYPES = new Set(["on", "off", "auto"]);
+const SPEC_TYPES = new Set(["off", "draft-mtp", "draft-simple", "draft-eagle3"]);
+const NUMA_TYPES = new Set(["distribute", "isolate", "numactl"]);
 
 type ParsedLoadPresetPayload = {
   config: LoadPreset["config"];
@@ -59,20 +133,409 @@ function normalizeFlashAttnValue(
 }
 
 /**
- * Normalizes a raw load-preset config object into the stored load config shape.
+ * Reads a finite number field from a load-preset config.
  *
- * @param rawConfig - Raw parsed config payload.
- * @returns Normalized load preset configuration.
+ * @param value - Raw field value.
+ * @param field - Field name used in error messages.
+ * @param options - Integer/range constraints and whether invalid values throw.
+ * @returns The coerced number, or `undefined` when the field is absent or dropped.
  */
-function normalizeLoadPresetConfig(rawConfig: Record<string, unknown>): LoadPreset["config"] {
-  const configWithoutLegacy: Record<string, unknown> = { ...rawConfig };
-  delete configWithoutLegacy["flashAttention"];
-  const flashAttn = normalizeFlashAttnValue(rawConfig);
+function readNumberField(
+  value: unknown,
+  field: string,
+  options: { integer?: boolean; min?: number; max?: number; strict: boolean },
+): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    if (options.strict) {
+      throw new PresetValidationError(
+        `Load preset config field "${field}" must be a finite number.`,
+      );
+    }
+    return undefined;
+  }
+  const numeric = options.integer ? Math.trunc(value) : value;
+  if (options.min !== undefined && numeric < options.min) {
+    if (options.strict) {
+      throw new PresetValidationError(
+        `Load preset config field "${field}" must be >= ${options.min}.`,
+      );
+    }
+    return undefined;
+  }
+  if (options.max !== undefined && numeric > options.max) {
+    if (options.strict) {
+      throw new PresetValidationError(
+        `Load preset config field "${field}" must be <= ${options.max}.`,
+      );
+    }
+    return undefined;
+  }
+  return numeric;
+}
 
-  return {
-    ...(configWithoutLegacy as unknown as LoadPreset["config"]),
-    ...(flashAttn ? { flashAttn } : {}),
+/**
+ * Reads a boolean field from a load-preset config.
+ *
+ * @param value - Raw field value.
+ * @param field - Field name used in error messages.
+ * @param strict - Whether invalid types throw instead of being dropped.
+ * @returns The boolean, or `undefined` when absent or dropped.
+ */
+function readBooleanField(value: unknown, field: string, strict: boolean): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") {
+    if (strict) {
+      throw new PresetValidationError(`Load preset config field "${field}" must be a boolean.`);
+    }
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * Reads a string field from a load-preset config.
+ *
+ * @param value - Raw field value.
+ * @param field - Field name used in error messages.
+ * @param strict - Whether invalid types throw instead of being dropped.
+ * @returns The string, or `undefined` when absent or dropped.
+ */
+function readStringField(value: unknown, field: string, strict: boolean): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    if (strict) {
+      throw new PresetValidationError(`Load preset config field "${field}" must be a string.`);
+    }
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * Reads a string-union field from a load-preset config.
+ *
+ * @param value - Raw field value.
+ * @param field - Field name used in error messages.
+ * @param allowed - Allowed string values.
+ * @param strict - Whether invalid values throw instead of being dropped.
+ * @returns The allowed string, or `undefined` when absent or dropped.
+ */
+function readEnumField<T extends string>(
+  value: unknown,
+  field: string,
+  allowed: Set<string>,
+  strict: boolean,
+): T | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !allowed.has(value)) {
+    if (strict) {
+      throw new PresetValidationError(
+        `Load preset config field "${field}" must be one of: ${[...allowed].join(", ")}.`,
+      );
+    }
+    return undefined;
+  }
+  return value as T;
+}
+
+/**
+ * Reads a tensor-split array from a load-preset config.
+ *
+ * @param value - Raw field value.
+ * @param strict - Whether invalid values throw instead of being dropped.
+ * @returns Finite number array, or `undefined` when absent or dropped.
+ */
+function readTensorSplit(value: unknown, strict: boolean): number[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (
+    !Array.isArray(value) ||
+    value.some((entry) => typeof entry !== "number" || !Number.isFinite(entry))
+  ) {
+    if (strict) {
+      throw new PresetValidationError(
+        'Load preset config field "tensorSplit" must be an array of finite numbers.',
+      );
+    }
+    return undefined;
+  }
+  return value as number[];
+}
+
+/**
+ * Copies known load-preset config fields with type coercion.
+ *
+ * @param rawConfig - Raw parsed config object.
+ * @param strict - When true, unknown keys and malformed values throw.
+ * @returns Whitelisted load preset configuration.
+ */
+function normalizeLoadPresetConfig(
+  rawConfig: Record<string, unknown>,
+  strict = false,
+): LoadPreset["config"] {
+  if (strict) {
+    const unknownKeys = Object.keys(rawConfig).filter(
+      (key) => key !== "flashAttention" && !LOAD_CONFIG_KEYS.has(key),
+    );
+    if (unknownKeys.length > 0) {
+      throw new PresetValidationError(
+        `Unknown load preset config fields: ${unknownKeys.join(", ")}.`,
+      );
+    }
+  }
+
+  const flashAttn =
+    normalizeFlashAttnValue(rawConfig) ??
+    readEnumField<NonNullable<ModelLoadConfig["flashAttn"]>>(
+      rawConfig["flashAttn"],
+      "flashAttn",
+      FLASH_ATTN_TYPES,
+      strict,
+    );
+
+  const config: Record<string, unknown> = {};
+  const assign = (key: string, value: unknown) => {
+    if (value !== undefined) config[key] = value;
   };
+
+  assign("modelPath", readStringField(rawConfig["modelPath"], "modelPath", strict));
+  assign("mmProjPath", readStringField(rawConfig["mmProjPath"], "mmProjPath", strict));
+  assign(
+    "specType",
+    readEnumField<NonNullable<ModelLoadConfig["specType"]>>(
+      rawConfig["specType"],
+      "specType",
+      SPEC_TYPES,
+      strict,
+    ),
+  );
+  assign(
+    "specDraftModelPath",
+    readStringField(rawConfig["specDraftModelPath"], "specDraftModelPath", strict),
+  );
+  assign(
+    "specDraftNMax",
+    readNumberField(rawConfig["specDraftNMax"], "specDraftNMax", {
+      integer: true,
+      min: 1,
+      max: 1024,
+      strict,
+    }),
+  );
+  assign(
+    "specDraftNMin",
+    readNumberField(rawConfig["specDraftNMin"], "specDraftNMin", {
+      integer: true,
+      min: 0,
+      max: 1024,
+      strict,
+    }),
+  );
+  assign(
+    "specDraftPMin",
+    readNumberField(rawConfig["specDraftPMin"], "specDraftPMin", {
+      min: 0,
+      max: 1,
+      strict,
+    }),
+  );
+  assign(
+    "contextSize",
+    readNumberField(rawConfig["contextSize"], "contextSize", {
+      integer: true,
+      min: 1,
+      max: 16_777_216,
+      strict,
+    }),
+  );
+  assign("contextShift", readBooleanField(rawConfig["contextShift"], "contextShift", strict));
+  assign(
+    "gpuLayers",
+    readNumberField(rawConfig["gpuLayers"], "gpuLayers", {
+      integer: true,
+      min: -1,
+      max: 10_000,
+      strict,
+    }),
+  );
+  assign(
+    "threads",
+    readNumberField(rawConfig["threads"], "threads", { integer: true, min: 1, max: 512, strict }),
+  );
+  assign(
+    "batchSize",
+    readNumberField(rawConfig["batchSize"], "batchSize", {
+      integer: true,
+      min: 1,
+      max: 1_048_576,
+      strict,
+    }),
+  );
+  assign(
+    "microBatchSize",
+    readNumberField(rawConfig["microBatchSize"], "microBatchSize", {
+      integer: true,
+      min: 1,
+      max: 1_048_576,
+      strict,
+    }),
+  );
+  assign(
+    "threadsBatch",
+    readNumberField(rawConfig["threadsBatch"], "threadsBatch", {
+      integer: true,
+      min: 1,
+      max: 512,
+      strict,
+    }),
+  );
+  assign(
+    "ropeScaling",
+    readEnumField<ModelLoadConfig["ropeScaling"]>(
+      rawConfig["ropeScaling"],
+      "ropeScaling",
+      ROPE_SCALING_TYPES,
+      strict,
+    ),
+  );
+  assign(
+    "ropeFreqBase",
+    readNumberField(rawConfig["ropeFreqBase"], "ropeFreqBase", { min: 0, max: 10_000_000, strict }),
+  );
+  assign(
+    "ropeFreqScale",
+    readNumberField(rawConfig["ropeFreqScale"], "ropeFreqScale", { min: 0, max: 1000, strict }),
+  );
+  assign(
+    "kvCacheTypeK",
+    readEnumField<ModelLoadConfig["kvCacheTypeK"]>(
+      rawConfig["kvCacheTypeK"],
+      "kvCacheTypeK",
+      KV_CACHE_TYPES,
+      strict,
+    ),
+  );
+  assign(
+    "kvCacheTypeV",
+    readEnumField<ModelLoadConfig["kvCacheTypeV"]>(
+      rawConfig["kvCacheTypeV"],
+      "kvCacheTypeV",
+      KV_CACHE_TYPES,
+      strict,
+    ),
+  );
+  assign("kvUnified", readBooleanField(rawConfig["kvUnified"], "kvUnified", strict));
+  assign("mlock", readBooleanField(rawConfig["mlock"], "mlock", strict));
+  assign("noMmap", readBooleanField(rawConfig["noMmap"], "noMmap", strict));
+  assign("contBatching", readBooleanField(rawConfig["contBatching"], "contBatching", strict));
+  if (flashAttn) assign("flashAttn", flashAttn);
+  assign("swaFull", readBooleanField(rawConfig["swaFull"], "swaFull", strict));
+  assign("noKvOffload", readBooleanField(rawConfig["noKvOffload"], "noKvOffload", strict));
+  assign(
+    "cacheReuse",
+    readNumberField(rawConfig["cacheReuse"], "cacheReuse", {
+      integer: true,
+      min: 0,
+      max: 1_048_576,
+      strict,
+    }),
+  );
+  assign(
+    "contextCheckpoints",
+    readNumberField(rawConfig["contextCheckpoints"], "contextCheckpoints", {
+      integer: true,
+      min: 0,
+      max: 4096,
+      strict,
+    }),
+  );
+  assign(
+    "mainGpu",
+    readNumberField(rawConfig["mainGpu"], "mainGpu", { integer: true, min: 0, max: 256, strict }),
+  );
+  assign("tensorSplit", readTensorSplit(rawConfig["tensorSplit"], strict));
+  assign(
+    "numa",
+    readEnumField<NonNullable<ModelLoadConfig["numa"]>>(
+      rawConfig["numa"],
+      "numa",
+      NUMA_TYPES,
+      strict,
+    ),
+  );
+  assign(
+    "logLevel",
+    readNumberField(rawConfig["logLevel"], "logLevel", { integer: true, min: 0, max: 10, strict }),
+  );
+  assign(
+    "seedOverride",
+    readNumberField(rawConfig["seedOverride"], "seedOverride", {
+      integer: true,
+      min: -1,
+      max: 2_147_483_647,
+      strict,
+    }),
+  );
+  assign(
+    "chatTemplateContent",
+    readStringField(rawConfig["chatTemplateContent"], "chatTemplateContent", strict),
+  );
+  assign(
+    "imageMaxTokens",
+    readNumberField(rawConfig["imageMaxTokens"], "imageMaxTokens", {
+      integer: true,
+      min: 1,
+      max: 1_048_576,
+      strict,
+    }),
+  );
+  assign(
+    "imageMinTokens",
+    readNumberField(rawConfig["imageMinTokens"], "imageMinTokens", {
+      integer: true,
+      min: 1,
+      max: 1_048_576,
+      strict,
+    }),
+  );
+  assign("presetId", readStringField(rawConfig["presetId"], "presetId", strict));
+
+  return config as unknown as LoadPreset["config"];
+}
+
+/**
+ * Rejects unknown or malformed load-preset config objects on write paths.
+ *
+ * @param config - Candidate config payload from an HTTP body.
+ * @returns No return value.
+ * @throws {PresetValidationError} If the config is not a plain object or fails validation.
+ */
+export function assertWritableLoadPresetConfig(config: unknown): void {
+  if (typeof config !== "object" || config === null || Array.isArray(config)) {
+    throw new PresetValidationError("Load preset config must be a JSON object.");
+  }
+  normalizeLoadPresetConfig(config as Record<string, unknown>, true);
+}
+
+/**
+ * Rejects unknown or malformed load-preset create payloads.
+ *
+ * @param body - Parsed JSON request body.
+ * @returns No return value.
+ * @throws {PresetValidationError} If required fields are missing or config is invalid.
+ */
+export function assertWritableLoadPreset(body: unknown): void {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new PresetValidationError("Load preset must be a JSON object.");
+  }
+  const record = body as Record<string, unknown>;
+  if (typeof record["name"] !== "string" || record["name"].length === 0) {
+    throw new PresetValidationError("Preset creation requires a name.");
+  }
+  if (record["config"] === undefined) {
+    throw new PresetValidationError("Load preset creation requires a config object.");
+  }
+  assertWritableLoadPresetConfig(record["config"]);
 }
 
 /**
@@ -252,7 +715,7 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
     chatTemplateOverride,
     thinkingTagOverride,
   } = preset;
-  if (!id) id = crypto.randomUUID();
+  if (!id) id = Bun.randomUUIDv7();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
 
@@ -275,21 +738,26 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
   );
 }
 
+export type PresetMutationResult = "updated" | "deleted" | "not_found" | "protected";
+
 /**
  * Updates an existing load preset in the database.
  *
  * @param id - Identifier of the preset to update.
  * @param updates - Partial load preset fields to merge into the existing row.
- * @returns A promise that resolves once the preset row has been updated.
+ * @returns Whether the row was updated or missing.
  */
-export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>): Promise<void> {
+export async function updateLoadPreset(
+  id: string,
+  updates: Partial<LoadPreset>,
+): Promise<Exclude<PresetMutationResult, "deleted" | "protected">> {
   const db = getDb();
   const existing = db
     .query<{ config_json: string; name: string; model_path: string | null }, [string]>(
       "SELECT config_json, name, model_path FROM load_presets WHERE id = ?",
     )
     .get(id);
-  if (!existing) return;
+  if (!existing) return "not_found";
   const currentConfig = parseLoadPresetPayload(existing.config_json);
 
   const newConfigJson = serializeLoadPresetPayload({
@@ -321,6 +789,7 @@ export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>)
   db.prepare(
     "UPDATE load_presets SET name = ?, model_path = ?, config_json = ?, updated_at = ? WHERE id = ?",
   ).run(newName, newModelPath ?? null, newConfigJson, Date.now(), id);
+  return "updated";
 }
 
 /**
@@ -329,8 +798,15 @@ export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>)
  * @param id - Identifier of the load preset to remove.
  * @returns A promise that resolves once the delete statement has completed.
  */
-export async function deleteLoadPreset(id: string): Promise<void> {
-  getDb().prepare("DELETE FROM load_presets WHERE id = ? AND is_readonly = 0").run(id);
+export async function deleteLoadPreset(id: string): Promise<PresetMutationResult> {
+  const db = getDb();
+  const existing = db
+    .query<{ is_readonly: number }, [string]>("SELECT is_readonly FROM load_presets WHERE id = ?")
+    .get(id);
+  if (!existing) return "not_found";
+  if (existing.is_readonly) return "protected";
+  db.prepare("DELETE FROM load_presets WHERE id = ?").run(id);
+  return "deleted";
 }
 
 /**
@@ -343,14 +819,12 @@ export async function createInferencePreset(preset: InferencePreset): Promise<vo
   const db = getDb();
   let { id, name, sourceModelPath, isDefault, createdAt, updatedAt, ...config } = preset;
 
-  if (!id) id = crypto.randomUUID();
+  if (!id) id = Bun.randomUUIDv7();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
 
-  if (config.structuredOutput?.enabled && config.structuredOutput.schema) {
-    config.structuredOutput.grammar = generateGrammarFromSchema(
-      config.structuredOutput.schema as Record<string, unknown>,
-    );
+  if (config.structuredOutput) {
+    config.structuredOutput = { ...config.structuredOutput, grammar: undefined };
   }
 
   const configJson = JSON.stringify(config);
@@ -369,14 +843,14 @@ export async function createInferencePreset(preset: InferencePreset): Promise<vo
 export async function updateInferencePreset(
   id: string,
   updates: Partial<InferencePreset>,
-): Promise<void> {
+): Promise<Exclude<PresetMutationResult, "deleted" | "protected">> {
   const db = getDb();
   const existingRow = db
     .query<{ config_json: string; name: string }, [string]>(
       "SELECT config_json, name FROM inference_presets WHERE id = ?",
     )
     .get(id);
-  if (!existingRow) return;
+  if (!existingRow) return "not_found";
 
   const currentConfig = safeParse<Record<string, unknown>>(existingRow.config_json, {});
   const {
@@ -391,16 +865,12 @@ export async function updateInferencePreset(
 
   const newConfig = { ...currentConfig, ...configUpdates };
 
-  if (newConfig.structuredOutput?.enabled && newConfig.structuredOutput.schema) {
-    if (configUpdates.structuredOutput?.schema) {
-      newConfig.structuredOutput.grammar = generateGrammarFromSchema(
-        configUpdates.structuredOutput.schema as Record<string, unknown>,
-      );
-    } else if (!newConfig.structuredOutput.grammar) {
-      newConfig.structuredOutput.grammar = generateGrammarFromSchema(
-        newConfig.structuredOutput.schema as Record<string, unknown>,
-      );
-    }
+  if (
+    newConfig.structuredOutput &&
+    typeof newConfig.structuredOutput === "object" &&
+    newConfig.structuredOutput !== null
+  ) {
+    newConfig.structuredOutput = { ...newConfig.structuredOutput, grammar: undefined };
   }
 
   const newName = name ?? existingRow.name;
@@ -408,6 +878,7 @@ export async function updateInferencePreset(
   db.prepare(
     "UPDATE inference_presets SET name = ?, config_json = ?, updated_at = ? WHERE id = ?",
   ).run(newName, JSON.stringify(newConfig), Date.now(), id);
+  return "updated";
 }
 
 /**
@@ -416,8 +887,17 @@ export async function updateInferencePreset(
  * @param id - Identifier of the inference preset to remove.
  * @returns A promise that resolves once the delete statement has completed.
  */
-export async function deleteInferencePreset(id: string): Promise<void> {
-  getDb().prepare("DELETE FROM inference_presets WHERE id = ? AND is_default = 0").run(id);
+export async function deleteInferencePreset(id: string): Promise<PresetMutationResult> {
+  const db = getDb();
+  const existing = db
+    .query<{ is_default: number }, [string]>(
+      "SELECT is_default FROM inference_presets WHERE id = ?",
+    )
+    .get(id);
+  if (!existing) return "not_found";
+  if (existing.is_default) return "protected";
+  db.prepare("DELETE FROM inference_presets WHERE id = ?").run(id);
+  return "deleted";
 }
 
 /**
@@ -429,7 +909,7 @@ export async function deleteInferencePreset(id: string): Promise<void> {
 export async function createSystemPreset(preset: SystemPromptPreset): Promise<void> {
   const db = getDb();
   let { id, name, content, createdAt, updatedAt } = preset;
-  if (!id) id = crypto.randomUUID();
+  if (!id) id = Bun.randomUUIDv7();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
 
@@ -448,8 +928,12 @@ export async function createSystemPreset(preset: SystemPromptPreset): Promise<vo
 export async function updateSystemPreset(
   id: string,
   updates: Partial<SystemPromptPreset>,
-): Promise<void> {
+): Promise<Exclude<PresetMutationResult, "deleted" | "protected">> {
   const db = getDb();
+  const existing = db
+    .query<{ id: string }, [string]>("SELECT id FROM system_presets WHERE id = ?")
+    .get(id);
+  if (!existing) return "not_found";
   const setStmts: string[] = [];
   const args: (string | number)[] = [];
   if (updates.name !== undefined) {
@@ -460,13 +944,14 @@ export async function updateSystemPreset(
     setStmts.push("content = ?");
     args.push(updates.content);
   }
-  if (setStmts.length === 0) return;
+  if (setStmts.length === 0) return "updated";
 
   setStmts.push("updated_at = ?");
   args.push(Date.now());
   args.push(id);
 
   db.prepare(`UPDATE system_presets SET ${setStmts.join(", ")} WHERE id = ?`).run(...args);
+  return "updated";
 }
 
 /**
@@ -475,8 +960,14 @@ export async function updateSystemPreset(
  * @param id - Identifier of the system prompt preset to remove.
  * @returns A promise that resolves once the delete statement has completed.
  */
-export async function deleteSystemPreset(id: string): Promise<void> {
-  getDb().prepare("DELETE FROM system_presets WHERE id = ?").run(id);
+export async function deleteSystemPreset(id: string): Promise<PresetMutationResult> {
+  const db = getDb();
+  const existing = db
+    .query<{ id: string }, [string]>("SELECT id FROM system_presets WHERE id = ?")
+    .get(id);
+  if (!existing) return "not_found";
+  db.prepare("DELETE FROM system_presets WHERE id = ?").run(id);
+  return "deleted";
 }
 
 /**
@@ -493,6 +984,8 @@ export async function ensureModelDefaultPresets(
 
   const existingLoadPaths = new Set(loadPresets.map((p) => p.modelPath));
   const existingInfPaths = new Set(infPresets.map((p) => p.sourceModelPath));
+  let hasDefaultLoad = loadPresets.some((p) => p.isDefault);
+  let hasDefaultInf = infPresets.some((p) => p.isDefault);
 
   for (const m of models) {
     if (!m.metadata) continue;
@@ -503,8 +996,8 @@ export async function ensureModelDefaultPresets(
         id: Bun.randomUUIDv7(),
         name: `Default (from GGUF) for ${m.modelName}`,
         modelPath: m.primaryPath,
-        isDefault: true,
-        isReadonly: true,
+        isDefault: !hasDefaultLoad,
+        isReadonly: false,
         chatTemplateOverride: m.metadata.chatTemplate ?? undefined,
         thinkingTagOverride: detectThinkingConfig(m.metadata.architecture),
         config: {
@@ -512,10 +1005,9 @@ export async function ensureModelDefaultPresets(
           mmProjPath: m.mmProjPath,
           contextSize: m.metadata.contextLength || 4096,
           contextShift: false,
-          gpuLayers: -1,
-          threads: 3,
-          batchSize: 2048,
-          microBatchSize: 512,
+          gpuLayers: 0,
+          threads: 4,
+          ...defaultBatchingForImageTokens(DEFAULT_IMAGE_MAX_TOKENS),
           ropeScaling: "none",
           ropeFreqBase: 0,
           ropeFreqScale: 0.0,
@@ -530,13 +1022,14 @@ export async function ensureModelDefaultPresets(
           noKvOffload: false,
           cacheReuse: 0,
           contextCheckpoints: 32,
-          imageMaxTokens: 560,
+          imageMaxTokens: DEFAULT_IMAGE_MAX_TOKENS,
         },
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
       await createLoadPreset(newLoadPreset);
       existingLoadPaths.add(m.primaryPath);
+      if (newLoadPreset.isDefault) hasDefaultLoad = true;
     }
 
     // Default Inference Preset
@@ -550,7 +1043,7 @@ export async function ensureModelDefaultPresets(
         id: Bun.randomUUIDv7(),
         name: `Default (from GGUF) for ${m.modelName}`,
         sourceModelPath: m.primaryPath,
-        isDefault: true,
+        isDefault: !hasDefaultInf,
         temperature: m.metadata.defaultTemperature ?? 0.8,
         topK: m.metadata.defaultTopK ?? 40,
         topP: m.metadata.defaultTopP ?? 0.95,
@@ -579,6 +1072,7 @@ export async function ensureModelDefaultPresets(
       };
       await createInferencePreset(newInfPreset);
       existingInfPaths.add(m.primaryPath);
+      if (newInfPreset.isDefault) hasDefaultInf = true;
     }
   }
 }

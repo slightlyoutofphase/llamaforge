@@ -22,12 +22,24 @@
       },
       "suspicious": {
         "noArrayIndexKey": "off",
-        "noExplicitAny": "off",
+        "noExplicitAny": "error",
         "noFallthroughSwitchClause": "error"
       },
       "complexity": {
         "useLiteralKeys": "off"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["tests/**"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noExplicitAny": "off"
+          }
+        }
+      }
+    }
+  ]
 }

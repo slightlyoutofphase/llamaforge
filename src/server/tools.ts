@@ -7,6 +7,24 @@
  * Converts JSON Schema to GBNF (Grammar-Based Network Format) using json2gbnf.
  */
 import json2gbnf from "json2gbnf";
+import { all, create } from "mathjs";
+import { logError } from "./logger";
+
+if (!all) {
+  throw new Error("mathjs factory map is unavailable.");
+}
+const math = create(all);
+math.import(
+  {
+    import: () => {
+      throw new Error("Function import is disabled");
+    },
+    createUnit: () => {
+      throw new Error("Function createUnit is disabled");
+    },
+  },
+  { override: true },
+);
 
 /**
  * Converts a JSON Schema object into a GBNF grammar string for constrained model output.
@@ -16,27 +34,10 @@ import json2gbnf from "json2gbnf";
  */
 export function generateGrammarFromSchema(schema: Record<string, unknown>): string {
   try {
-    return json2gbnf(schema as any);
+    return json2gbnf(schema);
   } catch (error) {
     logError("Failed to compile JSON schema to GBNF", error);
     return "";
-  }
-}
-
-/**
- * Parses generic returned message structures attempting safely to uncover JSON tool call outputs.
- *
- * @param content - Internal raw string prediction context.
- * @returns Array mapped tool calls or null.
- */
-export function parseToolCallsFromResponse(content: string) {
-  try {
-    // If output is structured as JSON Tool Call
-    const parsed = JSON.parse(content);
-    if (parsed.tool_calls) return parsed.tool_calls;
-    return null;
-  } catch {
-    return null;
   }
 }
 
@@ -136,7 +137,14 @@ export function resolveToolApproval(
   toolCallId: string,
   approved: boolean,
   editedArguments?: string | undefined,
+  chatId?: string,
 ) {
+  const pending = pendingApprovals.get(toolCallId);
+  if (!pending) return;
+  if (chatId && pending.chatId !== chatId) {
+    logError("Rejected tool approval for mismatched chat", { toolCallId, chatId });
+    return;
+  }
   settlePendingApproval(toolCallId, {
     approved,
     editedArguments,
@@ -145,43 +153,23 @@ export function resolveToolApproval(
 }
 
 /**
- * Default global tools provided across contexts when explicitly bound for usage.
- */
-export const BUILT_IN_TOOLS = [
-  {
-    name: "get_datetime",
-    description: "Get the current date and time in ISO format.",
-    parameters: { type: "object", properties: {} },
-  },
-  {
-    name: "calculate",
-    description: "Perform basic mathematical calculations.",
-    parameters: {
-      type: "object",
-      properties: {
-        expression: {
-          type: "string",
-          description: "The math expression (e.g., '2 + 2' or 'Math.sqrt(16)')",
-        },
-      },
-      required: ["expression"],
-    },
-  },
-];
-
-import { evaluate } from "mathjs";
-import { logError } from "./logger";
-
-/**
  * Executes a built-in tool function.
  *
  * @param name - The name of the tool to execute.
  * @param args - The JSON stringified arguments for the tool.
  * @returns The stringified result of the tool execution.
- * @throws {Error} If argument parsing fails.
  */
 export async function executeTool(name: string, args: string): Promise<string> {
-  const parsedArgs = JSON.parse(args || "{}");
+  let parsedArgs: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(args || "{}");
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return JSON.stringify({ error: "Tool arguments must be a JSON object." });
+    }
+    parsedArgs = parsed as Record<string, unknown>;
+  } catch {
+    return JSON.stringify({ error: "Malformed tool arguments: invalid JSON." });
+  }
 
   if (name === "get_datetime") {
     return JSON.stringify({ result: new Date().toISOString() });
@@ -189,8 +177,8 @@ export async function executeTool(name: string, args: string): Promise<string> {
 
   if (name === "calculate") {
     try {
-      const expression = String(parsedArgs.expression);
-      const result = evaluate(expression);
+      const expression = String(parsedArgs["expression"]);
+      const result = math.evaluate(expression);
       return JSON.stringify({ result });
     } catch (e) {
       return JSON.stringify({ error: String(e) });

@@ -22,6 +22,39 @@ const REMARK_PLUGINS = [remarkGfm, remarkMath];
 const REHYPE_PLUGINS = [rehypeHighlight, rehypeKatex];
 
 /**
+ * Copies text using the clipboard API, falling back to a hidden textarea when
+ * `navigator.clipboard` is unavailable (non-secure HTTP origins).
+ *
+ * @param text - Text to place on the clipboard.
+ * @returns Whether the copy succeeded.
+ */
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the execCommand fallback.
+  }
+
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(textarea);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Compares two message metric payloads to avoid unnecessary rerenders.
  *
  * @param prev - Previous metrics object associated with the message.
@@ -137,8 +170,19 @@ export const MessageBubble = React.memo(
     );
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const [displayContent, setDisplayContent] = useState(message.content);
+
+    useEffect(() => {
+      if (!isStreaming) {
+        setDisplayContent(message.content);
+        return;
+      }
+      const timer = window.setTimeout(() => setDisplayContent(message.content), 80);
+      return () => window.clearTimeout(timer);
+    }, [message.content, isStreaming]);
+
     const renderedContent =
-      message.content || (message.thinkingContent ? "" : message.rawContent) || "";
+      displayContent || (message.thinkingContent ? "" : message.rawContent) || "";
     const metrics = message.metrics;
     const wrapperSpacingClass = bubbleStyle === "compact" ? "my-3" : "my-6";
     const bubbleClassName =
@@ -170,8 +214,13 @@ export const MessageBubble = React.memo(
      *
      * @returns No return value.
      */
-    const handleCopy = () => {
-      navigator.clipboard.writeText(message.content);
+    const handleCopy = async () => {
+      const copied = await copyTextToClipboard(message.content);
+      if (!copied) {
+        useAppStore
+          .getState()
+          .addNotification("Copy failed. Clipboard access is unavailable.", "error");
+      }
     };
 
     /**
@@ -312,6 +361,7 @@ export const MessageBubble = React.memo(
             return (
               <ToolCard
                 key={tc.id}
+                messageId={message.id}
                 toolCall={tc}
                 onApprove={(id, args) => approveToolCall(message.id, id, true, args)}
                 onReject={(id) => approveToolCall(message.id, id, false)}

@@ -134,8 +134,6 @@ describe("ModelSelector Component", () => {
             defaultMinP: 0.05,
             defaultRepeatPenalty: 1.1,
             chatTemplate: undefined,
-            bosToken: undefined,
-            eosToken: undefined,
           },
         },
       ],
@@ -189,8 +187,6 @@ describe("ModelSelector Component", () => {
             defaultMinP: 0.05,
             defaultRepeatPenalty: 1.1,
             chatTemplate: "same-template",
-            bosToken: undefined,
-            eosToken: undefined,
           },
         },
       ],
@@ -282,7 +278,7 @@ describe("ModelSelector Component", () => {
         },
       }),
     );
-    expect(loadModelSpy.mock.calls[0]?.[0]?.chatTemplateFile).toBeUndefined();
+    expect(loadModelSpy.mock.calls[0]?.[0]?.chatTemplateContent).toBeUndefined();
   });
 
   it("shows load progress instead of the static splash while a model is loading", () => {

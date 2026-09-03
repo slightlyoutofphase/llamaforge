@@ -59,8 +59,15 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
   const blockCount = metadata?.[`${arch}.block_count`];
   const ffLen = metadata?.[`${arch}.feed_forward_length`];
 
-  const hasVision = Boolean(metadata?.["clip.has_vision_encoder"] === true);
-  const hasAudio = Boolean(metadata?.["clip.has_audio_encoder"] === true);
+  const hasVision =
+    metadata?.["clip.has_vision_encoder"] === true ||
+    arch === "clip" ||
+    metadata?.["clip.projector_type"] !== undefined;
+  const hasAudio =
+    metadata?.["clip.has_audio_encoder"] === true ||
+    String(metadata?.["clip.projector_type"] ?? "")
+      .toLowerCase()
+      .includes("audio");
 
   return {
     architecture: arch,
@@ -125,14 +132,6 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
     chatTemplate:
       typeof metadata?.["tokenizer.chat_template"] === "string"
         ? (metadata["tokenizer.chat_template"] as string)
-        : undefined,
-    bosToken:
-      typeof metadata?.["tokenizer.ggml.bos_token_id"] !== "undefined"
-        ? String(metadata["tokenizer.ggml.bos_token_id"])
-        : undefined,
-    eosToken:
-      typeof metadata?.["tokenizer.ggml.eos_token_id"] !== "undefined"
-        ? String(metadata["tokenizer.ggml.eos_token_id"])
         : undefined,
   };
 }

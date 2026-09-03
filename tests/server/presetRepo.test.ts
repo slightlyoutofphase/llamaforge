@@ -19,6 +19,7 @@ import {
   updateInferencePreset,
   updateLoadPreset,
   updateSystemPreset,
+  assertWritableLoadPresetConfig,
 } from "../../src/server/persistence/presetRepo";
 
 describe("presetRepo", () => {
@@ -95,6 +96,34 @@ describe("presetRepo", () => {
     await deleteLoadPreset("lp1");
     presets = await getLoadPresets();
     expect(presets.find((p) => p.id === "lp1")).toBeUndefined();
+  });
+
+  it("strips unknown load preset config keys and rejects them on the write validator", async () => {
+    await createLoadPreset({
+      id: "lp-unknown",
+      name: "Unknown Keys",
+      isDefault: false,
+      isReadonly: false,
+      modelPath: "path1",
+      config: {
+        contextSize: 2048,
+        extraFlag: "--smuggle",
+      } as any,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const stored = (await getLoadPresets()).find((p) => p.id === "lp-unknown");
+    expect(stored?.config).toBeDefined();
+    if (!stored?.config) return;
+    expect((stored.config as Record<string, unknown>)["extraFlag"]).toBeUndefined();
+    expect(stored.config.contextSize).toBe(2048);
+
+    expect(() =>
+      assertWritableLoadPresetConfig({
+        modelPath: "/models/model.gguf",
+        extraFlag: "--smuggle",
+      }),
+    ).toThrow("Unknown load preset config fields");
   });
 
   it("normalizes legacy flat and wrapped flashAttention presets on load", async () => {
@@ -191,7 +220,7 @@ describe("presetRepo", () => {
     expect(presets.find((p) => p.id === "sp1")).toBeUndefined();
   });
 
-  it("creates readonly GGUF defaults with detected thinking config", async () => {
+  it("creates deletable GGUF defaults with detected thinking config", async () => {
     await ensureModelDefaultPresets([
       {
         publisher: "Publisher",
@@ -216,8 +245,6 @@ describe("presetRepo", () => {
           defaultMinP: 0.05,
           defaultRepeatPenalty: 1.1,
           chatTemplate: "gguf-template",
-          bosToken: undefined,
-          eosToken: undefined,
         },
       },
     ]);
@@ -231,15 +258,19 @@ describe("presetRepo", () => {
 
     expect(loadPreset).toBeDefined();
     expect(loadPreset?.name).toBe("Default (from GGUF) for Gemma");
-    expect(loadPreset?.isDefault).toBe(true);
-    expect(loadPreset?.isReadonly).toBe(true);
+    expect(loadPresets.filter((preset) => preset.isDefault).length).toBeLessThanOrEqual(1);
+    expect(loadPreset?.isReadonly).toBe(false);
     expect(loadPreset?.chatTemplateOverride).toBe("gguf-template");
     expect(loadPreset?.thinkingTagOverride?.enableToken).toBe("<|think|>");
     expect(loadPreset?.config.imageMaxTokens).toBe(560);
+    expect(loadPreset?.config.microBatchSize).toBeGreaterThanOrEqual(1120);
+    expect(loadPreset?.config.batchSize).toBeGreaterThanOrEqual(
+      loadPreset?.config.microBatchSize ?? 0,
+    );
 
     expect(inferencePreset).toBeDefined();
     expect(inferencePreset?.name).toBe("Default (from GGUF) for Gemma");
-    expect(inferencePreset?.isDefault).toBe(true);
+    expect(inferencePresets.filter((preset) => preset.isDefault).length).toBeLessThanOrEqual(1);
   });
 
   it("uses relaxed minP/repeatPenalty defaults when all three core sampling params are present in GGUF", async () => {
@@ -267,8 +298,6 @@ describe("presetRepo", () => {
           defaultMinP: undefined,
           defaultRepeatPenalty: undefined,
           chatTemplate: undefined,
-          bosToken: undefined,
-          eosToken: undefined,
         },
       },
     ]);
@@ -309,8 +338,6 @@ describe("presetRepo", () => {
           defaultMinP: 0.02,
           defaultRepeatPenalty: 1.15,
           chatTemplate: undefined,
-          bosToken: undefined,
-          eosToken: undefined,
         },
       },
     ]);
@@ -348,8 +375,6 @@ describe("presetRepo", () => {
           defaultMinP: undefined,
           defaultRepeatPenalty: undefined,
           chatTemplate: undefined,
-          bosToken: undefined,
-          eosToken: undefined,
         },
       },
     ]);

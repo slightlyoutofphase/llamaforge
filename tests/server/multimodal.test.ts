@@ -11,7 +11,7 @@ import { buildContentParts, processUpload } from "../../src/server/multimodal";
 
 const encoder = new TextEncoder();
 let mkdirSpy: ReturnType<typeof spyOn<typeof fs, "mkdir">>;
-let writeFileSpy: ReturnType<typeof spyOn<typeof fs, "writeFile">>;
+let writeSpy: ReturnType<typeof spyOn<typeof Bun, "write">>;
 
 const fileSpy = spyOn(Bun, "file").mockImplementation((filePath: string | URL) => {
   const pathStr = filePath.toString();
@@ -40,14 +40,14 @@ const fileSpy = spyOn(Bun, "file").mockImplementation((filePath: string | URL) =
 describe("multimodal", () => {
   beforeEach(async () => {
     mkdirSpy = spyOn(fs, "mkdir").mockResolvedValue(undefined);
-    writeFileSpy = spyOn(fs, "writeFile").mockResolvedValue(undefined as never);
+    writeSpy = spyOn(Bun, "write").mockResolvedValue(3);
     await initDb(":memory:");
   });
 
   afterEach(() => {
     resetDb();
     mkdirSpy.mockRestore();
-    writeFileSpy.mockRestore();
+    writeSpy.mockRestore();
   });
 
   it("returns string when no media attachments", async () => {
@@ -75,7 +75,7 @@ describe("multimodal", () => {
       Uint8Array.from([97, 98, 99]).buffer,
     );
 
-    const lastCall = writeFileSpy.mock.calls.at(-1);
+    const lastCall = writeSpy.mock.calls.at(-1);
     expect(lastCall).toBeDefined();
     expect(String(lastCall?.[0]).startsWith(path.join(getAppDataDir(), "attachments"))).toBe(true);
     expect(attachment.filePath.startsWith("attachments/chat-a/msg-a/")).toBe(true);

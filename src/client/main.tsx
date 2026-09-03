@@ -13,7 +13,17 @@ import "highlight.js/styles/github-dark.css";
 import "./index.css";
 import { logError } from "./logger";
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      refetchOnWindowFocus: false,
+    },
+    mutations: {
+      retry: 0,
+    },
+  },
+});
 
 const rootElement = document.getElementById("root");
 if (!rootElement) {

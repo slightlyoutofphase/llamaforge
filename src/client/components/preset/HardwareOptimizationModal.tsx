@@ -102,7 +102,11 @@ export function HardwareOptimizationModal({
           ) : !optimizedConfig ? (
             <div className="flex flex-col items-center py-8 text-center">
               <AlertCircle size={48} className="text-yellow-500 mb-4 opacity-50" />
-              <p>Hardware information profile not yet loaded. Please wait for health probe.</p>
+              <p>
+                {optimizeMut.error instanceof Error
+                  ? optimizeMut.error.message
+                  : "Hardware information profile not yet loaded. Please wait for health probe."}
+              </p>
             </div>
           ) : (
             <>

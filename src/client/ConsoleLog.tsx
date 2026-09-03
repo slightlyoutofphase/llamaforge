@@ -4,7 +4,7 @@
  */
 
 import { X } from "lucide-react";
-import { useDeferredValue, useEffect, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "./store";
 import { useUiStore } from "./uiStore";
 
@@ -31,18 +31,17 @@ export function ConsoleLog() {
   const promptCacheStats = useAppStore((state) => state.promptCacheStats);
   const genStats = useAppStore((state) => state.generationStats);
 
-  const filteredLogs = deferredLogs.filter((log) => {
-    const text = typeof log === "string" ? log : JSON.stringify(log);
-
-    if (filter !== "ALL") {
-      if (!text.toLowerCase().includes(`[${filter.toLowerCase()}]`)) return false;
-    }
-
-    if (deferredSearch && !text.toLowerCase().includes(deferredSearch.toLowerCase())) {
-      return false;
-    }
-    return true;
-  });
+  const filteredLogs = useMemo(() => {
+    const needle = deferredSearch.toLowerCase();
+    const levelNeedle = `[${filter.toLowerCase()}]`;
+    return deferredLogs.filter((log) => {
+      const text = typeof log === "string" ? log : JSON.stringify(log);
+      const lower = text.toLowerCase();
+      if (filter !== "ALL" && !lower.includes(levelNeedle)) return false;
+      if (needle && !lower.includes(needle)) return false;
+      return true;
+    });
+  }, [deferredLogs, deferredSearch, filter]);
 
   useEffect(() => {
     const viewport = viewportRef.current;

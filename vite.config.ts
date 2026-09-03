@@ -43,9 +43,6 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react(), tailwindcss()],
-    define: {
-      "process.env.GEMINI_API_KEY": JSON.stringify(env.GEMINI_API_KEY),
-    },
     resolve: {
       alias: {
         "@": path.resolve(__dirname, "."),
@@ -62,13 +59,13 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
-      host: "0.0.0.0",
+      host: env.LLAMAFORGE_DEV_HOST || process.env.LLAMAFORGE_DEV_HOST || "127.0.0.1",
       port: 3000,
       hmr: process.env.DISABLE_HMR !== "true",
       proxy: {
         "/api": {
           target: "http://127.0.0.1:11435",
-          changeOrigin: true,
+          changeOrigin: false,
         },
         "/ws": {
           target: "ws://127.0.0.1:11435",

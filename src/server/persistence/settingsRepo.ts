@@ -12,7 +12,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   serverPort: 11435,
   modelsPath: join(os.homedir(), "Models"),
   theme: "system",
-  accentColor: "oklch(65% 0.18 280)",
+  accentColor: "#7b6ef6",
   fontSize: 14,
   chatBubbleStyle: "bubble",
   autonameEnabled: true,
@@ -68,6 +68,21 @@ function normalizePositiveNumber(value: unknown, fallback: number): number {
   return value;
 }
 
+const HEX_ACCENT_COLOR = /^#[0-9A-Fa-f]{6}$/;
+
+/**
+ * Coerces a stored accent colour to `#rrggbb` so `<input type="color">` can consume it.
+ *
+ * @param value - Raw accent colour from settings.
+ * @returns A six-digit hex colour.
+ */
+function normalizeAccentColor(value: string | undefined): string {
+  if (typeof value === "string" && HEX_ACCENT_COLOR.test(value)) {
+    return value;
+  }
+  return DEFAULT_SETTINGS.accentColor;
+}
+
 /**
  * Merges persisted settings with defaults and applies value normalization rules.
  *
@@ -103,6 +118,7 @@ function normalizeSettings(raw: Partial<AppSettings>): AppSettings {
       raw.requestTimeoutSeconds,
       DEFAULT_SETTINGS.requestTimeoutSeconds,
     ),
+    accentColor: normalizeAccentColor(raw.accentColor ?? merged.accentColor),
   };
 
   return normalizedServerPort === undefined
@@ -164,10 +180,40 @@ function validateMergedSettings(settings: AppSettings): void {
     min: MIN_PORT,
     max: MAX_PORT,
   });
-  assertFiniteNumber("requestTimeoutSeconds", settings.requestTimeoutSeconds, { min: 0.001 });
+  assertFiniteNumber("requestTimeoutSeconds", settings.requestTimeoutSeconds, { min: 0 });
 
   if (settings.llamaPortRangeMin > settings.llamaPortRangeMax) {
     throw new InvalidSettingsError("llamaPortRangeMin cannot be greater than llamaPortRangeMax.");
+  }
+
+  const themes = new Set(["dark", "light", "system"]);
+  if (!themes.has(settings.theme)) {
+    throw new InvalidSettingsError("theme must be dark, light, or system.");
+  }
+  const logLevels = new Set(["off", "error", "warn", "info", "debug", "verbose"]);
+  if (!logLevels.has(settings.logLevel)) {
+    throw new InvalidSettingsError("logLevel must be a known logging level.");
+  }
+  const bubbleStyles = new Set(["bubble", "flat", "compact"]);
+  if (!bubbleStyles.has(settings.chatBubbleStyle)) {
+    throw new InvalidSettingsError("chatBubbleStyle must be bubble, flat, or compact.");
+  }
+
+  const stringFields: Array<keyof AppSettings> = [
+    "modelsPath",
+    "llamaServerPath",
+    "nvidiaSmiPath",
+    "rocmSmiPath",
+    "sysctlPath",
+    "systemProfilerPath",
+    "powershellPath",
+    "accentColor",
+  ];
+  for (const field of stringFields) {
+    const value = settings[field];
+    if (value !== undefined && typeof value !== "string") {
+      throw new InvalidSettingsError(`${String(field)} must be a string.`);
+    }
   }
 }
 

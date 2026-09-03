@@ -12,7 +12,7 @@ import { useAppStore } from "./store";
  * @returns The rendered React element, or null if hardware information is unavailable.
  */
 export function HardwareInfo() {
-  const { hardware } = useAppStore();
+  const hardware = useAppStore((s) => s.hardware);
 
   if (!hardware) return null;
 

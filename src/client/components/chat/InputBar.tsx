@@ -14,6 +14,9 @@ interface PendingAttachment {
   previewUrl: string | null;
 }
 
+const MAX_COMPOSER_FILES = 5;
+const MAX_COMPOSER_FILE_BYTES = 10 * 1024 * 1024;
+
 /**
  * Creates a local preview URL for attachments that can be rendered inline.
  *
@@ -99,12 +102,18 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
   }, [inputContent]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    const newItems = acceptedFiles.map((file) => ({
-      id: crypto.randomUUID(),
-      file,
-      previewUrl: createPreviewUrl(file),
-    }));
-    setFiles((prev) => [...prev, ...newItems]);
+    setFiles((prev) => {
+      const remainingSlots = Math.max(0, MAX_COMPOSER_FILES - prev.length);
+      const accepted = acceptedFiles
+        .filter((file) => file.size <= MAX_COMPOSER_FILE_BYTES)
+        .slice(0, remainingSlots)
+        .map((file) => ({
+          id: crypto.randomUUID(),
+          file,
+          previewUrl: createPreviewUrl(file),
+        }));
+      return [...prev, ...accepted];
+    });
   }, []);
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
@@ -132,7 +141,11 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     const pendingFiles = [...files];
     const filesToSend = await Promise.all(pendingFiles.map(({ file }) => cloneFile(file)));
 
-    await Promise.resolve(onSend(inputContent, filesToSend));
+    try {
+      await Promise.resolve(onSend(inputContent, filesToSend));
+    } catch {
+      return;
+    }
 
     for (const file of pendingFiles) {
       revokePreviewUrl(file.previewUrl);

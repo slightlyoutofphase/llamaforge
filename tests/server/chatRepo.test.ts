@@ -51,6 +51,28 @@ describe("chatRepo", () => {
     expect(deleted).toBeNull();
   });
 
+  it("deletes a parent chat and keeps its branches with a null parent", async () => {
+    const parent = await createChat("Parent Chat");
+    await addMessage({
+      id: "branch-point",
+      chatId: parent.id,
+      role: "user",
+      content: "Branch from here",
+      rawContent: "Branch from here",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    const branchId = await createBranch(parent.id, "branch-point");
+
+    await deleteChat(parent.id);
+
+    expect(await getChat(parent.id)).toBeNull();
+    const branch = await getChat(branchId);
+    expect(branch).not.toBeNull();
+    expect(branch?.parentId).toBeNull();
+    expect(branch?.isBranch).toBe(true);
+  });
+
   it("lists chats by creation date instead of last update time", async () => {
     const nowSpy = spyOn(Date, "now");
     let now = 1000;

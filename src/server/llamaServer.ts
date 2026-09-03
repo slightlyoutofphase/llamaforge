@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { LlamaServerStatus, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
+import { applyImageTokenBatchFloor } from "../shared/imageTokens";
 import { type Subprocess, spawn } from "bun";
 import { logDebug, logError, logInfo, logWarn, shouldEmitLog } from "./logger";
 import { getAppDataDir } from "./persistence/db";
@@ -17,6 +18,7 @@ let proc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
 let activePort: number | null = null;
 let currentConfig: ModelLoadConfig | null = null;
 let currentThinkingTagOverride: ThinkingTagConfig | undefined;
+let activeTempJinjaPath: string | undefined;
 let currentStatus: LlamaServerStatus = "idle";
 let loadingLock = false;
 let unloadPromise: Promise<void> | null = null;
@@ -225,7 +227,8 @@ export function getActiveThinkingTagOverride(): ThinkingTagConfig | undefined {
 
 /**
  * Builds the CLI argument array for llama-server from a ModelLoadConfig.
- * Every field in ModelLoadConfig maps 1:1 to a documented llama-server flag.
+ * Flags are emitted from documented llama-server options; optional fields such as
+ * `--image-min-tokens` are included only when the user sets them.
  *
  * @param config - The load configuration.
  * @param port - The port to bind to.
@@ -237,6 +240,11 @@ export function getActiveThinkingTagOverride(): ThinkingTagConfig | undefined {
  */
 export function buildArgs(config: ModelLoadConfig, port: number): readonly string[] {
   const appRoot = getAppDataDir();
+  const { batchSize, microBatchSize } = applyImageTokenBatchFloor(
+    config.batchSize,
+    config.microBatchSize,
+    config.imageMaxTokens,
+  );
   const args: string[] = [
     "--model",
     config.modelPath,
@@ -253,9 +261,9 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
     String(config.threads),
     ...(config.threadsBatch !== undefined ? ["--threads-batch", String(config.threadsBatch)] : []),
     "--batch-size",
-    String(config.batchSize),
+    String(batchSize),
     "--ubatch-size",
-    String(config.microBatchSize),
+    String(microBatchSize),
     ...(config.ropeScaling !== "none" ? ["--rope-scaling", config.ropeScaling] : []),
     ...(config.ropeFreqBase > 0 ? ["--rope-freq-base", String(config.ropeFreqBase)] : []),
     ...(config.ropeFreqScale > 0 ? ["--rope-freq-scale", String(config.ropeFreqScale)] : []),
@@ -263,11 +271,6 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
     config.kvCacheTypeK,
     "--cache-type-v",
     config.kvCacheTypeV,
-    "--image-min-tokens",
-    "70",
-    "--parallel",
-    "1",
-    "--jinja",
   ];
 
   if (config.contBatching) {
@@ -302,11 +305,12 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
   if (config.tensorSplit && config.tensorSplit.length > 0) {
     args.push("--tensor-split", config.tensorSplit.join(","));
   }
-  if (config.mlock) {
-    args.push("--mlock");
-  }
-  if (config.noMmap) {
-    args.push("--no-mmap");
+  if (config.mlock && config.noMmap) {
+    args.push("--load-mode", "mlock");
+  } else if (config.mlock) {
+    args.push("--load-mode", "mmap+mlock");
+  } else if (config.noMmap) {
+    args.push("--load-mode", "none");
   }
   if (config.numa !== undefined) {
     args.push("--numa", config.numa);
@@ -317,12 +321,12 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
   if (config.seedOverride !== undefined) {
     args.push("--seed", String(config.seedOverride));
   }
-  if (config.chatTemplateFile) {
-    args.push("--chat-template-file", config.chatTemplateFile);
-  }
 
   if (config.imageMaxTokens !== undefined) {
     args.push("--image-max-tokens", String(config.imageMaxTokens));
+    if (config.imageMinTokens !== undefined) {
+      args.push("--image-min-tokens", String(config.imageMinTokens));
+    }
   }
 
   if (config.kvUnified !== undefined) {
@@ -410,6 +414,7 @@ export async function loadModel(
   resetLoadProgress();
   broadcastLoadProgress("spawning", 5, "Starting model load sequence…");
 
+  let tempJinjaPath: string | undefined;
   try {
     if (unloadPromise) {
       await unloadPromise;
@@ -437,16 +442,18 @@ export async function loadModel(
 
     const persistedConfig: ModelLoadConfig = { ...config };
 
-    // Temporary file handling for custom Jinja templates
-    if (config.chatTemplateFile !== undefined) {
-      const tempPath = path.join(os.tmpdir(), `llamaforge-chat-template-${Date.now()}.jinja`);
-      await Bun.write(tempPath, config.chatTemplateFile);
-      config = { ...config, chatTemplateFile: tempPath };
+    if (config.chatTemplateContent !== undefined) {
+      tempJinjaPath = path.join(os.tmpdir(), `llamaforge-chat-template-${Date.now()}.jinja`);
+      await Bun.write(tempJinjaPath, config.chatTemplateContent);
     }
 
-    currentConfig = config;
+    currentConfig = persistedConfig;
+    activeTempJinjaPath = tempJinjaPath;
     currentThinkingTagOverride = thinkingTagOverride;
-    const args = buildArgs(config, port);
+    const args = [...buildArgs(persistedConfig, port)];
+    if (tempJinjaPath) {
+      args.push("--chat-template-file", tempJinjaPath);
+    }
     logInfo("Spawning llama-server", { command: llamaServerBin });
 
     const fullCmd = [llamaServerBin, ...args];
@@ -484,6 +491,23 @@ export async function loadModel(
     });
 
     return port;
+  } catch (err) {
+    if (tempJinjaPath) {
+      activeTempJinjaPath = undefined;
+      try {
+        await fs.unlink(tempJinjaPath);
+      } catch {
+        // Temp file may already be gone.
+      }
+    }
+    if (currentStatus !== "running") {
+      if (proc) {
+        await unloadModel();
+      } else {
+        resetLoadedModelState();
+      }
+    }
+    throw err;
   } finally {
     loadingLock = false;
   }
@@ -656,11 +680,18 @@ export function requestUnloadModel(): Promise<void> {
     cancelPendingApprovals(undefined, "unloaded");
     if (!proc) {
       resetLoadedModelState();
+      const tempPath = activeTempJinjaPath;
+      activeTempJinjaPath = undefined;
+      if (tempPath) {
+        Bun.file(tempPath)
+          .delete()
+          .catch(() => {});
+      }
       return;
     }
 
     const target = proc;
-    const configSnapshot = resetLoadedModelState();
+    resetLoadedModelState();
     cancelActiveLogReaders();
 
     try {
@@ -684,8 +715,10 @@ export function requestUnloadModel(): Promise<void> {
         }
       }
     } finally {
-      if (configSnapshot?.chatTemplateFile) {
-        Bun.file(configSnapshot.chatTemplateFile)
+      const tempPath = activeTempJinjaPath;
+      activeTempJinjaPath = undefined;
+      if (tempPath) {
+        Bun.file(tempPath)
           .delete()
           .catch(() => {});
       }

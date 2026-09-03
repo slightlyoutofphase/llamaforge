@@ -15,7 +15,7 @@ import {
   Settings2,
   Terminal,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseToolCallsJson } from "@shared/toolCalls.js";
 import { logError } from "../../logger";
 import {
@@ -85,25 +85,23 @@ function ToolResultInline({ message }: { message: import("@shared/types.js").Cha
  */
 export function ChatView() {
   const { chatId } = useParams({ from: "/chat/$chatId" });
-  const {
-    messages,
-    isGenerating,
-    isWaitingForToolApproval,
-    generationStats,
-    serverStatus,
-    currentChatId,
-    currentChatMetadata,
-    loadChat,
-    sendMessage,
-    stopGeneration,
-    loadedModel,
-    setError,
-    errorMessage,
-    isConnected,
-    totalMessages,
-    loadMoreMessages,
-    unloadChat,
-  } = useAppStore();
+  const messages = useAppStore((s) => s.messages);
+  const isGenerating = useAppStore((s) => s.isGenerating);
+  const isWaitingForToolApproval = useAppStore((s) => s.isWaitingForToolApproval);
+  const generationStats = useAppStore((s) => s.generationStats);
+  const serverStatus = useAppStore((s) => s.serverStatus);
+  const currentChatId = useAppStore((s) => s.currentChatId);
+  const currentChatMetadata = useAppStore((s) => s.currentChatMetadata);
+  const loadChat = useAppStore((s) => s.loadChat);
+  const sendMessage = useAppStore((s) => s.sendMessage);
+  const stopGeneration = useAppStore((s) => s.stopGeneration);
+  const loadedModel = useAppStore((s) => s.loadedModel);
+  const setError = useAppStore((s) => s.setError);
+  const errorMessage = useAppStore((s) => s.errorMessage);
+  const isConnected = useAppStore((s) => s.isConnected);
+  const totalMessages = useAppStore((s) => s.totalMessages);
+  const loadMoreMessages = useAppStore((s) => s.loadMoreMessages);
+  const unloadChat = useAppStore((s) => s.unloadChat);
   const { setRightPanelView } = useUiStore();
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -113,6 +111,15 @@ export function ChatView() {
   // S10 fix: refs for outside-click dismiss
   const infDropdownRef = useRef<HTMLDivElement>(null);
   const sysDropdownRef = useRef<HTMLDivElement>(null);
+  const toolResultsByCallId = useMemo(() => {
+    const map = new Map<string, (typeof messages)[number]>();
+    for (const message of messages) {
+      if (message.role === "tool" && message.toolCallId) {
+        map.set(message.toolCallId, message);
+      }
+    }
+    return map;
+  }, [messages]);
 
   // S10 fix: close dropdowns when clicking outside
   useEffect(() => {
@@ -464,7 +471,7 @@ export function ChatView() {
       { id: currentChatId, updates },
       {
         onSuccess: () => {
-          loadChat(currentChatId);
+          useAppStore.getState().patchCurrentChatMetadata(updates);
         },
       },
     );
@@ -570,14 +577,15 @@ export function ChatView() {
                 Pick Inference Preset
               </div>
               {infPresets?.map((p) => (
-                <button
+                <div
                   key={p.id}
-                  type="button"
-                  onClick={() => updatePreset("inference", p.id)}
-                  className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--color-accent)] hover:text-white transition-colors flex items-center justify-between group">
-                  <span className="truncate">
+                  className="w-full px-3 py-1.5 text-xs hover:bg-[var(--color-accent)] hover:text-white transition-colors flex items-center justify-between group">
+                  <button
+                    type="button"
+                    onClick={() => updatePreset("inference", p.id)}
+                    className="min-w-0 flex-1 text-left truncate">
                     {p.name} {p.isDefault ? "(Default)" : ""}
-                  </span>
+                  </button>
                   <button
                     type="button"
                     onClick={(e) => {
@@ -588,7 +596,7 @@ export function ChatView() {
                     className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-white/20 rounded">
                     <Settings2 size={12} />
                   </button>
-                </button>
+                </div>
               ))}
             </div>
           )}
@@ -615,12 +623,15 @@ export function ChatView() {
                 None
               </button>
               {sysPresets?.map((p) => (
-                <button
+                <div
                   key={p.id}
-                  type="button"
-                  onClick={() => updatePreset("system", p.id)}
-                  className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--color-accent)] hover:text-white transition-colors flex items-center justify-between group">
-                  <span className="truncate">{p.name}</span>
+                  className="w-full px-3 py-1.5 text-xs hover:bg-[var(--color-accent)] hover:text-white transition-colors flex items-center justify-between group">
+                  <button
+                    type="button"
+                    onClick={() => updatePreset("system", p.id)}
+                    className="min-w-0 flex-1 text-left truncate">
+                    {p.name}
+                  </button>
                   <button
                     type="button"
                     onClick={(e) => {
@@ -631,7 +642,7 @@ export function ChatView() {
                     className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-white/20 rounded">
                     <Settings2 size={12} />
                   </button>
-                </button>
+                </div>
               ))}
             </div>
           )}
@@ -699,19 +710,12 @@ export function ChatView() {
             {messages
               .filter((msg) => msg.role !== "tool")
               .map((msg, i, arr) => {
-                // Collect any tool result messages that immediately follow this assistant message
+                const parsedToolCalls =
+                  msg.role === "assistant" ? parseToolCallsJson(msg.toolCallsJson) : null;
                 const toolResults =
-                  msg.role === "assistant" && msg.toolCallsJson
-                    ? messages.filter(
-                        (m) =>
-                          m.role === "tool" &&
-                          Boolean(
-                            parseToolCallsJson(msg.toolCallsJson)?.some(
-                              (tc) => tc.id === m.toolCallId,
-                            ),
-                          ),
-                      )
-                    : [];
+                  parsedToolCalls
+                    ?.map((tc) => toolResultsByCallId.get(tc.id))
+                    .filter((m): m is NonNullable<typeof m> => Boolean(m)) ?? [];
                 return (
                   <div key={msg.id || i}>
                     <MessageBubble

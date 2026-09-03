@@ -56,6 +56,7 @@ describe("optimizer", () => {
     const config = optimizeLoadConfig(cpuOnly, mockMeta);
     expect(config.gpuLayers).toBe(0);
     expect(config.threads).toBe(8); // Math.min(16-1, 8)
+    expect(config.contextSize).toBeGreaterThan(4096);
   });
 
   it("stays conservative for unconfirmed WMI-only GPU entries", () => {
@@ -75,6 +76,19 @@ describe("optimizer", () => {
     expect(config.flashAttn).toBe("off");
     expect(config.batchSize).toBe(512);
     expect(config.microBatchSize).toBe(128);
+  });
+
+  it("raises ubatch to fit the default vision image-token budget", () => {
+    const visionMeta: GgufDisplayMetadata = {
+      ...mockMeta,
+      architecture: "gemma4",
+      hasVisionEncoder: true,
+      hasAudioEncoder: false,
+    };
+    const config = optimizeLoadConfig(mockHardware, visionMeta);
+    expect(config.imageMaxTokens).toBe(560);
+    expect(config.microBatchSize).toBeGreaterThanOrEqual(1120);
+    expect((config.batchSize ?? 0) >= (config.microBatchSize ?? 0)).toBe(true);
   });
 
   it("handles Grouped Query Attention architectures successfully saving VRAM", () => {

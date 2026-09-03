@@ -35,6 +35,6 @@ export const useUiStore = create<UiState>((set) => ({
   activePresetId: null,
   isConsoleVisible: false,
   setRightPanelView: (view, presetId) =>
-    set({ rightPanelView: view, activePresetId: presetId || null }),
+    set({ rightPanelView: view, activePresetId: presetId === undefined ? null : presetId }),
   toggleConsole: () => set((state) => ({ isConsoleVisible: !state.isConsoleVisible })),
 }));

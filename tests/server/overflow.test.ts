@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { ChatMessage } from "@shared/types";
-import { getTokens, truncateMessages } from "../../src/server/overflow";
+import { ContextOverflowError, getTokens, truncateMessages } from "../../src/server/overflow";
 
 const originalFetch = globalThis.fetch;
 
@@ -149,5 +149,51 @@ describe("overflow logic", () => {
     expect(result[0].role).toBe("system");
     expect(result[1].role).toBe("user");
     expect(result[1].content).toContain("LATEST QUESTION");
+  });
+
+  it("TruncateMiddle removes assistant tool-call groups atomically", async () => {
+    const toolCallsJson = JSON.stringify([
+      {
+        id: "call_1",
+        type: "function",
+        function: { name: "calculate", arguments: '{"expression":"2+2"}' },
+      },
+    ]);
+    const msgs: ChatMessage[] = [
+      mockMsg("system", "SYS ".repeat(100)),
+      mockMsg("user", "FIRST USER ".repeat(100)),
+      {
+        ...mockMsg("assistant", "CALL ".repeat(1000)),
+        toolCallsJson,
+      },
+      { ...mockMsg("tool", "RESULT ".repeat(200)), toolCallId: "call_1" },
+      mockMsg("user", "LATEST QUERY"),
+    ];
+
+    const result = await truncateMessages([...msgs], "TruncateMiddle", 1024, 512);
+    const roles = result.map((message) => message.role);
+    const toolIndex = roles.indexOf("tool");
+    if (toolIndex !== -1) {
+      expect(roles[toolIndex - 1]).toBe("assistant");
+      expect(result[toolIndex - 1]?.toolCallsJson).toBeTruthy();
+    }
+    expect(result.some((message) => message.role === "tool" && !roles.includes("assistant"))).toBe(
+      false,
+    );
+    expect(result.at(-1)?.content).toBe("LATEST QUERY");
+    expect(result.find((message) => message.toolCallsJson)).toBeUndefined();
+    expect(result.find((message) => message.role === "tool")).toBeUndefined();
+  });
+
+  it("StopAtLimit throws before returning an oversized history", async () => {
+    const msgs = [
+      mockMsg("system", "SYS ".repeat(100)),
+      mockMsg("user", "FIRST USER ".repeat(100)),
+      mockMsg("assistant", "MIDDLE ".repeat(1000)),
+      mockMsg("user", "LATEST QUERY"),
+    ];
+    await expect(truncateMessages([...msgs], "StopAtLimit", 1024, 512)).rejects.toBeInstanceOf(
+      ContextOverflowError,
+    );
   });
 });

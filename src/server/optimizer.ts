@@ -4,6 +4,7 @@
  */
 
 import type { GgufDisplayMetadata, HardwareInfo, ModelLoadConfig } from "../shared/types";
+import { DEFAULT_IMAGE_MAX_TOKENS, applyImageTokenBatchFloor } from "../shared/imageTokens";
 
 type ConfirmedGpuBackend = "cuda" | "rocm" | "metal" | "vulkan";
 
@@ -39,7 +40,7 @@ export function optimizeLoadConfig(
   const totalVram = confirmedGpus.reduce((acc, g) => acc + Math.max(0, g.vramBytes), 0);
   const blockCount = Math.max(0, metadata.blockCount ?? 0);
   const contextLength = metadata.contextLength ?? 4096;
-  const embeddingLength = Math.max(4096, metadata.embeddingLength ?? 4096);
+  const embeddingLength = Math.max(256, metadata.embeddingLength ?? 4096);
   const attentionHeadCount = Math.max(1, metadata.attentionHeadCount ?? 1);
   const attentionHeadCountKv = Math.max(1, metadata.attentionHeadCountKv ?? attentionHeadCount);
 
@@ -64,7 +65,14 @@ export function optimizeLoadConfig(
     const bytesPerCtxToken = 2 * blockCount * attentionHeadCountKv * headDim * kvElementSize;
     const totalEstimatedBytesPerLayer = metadata.fileSizeBytes / blockCount;
     const vramOccupiedByLayers = gpuLayers * totalEstimatedBytesPerLayer;
-    const headroom = Math.max(0, totalVram - vramOccupiedByLayers - 512 * 1024 * 1024);
+    const ramHeadroom = Math.max(
+      0,
+      hardware.totalRamBytes - metadata.fileSizeBytes - 2 * 1024 * 1024 * 1024,
+    );
+    const headroom =
+      gpuLayers > 0
+        ? Math.max(0, totalVram - vramOccupiedByLayers - 512 * 1024 * 1024)
+        : ramHeadroom;
     let suggestedCtx = Math.floor(headroom / Math.max(1, bytesPerCtxToken));
     suggestedCtx = Math.min(suggestedCtx, contextLength);
     if (suggestedCtx >= 32768) suggested.contextSize = 32768;
@@ -75,8 +83,16 @@ export function optimizeLoadConfig(
   }
 
   const useGpuLoad = gpuLayers > 0;
-  suggested.batchSize = useGpuLoad ? 2048 : 512;
-  suggested.microBatchSize = useGpuLoad ? 512 : 128;
+  const batchSize = useGpuLoad ? 2048 : 512;
+  const microBatchSize = useGpuLoad ? 512 : 128;
+
+  const imageBudget = metadata.hasVisionEncoder ? DEFAULT_IMAGE_MAX_TOKENS : undefined;
+  if (imageBudget !== undefined) {
+    suggested.imageMaxTokens = imageBudget;
+  }
+  const floored = applyImageTokenBatchFloor(batchSize, microBatchSize, imageBudget);
+  suggested.batchSize = floored.batchSize;
+  suggested.microBatchSize = floored.microBatchSize;
 
   suggested.mlock =
     metadata.fileSizeBytes > 0 && metadata.fileSizeBytes < hardware.totalRamBytes * 0.5;

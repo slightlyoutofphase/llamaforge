@@ -4,9 +4,11 @@
  */
 
 import { beforeAll, describe, expect, it, spyOn } from "bun:test";
+import fs from "node:fs/promises";
+import path from "node:path";
 import * as llamaServerModule from "../../src/server/llamaServer";
-import { createChat } from "../../src/server/persistence/chatRepo";
-import { initDb } from "../../src/server/persistence/db";
+import { addMessage, createChat } from "../../src/server/persistence/chatRepo";
+import { getAppDataDir, initDb } from "../../src/server/persistence/db";
 import { createInferencePreset } from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
 import { __setHardwareProbe } from "../../src/server/router";
@@ -35,7 +37,7 @@ describe("router", () => {
   });
 
   it("GET /health returns 200 OK", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/health");
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(200);
@@ -59,7 +61,7 @@ describe("router", () => {
     );
 
     try {
-      const router = createRouter(settings);
+      const router = createRouter();
       const req = new Request("http://localhost/chat/prod-route", {
         headers: { Accept: "text/html" },
       });
@@ -78,7 +80,7 @@ describe("router", () => {
     Bun.env.NODE_ENV = "production";
 
     try {
-      const router = createRouter(settings);
+      const router = createRouter();
       const req = new Request("http://localhost/assets/does-not-exist.js");
       const res = await router.fetch(req, {});
 
@@ -94,7 +96,7 @@ describe("router", () => {
     Bun.env.NODE_ENV = "production";
 
     try {
-      const router = createRouter(settings);
+      const router = createRouter();
       const req = new Request("http://localhost/chat/prod-route", {
         method: "POST",
         headers: { Accept: "text/html" },
@@ -109,7 +111,7 @@ describe("router", () => {
   });
 
   it("GET /api/settings returns settings", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/settings");
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(200);
@@ -118,7 +120,7 @@ describe("router", () => {
   });
 
   it("JSON API responses close the connection for direct browser clients", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
 
     const settingsRes = await router.fetch(new Request("http://localhost/api/settings"), {});
     const chatRes = await router.fetch(
@@ -137,7 +139,7 @@ describe("router", () => {
   });
 
   it("POST /api/chats/:id/branch-and-edit returns a JSON 404 for missing branch messages", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const chat = await createChat("Branch Edit Error");
 
     const res = await router.fetch(
@@ -156,7 +158,7 @@ describe("router", () => {
   });
 
   it("PUT /api/settings rejects invalid numeric settings payloads", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const res = await router.fetch(
       new Request("http://localhost/api/settings", {
         method: "PUT",
@@ -172,7 +174,7 @@ describe("router", () => {
   });
 
   it("GET /api/models caches results and avoids preset writes or broadcasts", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const modelScannerModule = await import("../../src/server/modelScanner.ts");
     const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
     const presetRepoModule = await import("../../src/server/persistence/presetRepo.ts");
@@ -204,8 +206,6 @@ describe("router", () => {
       defaultMinP: undefined,
       defaultRepeatPenalty: undefined,
       chatTemplate: undefined,
-      bosToken: undefined,
-      eosToken: undefined,
     });
     const presetSpy = spyOn(presetRepoModule, "ensureModelDefaultPresets").mockResolvedValue();
     const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
@@ -231,7 +231,7 @@ describe("router", () => {
   });
 
   it("POST /api/models/rescan refreshes the cache and emits preset updates", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const modelScannerModule = await import("../../src/server/modelScanner.ts");
     const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
     const presetRepoModule = await import("../../src/server/persistence/presetRepo.ts");
@@ -268,8 +268,6 @@ describe("router", () => {
         defaultMinP: undefined,
         defaultRepeatPenalty: undefined,
         chatTemplate: undefined,
-        bosToken: undefined,
-        eosToken: undefined,
       },
     });
     const presetSpy = spyOn(presetRepoModule, "ensureModelDefaultPresets").mockResolvedValue();
@@ -295,21 +293,21 @@ describe("router", () => {
   });
 
   it("returns 404 for unknown endpoints", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/unknown");
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(404);
   });
 
   it("GET /api/attachments/nonexistent returns 404", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/attachments/nonexistent.txt");
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(404);
   });
 
   it("POST /api/chats creates a new chat", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/chats", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -324,7 +322,7 @@ describe("router", () => {
   });
 
   it("GET /api/chats returns chat list", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/chats");
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(200);
@@ -335,7 +333,7 @@ describe("router", () => {
 
   it("GET /api/chats/:id returns a specific chat", async () => {
     const chat = await createChat("Specific Chat", "test.gguf");
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request(`http://localhost/api/chats/${chat.id}`);
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(200);
@@ -345,7 +343,7 @@ describe("router", () => {
 
   it("POST /api/chats/:id/messages accepts multipart attachments without JSON fallback parsing", async () => {
     const chat = await createChat("Multipart Chat", "test.gguf");
-    const router = createRouter(settings);
+    const router = createRouter();
     const streamProxyModule = await import("../../src/server/streamProxy.ts");
     const proxyCompletionSpy = spyOn(streamProxyModule, "proxyCompletion").mockResolvedValue(
       "message-1",
@@ -381,7 +379,7 @@ describe("router", () => {
 
   it("PUT /api/chats/:id updates a chat", async () => {
     const chat = await createChat("Update Me", "test.gguf");
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request(`http://localhost/api/chats/${chat.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -398,7 +396,7 @@ describe("router", () => {
   });
 
   it("POST /api/presets/inference creates a preset", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/presets/inference", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -446,7 +444,7 @@ describe("router", () => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/presets/inference");
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(200);
@@ -456,7 +454,7 @@ describe("router", () => {
   });
 
   it("GET /api/hardware returns hardware info payload", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/hardware");
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(200);
@@ -467,7 +465,7 @@ describe("router", () => {
   });
 
   it("GET /api/server/status returns current server runtime config", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const req = new Request("http://localhost/api/server/status");
     const res = await router.fetch(req, {});
     expect(res?.status).toBe(200);
@@ -483,7 +481,7 @@ describe("router", () => {
       llamaPortRangeMax: settings.llamaPortRangeMax,
     });
 
-    const router = createRouter(settings);
+    const router = createRouter();
     const modelScannerModule = await import("../../src/server/modelScanner.ts");
     const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
 
@@ -552,7 +550,7 @@ describe("router", () => {
       llamaPortRangeMax: settings.llamaPortRangeMax,
     });
 
-    const router = createRouter(settings);
+    const router = createRouter();
     const modelScannerModule = await import("../../src/server/modelScanner.ts");
     const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
 
@@ -621,7 +619,7 @@ describe("router", () => {
       llamaPortRangeMax: settings.llamaPortRangeMax,
     });
 
-    const router = createRouter(settings);
+    const router = createRouter();
     const modelScannerModule = await import("../../src/server/modelScanner.ts");
     const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
 
@@ -680,7 +678,7 @@ describe("router", () => {
   });
 
   it("POST /api/server/unload responds before teardown finishes", async () => {
-    const router = createRouter(settings);
+    const router = createRouter();
     const unloadSpy = spyOn(llamaServerModule, "requestUnloadModel").mockImplementation(
       () => new Promise<void>(() => {}),
     );
@@ -704,8 +702,10 @@ describe("router", () => {
   });
 
   it("handles WS upgrade failure with 400 Bad Request naturally if the server blocks it", async () => {
-    const router = createRouter(settings);
-    const req = new Request("http://localhost/ws");
+    const router = createRouter();
+    const req = new Request("http://localhost/ws", {
+      headers: { Origin: "http://localhost:3000" },
+    });
 
     const mockServerFailingUpgrade = {
       upgrade: () => false,
@@ -714,5 +714,208 @@ describe("router", () => {
     const res = await router.fetch(req, mockServerFailingUpgrade);
     expect(res?.status).toBe(400);
     expect(await res?.text()).toBe("Upgrade failed");
+  });
+
+  it("rejects WebSocket upgrades without an Origin header", async () => {
+    const router = createRouter();
+    const req = new Request("http://localhost/ws");
+    const upgrade = { upgrade: () => true };
+    const res = await router.fetch(req, upgrade);
+    expect(res?.status).toBe(403);
+  });
+
+  it("rejects WebSocket upgrades from unexpected origins", async () => {
+    const router = createRouter();
+    const req = new Request("http://localhost/ws", {
+      headers: { Origin: "https://evil.example" },
+    });
+    const upgrade = { upgrade: () => true };
+    const res = await router.fetch(req, upgrade);
+    expect(res?.status).toBe(403);
+  });
+
+  it("rejects mutating API requests from unexpected origins", async () => {
+    const router = createRouter();
+    const req = new Request("http://localhost/api/chats", {
+      method: "POST",
+      headers: {
+        Origin: "https://evil.example",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Injected" }),
+    });
+    const res = await router.fetch(req, {});
+    expect(res?.status).toBe(403);
+  });
+
+  it("production hashed assets resolve under dist/client rather than as an absolute URL path", async () => {
+    const previousNodeEnv = Bun.env.NODE_ENV;
+    Bun.env.NODE_ENV = "production";
+    const requestedPaths: string[] = [];
+    const fileSpy = spyOn(Bun, "file").mockImplementation(
+      (
+        filePath: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number,
+        _options?: BlobPropertyBag,
+      ) => {
+        const pathText = filePath.toString().replace(/\\/g, "/");
+        requestedPaths.push(pathText);
+        const exists = pathText.includes("/dist/client/assets/") && pathText.endsWith("/app.js");
+        return Object.assign(new Blob(["console.log(1)"], { type: "text/javascript" }), {
+          exists: async () => exists,
+        }) as ReturnType<typeof Bun.file>;
+      },
+    );
+
+    try {
+      const router = createRouter();
+      const res = await router.fetch(new Request("http://localhost/assets/app.js"), {});
+
+      expect(res?.status).toBe(200);
+      expect(await res?.text()).toBe("console.log(1)");
+      expect(requestedPaths.some((p) => p.includes("/dist/client/assets/app.js"))).toBe(true);
+      expect(
+        requestedPaths.some((p) => p === "/assets/app.js" || p.endsWith(":/assets/app.js")),
+      ).toBe(false);
+    } finally {
+      fileSpy.mockRestore();
+      Bun.env.NODE_ENV = previousNodeEnv;
+    }
+  });
+
+  it("production static serving keeps resolved files under dist/client", async () => {
+    const previousNodeEnv = Bun.env.NODE_ENV;
+    Bun.env.NODE_ENV = "production";
+    const requestedPaths: string[] = [];
+    const fileSpy = spyOn(Bun, "file").mockImplementation(
+      (
+        filePath: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number,
+        _options?: BlobPropertyBag,
+      ) => {
+        requestedPaths.push(filePath.toString());
+        return Object.assign(new Blob(["ok"], { type: "text/plain" }), {
+          exists: async () => false,
+        }) as ReturnType<typeof Bun.file>;
+      },
+    );
+
+    try {
+      const router = createRouter();
+      await router.fetch(new Request("http://localhost/assets/../../llamaforge.db"), {});
+      await router.fetch(new Request("http://localhost/etc/passwd"), {});
+
+      const normalized = requestedPaths.map((p) => p.replace(/\\/g, "/"));
+      expect(normalized.length).toBeGreaterThan(0);
+      expect(normalized.every((p) => p.includes("/dist/client/"))).toBe(true);
+      expect(
+        normalized.some(
+          (p) =>
+            p === "/llamaforge.db" ||
+            p === "/etc/passwd" ||
+            p.endsWith(":/llamaforge.db") ||
+            p.endsWith(":/etc/passwd"),
+        ),
+      ).toBe(false);
+    } finally {
+      fileSpy.mockRestore();
+      Bun.env.NODE_ENV = previousNodeEnv;
+    }
+  });
+
+  it("GET /api/attachments refuses files outside the attachments directory", async () => {
+    const appRoot = getAppDataDir();
+    const secretPath = path.join(appRoot, "p0-attachment-secret.txt");
+    await Bun.write(secretPath, "should-not-be-served");
+
+    try {
+      const router = createRouter();
+      const dbRes = await router.fetch(
+        new Request("http://localhost/api/attachments/llamaforge.db"),
+        {},
+      );
+      const slashEscapeRes = await router.fetch(
+        new Request("http://localhost/api/attachments/..%5Cp0-attachment-secret.txt"),
+        {},
+      );
+
+      expect(dbRes?.status).toBe(404);
+      expect(await dbRes?.text()).not.toContain("SQLite format 3");
+      expect(slashEscapeRes?.status).toBe(400);
+      expect(await slashEscapeRes?.text()).not.toContain("should-not-be-served");
+    } finally {
+      await fs.rm(secretPath, { force: true });
+    }
+  });
+
+  it("GET /api/attachments serves files from the attachments directory", async () => {
+    const relative = "attachments/p0-test-chat/p0-test-msg/hello.txt";
+    const absPath = path.join(getAppDataDir(), ...relative.split("/"));
+    await fs.mkdir(path.dirname(absPath), { recursive: true });
+    await Bun.write(absPath, "attachment-ok");
+
+    try {
+      const router = createRouter();
+      const res = await router.fetch(
+        new Request(`http://localhost/api/attachments/${relative}`),
+        {},
+      );
+      expect(res?.status).toBe(200);
+      expect(await res?.text()).toBe("attachment-ok");
+    } finally {
+      await fs.rm(absPath, { force: true });
+    }
+  });
+
+  it("POST /api/chats/:id/continue rejects when the last message is not an assistant", async () => {
+    const chat = await createChat("Continue Guard");
+    await addMessage({
+      id: Bun.randomUUIDv7(),
+      chatId: chat.id,
+      role: "user",
+      content: "hi",
+      rawContent: "hi",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: Bun.randomUUIDv7(),
+      chatId: chat.id,
+      role: "tool",
+      content: "tool-result",
+      rawContent: "tool-result",
+      position: 1,
+      createdAt: Date.now(),
+      toolCallId: "tc_1",
+    });
+
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request(`http://localhost/api/chats/${chat.id}/continue`, { method: "POST" }),
+      {},
+    );
+
+    expect(res?.status).toBe(400);
+    const body = (await res?.json()) as { error?: string };
+    expect(body.error).toContain("assistant");
+  });
+
+  it("POST /api/presets/load rejects unknown config fields", async () => {
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request("http://localhost/api/presets/load", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "Unsafe",
+          config: {
+            modelPath: "/models/model.gguf",
+            extraFlag: "--smuggle",
+          },
+        }),
+      }),
+      {},
+    );
+    expect(res?.status).toBe(400);
+    const body = (await res?.json()) as { error?: string };
+    expect(body.error).toContain("Unknown load preset config fields");
   });
 });

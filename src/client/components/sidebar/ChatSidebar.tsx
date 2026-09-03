@@ -3,7 +3,6 @@
  * Left sidebar component for managing chat history: searching, sorting, renaming, deleting, and exporting sessions.
  */
 
-import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Check,
@@ -17,7 +16,7 @@ import {
   X,
 } from "lucide-react";
 import type React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { logError } from "../../logger";
 import { useCreateChat, useDeleteChat, useInfiniteChats, useUpdateChat } from "../../queries";
 import { useAppStore } from "../../store";
@@ -48,25 +47,11 @@ export function ChatSidebar() {
   const unreadChatIds = useAppStore((state) => state.unreadChatIds);
   const clearUnreadChat = useAppStore((state) => state.clearUnreadChat);
   const currentChatId = useAppStore((state) => state.currentChatId);
+  const addNotification = useAppStore((state) => state.addNotification);
 
   const createMut = useCreateChat();
   const deleteMut = useDeleteChat();
   const updateMut = useUpdateChat();
-  const qc = useQueryClient();
-
-  // S2 fix: listen for autoname events from the Zustand store and refresh sidebar
-  useEffect(() => {
-    /**
-     * Invalidates the chat list after autoname updates are broadcast.
-     *
-     * @returns No return value.
-     */
-    const handler = () => {
-      qc.invalidateQueries({ queryKey: ["chats"] });
-    };
-    window.addEventListener("llamaforge:chats-invalidate", handler);
-    return () => window.removeEventListener("llamaforge:chats-invalidate", handler);
-  }, [qc]);
 
   /**
    * Creates a new chat and navigates to it.
@@ -110,7 +95,7 @@ export function ChatSidebar() {
    * @param e - Mouse event from the save button.
    * @returns A promise that resolves once the rename mutation completes.
    */
-  const handleSaveRename = async (id: string, e: React.MouseEvent) => {
+  const handleSaveRename = async (id: string, e: React.SyntheticEvent) => {
     e.preventDefault();
     e.stopPropagation();
     await updateMut.mutateAsync({ id, updates: { name: editValue } });
@@ -136,6 +121,8 @@ export function ChatSidebar() {
     setPendingDeleteId(id);
     try {
       await deleteMut.mutateAsync(id);
+      useAppStore.getState().discardPendingChatFrames(id);
+      useAppStore.getState().clearUnreadChat(id);
       if (chatId === id) {
         unloadChat();
         if (nextChatId) {
@@ -144,6 +131,9 @@ export function ChatSidebar() {
           navigate({ to: "/" });
         }
       }
+    } catch (err: unknown) {
+      logError("Failed to delete chat", err);
+      addNotification(err instanceof Error ? err.message : "Failed to delete chat.", "error");
     } finally {
       deleteLockRef.current = false;
       setPendingDeleteId(null);
@@ -190,13 +180,14 @@ export function ChatSidebar() {
       body: JSON.stringify({ format: "json" }),
     });
     if (res.ok) {
-      const { content } = await res.json();
+      const content = await res.text();
       const blob = new Blob([content], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `llama-chat-${id}.json`;
       a.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
     }
   };
 
@@ -213,13 +204,14 @@ export function ChatSidebar() {
       body: JSON.stringify({ format: "json" }),
     });
     if (res.ok) {
-      const { content } = await res.json();
+      const content = await res.text();
       const blob = new Blob([content], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = `llama-chat-${currentChatId}.json`;
       a.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
     }
   };
 
@@ -334,7 +326,7 @@ export function ChatSidebar() {
                         onChange={(e) => setEditValue(e.target.value)}
                         className="bg-[var(--color-bg)] border border-[var(--color-accent)] rounded px-1 py-0.5 text-sm w-full outline-none"
                         onClick={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => e.key === "Enter" && handleSaveRename(c.id, e as any)}
+                        onKeyDown={(e) => e.key === "Enter" && handleSaveRename(c.id, e)}
                       />
                       <button
                         type="button"
@@ -388,7 +380,7 @@ export function ChatSidebar() {
                     </>
                   )}
                 </div>
-                {!editingId && (
+                {editingId !== c.id && (
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
                       type="button"

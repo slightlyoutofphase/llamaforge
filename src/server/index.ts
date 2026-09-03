@@ -6,7 +6,7 @@
  * and starts the HTTP + WebSocket server.
  */
 import { serve } from "bun";
-import { getProc, loadModel } from "./llamaServer";
+import { loadModel, unloadModel } from "./llamaServer";
 import { logError, logInfo } from "./logger";
 import { scanModels } from "./modelScanner";
 import { initDb, resetDb } from "./persistence/db";
@@ -64,17 +64,6 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
     logError("Model directory scan failed:", e);
   }
 
-  // Populate metadata and generate any missing default presets synchronously at startup.
-  try {
-    const { populateMetadata } = await import("./modelScanner");
-    const metadataModels = await Promise.all(rawModels.map((m) => populateMetadata(m)));
-    const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
-    await ensureModelDefaultPresets(metadataModels);
-    logInfo("Synchronous model metadata population complete.");
-  } catch (e) {
-    logError("Synchronous model metadata population failed:", e);
-  }
-
   // Cleanup orphaned files once at startup and periodically thereafter.
   const { cleanupOrphanedAttachments } = await import("./persistence/cleanup");
   /**
@@ -91,7 +80,39 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
   };
   void scheduleCleanup();
   if (options.scheduleRecurringCleanup ?? true) {
-    setInterval(scheduleCleanup, 24 * 60 * 60 * 1000);
+    const cleanupInterval = setInterval(scheduleCleanup, 24 * 60 * 60 * 1000);
+    cleanupInterval.unref?.();
+  }
+
+  const isProd = process.env.NODE_ENV === "production" || Bun.argv[1]?.includes("dist");
+  const port = resolveServerPort(settings);
+  const hostname = "127.0.0.1";
+
+  logInfo(`Starting LlamaForge Server on http://${hostname}:${port} (Prod: ${isProd})`);
+
+  const router = createRouter();
+
+  let server: ReturnType<typeof serve>;
+  try {
+    server = serve({
+      port,
+      hostname,
+      fetch: router.fetch,
+      websocket: router.websocket,
+    });
+  } catch (err) {
+    throw describeBindFailure(port, err);
+  }
+
+  // Populate metadata after the HTTP port is bound so the UI can connect immediately.
+  try {
+    const { populateMetadata } = await import("./modelScanner");
+    const metadataModels = await Promise.all(rawModels.map((m) => populateMetadata(m)));
+    const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
+    await ensureModelDefaultPresets(metadataModels);
+    logInfo("Synchronous model metadata population complete.");
+  } catch (e) {
+    logError("Synchronous model metadata population failed:", e);
   }
 
   // Autoload last model if enabled
@@ -122,26 +143,6 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
     }
   }
 
-  const isProd = process.env.NODE_ENV === "production" || Bun.argv[1]?.includes("dist");
-  const port = resolveServerPort(settings);
-  const hostname = "127.0.0.1";
-
-  logInfo(`Starting LlamaForge Server on http://${hostname}:${port} (Prod: ${isProd})`);
-
-  const router = createRouter(settings);
-
-  let server: ReturnType<typeof serve>;
-  try {
-    server = serve({
-      port,
-      hostname,
-      fetch: router.fetch,
-      websocket: router.websocket,
-    });
-  } catch (err) {
-    throw describeBindFailure(port, err);
-  }
-
   let shutdownInProgress = false;
   /**
    * Shuts down the Bun server, active llama-server process, and database cleanly.
@@ -152,19 +153,20 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
     if (shutdownInProgress) return;
     shutdownInProgress = true;
     logInfo("Shutting down LlamaForge Server...");
-    try {
-      const proc = getProc();
-      if (proc) {
-        proc.kill(9); // Send SIGKILL immediately to ensure it dies before we exit
+    void (async () => {
+      try {
+        await unloadModel();
+      } catch (e) {
+        logError("Failed to unload model during shutdown:", e);
       }
-    } catch (_e) {}
-    try {
-      resetDb();
-    } catch (e) {
-      logError("Failed to close database during shutdown:", e);
-    }
-    server.stop();
-    process.exit(0);
+      try {
+        resetDb();
+      } catch (e) {
+        logError("Failed to close database during shutdown:", e);
+      }
+      server.stop();
+      process.exit(0);
+    })();
   };
 
   process.on("SIGINT", cleanup);

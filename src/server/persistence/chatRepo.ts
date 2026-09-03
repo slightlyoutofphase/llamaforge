@@ -6,6 +6,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type {
+  Attachment,
   ChatMessage,
   ChatSession,
   GgufDisplayMetadata,
@@ -84,6 +85,37 @@ function sanitizeFileName(fileName: string): string {
 }
 
 /**
+ * Encodes binary data as a base64 string without using Node's Buffer API.
+ *
+ * @param bytes - Raw bytes to encode.
+ * @returns Base64 representation of `bytes`.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x2000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Decodes a base64 string into bytes without using Node's Buffer API.
+ *
+ * @param value - Base64 payload.
+ * @returns Decoded bytes.
+ */
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
  * Checks whether a value is one of the valid persisted chat message roles.
  *
  * @param value - Unknown role candidate.
@@ -153,46 +185,56 @@ function hydrateChatMessage(row: ChatMessageRow): ChatMessage {
  * @returns No return value.
  * @throws {Error} If the payload or any message/attachment entry is invalid.
  */
-function assertImportPayload(parsed: any) {
+function assertImportPayload(parsed: unknown): asserts parsed is {
+  name?: string;
+  modelPath?: string;
+  systemPresetId?: string;
+  inferencePresetId?: string;
+  messages: ChatMessage[];
+} {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     logError("[chatRepo] Invalid imported chat payload: not an object", { parsed });
     throw new Error("Imported chat must be a JSON object.");
   }
-  if (!Array.isArray(parsed.messages)) {
+  const record = parsed as Record<string, unknown>;
+  if (!Array.isArray(record["messages"])) {
     logError("[chatRepo] Invalid imported chat payload: missing messages array", { parsed });
     throw new Error("Imported chat must include a messages array.");
   }
 
-  for (const [index, msg] of parsed.messages.entries()) {
-    if (!msg || typeof msg !== "object") {
+  const messages = record["messages"] as unknown[];
+  for (const [index, rawMsg] of messages.entries()) {
+    if (!rawMsg || typeof rawMsg !== "object") {
       throw new Error(`Message at index ${index} is invalid.`);
     }
-    if (!isValidMessageRole(msg.role)) {
+    const msg = rawMsg as Record<string, unknown>;
+    if (!isValidMessageRole(msg["role"])) {
       throw new Error(`Message at index ${index} has invalid role.`);
     }
     if (
-      msg.role === "tool" &&
-      (typeof msg.toolCallId !== "string" || msg.toolCallId.length === 0)
+      msg["role"] === "tool" &&
+      (typeof msg["toolCallId"] !== "string" || msg["toolCallId"].length === 0)
     ) {
       throw new Error(`Tool message at index ${index} requires a valid toolCallId.`);
     }
-    if (typeof msg.content !== "string") {
+    if (typeof msg["content"] !== "string") {
       throw new Error(`Message at index ${index} requires a content string.`);
     }
-    if (msg.attachments !== undefined) {
-      if (!Array.isArray(msg.attachments)) {
+    if (msg["attachments"] !== undefined) {
+      if (!Array.isArray(msg["attachments"])) {
         throw new Error(`Attachments for message at index ${index} must be an array.`);
       }
-      for (const [attIndex, att] of msg.attachments.entries()) {
-        if (!att || typeof att !== "object") {
+      for (const [attIndex, rawAtt] of msg["attachments"].entries()) {
+        if (!rawAtt || typeof rawAtt !== "object") {
           logError("[chatRepo] Invalid attachment object in imported chat", {
             messageIndex: index,
             attachmentIndex: attIndex,
-            att,
+            att: rawAtt,
           });
           throw new Error(`Attachment at index ${attIndex} for message ${index} is invalid.`);
         }
-        if (typeof att.fileName !== "string" || att.fileName.length === 0) {
+        const att = rawAtt as Record<string, unknown>;
+        if (typeof att["fileName"] !== "string" || att["fileName"].length === 0) {
           logError("[chatRepo] Imported attachment missing fileName", {
             messageIndex: index,
             attachmentIndex: attIndex,
@@ -202,12 +244,12 @@ function assertImportPayload(parsed: any) {
             `Attachment at index ${attIndex} for message ${index} requires a valid fileName.`,
           );
         }
-        if (typeof att.mimeType !== "string" || att.mimeType.length === 0) {
+        if (typeof att["mimeType"] !== "string" || att["mimeType"].length === 0) {
           throw new Error(
             `Attachment at index ${attIndex} for message ${index} requires a valid mimeType.`,
           );
         }
-        if (typeof att.base64Data !== "string" || att.base64Data.length === 0) {
+        if (typeof att["base64Data"] !== "string" || att["base64Data"].length === 0) {
           throw new Error(
             `Attachment at index ${attIndex} for message ${index} requires base64Data.`,
           );
@@ -247,6 +289,10 @@ export async function createChat(
   };
 }
 
+function escapeLikePattern(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
 /**
  * Retrieves a list of chat sessions, optionally filtered by name.
  *
@@ -266,8 +312,8 @@ export async function getChats(
   const params: (string | number)[] = [];
 
   if (search) {
-    query += " WHERE name LIKE ?";
-    params.push(`%${search}%`);
+    query += " WHERE name LIKE ? ESCAPE '\\'";
+    params.push(`%${escapeLikePattern(search)}%`);
   }
 
   query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?";
@@ -296,6 +342,7 @@ export async function getChat(
   id: string,
   messageLimit?: number,
   messageOffset?: number,
+  beforePosition?: number,
 ): Promise<ChatSession | null> {
   const db = getDb();
   const stmt = db.query<ChatSession, [string]>(
@@ -314,19 +361,28 @@ export async function getChat(
   // When messageLimit is provided, load only the last N messages (for the HTTP API).
   // When omitted, load all messages (for internal callers like streamProxy).
   if (messageLimit !== undefined && messageLimit > 0) {
-    const offset = messageOffset ?? 0;
     // Count total first so the client knows if there are more
     const countRow = db
       .query<{ cnt: number }, [string]>("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?")
       .get(id);
     const totalMessages = countRow?.cnt ?? 0;
-    (chat as any).totalMessages = totalMessages;
+    chat.totalMessages = totalMessages;
 
-    // Load paginated slice (most recent messages first, then reverse for display order)
-    const msgStmt = db.query<ChatMessageRow, [string, number, number]>(
-      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson, metrics_json as metricsJson FROM messages WHERE chat_id = ? ORDER BY position DESC LIMIT ? OFFSET ?",
-    );
-    chat.messages = msgStmt.all(id, messageLimit, offset).reverse().map(hydrateChatMessage);
+    if (beforePosition !== undefined) {
+      const msgStmt = db.query<ChatMessageRow, [string, number, number]>(
+        "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson, metrics_json as metricsJson FROM messages WHERE chat_id = ? AND position < ? ORDER BY position DESC LIMIT ?",
+      );
+      chat.messages = msgStmt
+        .all(id, beforePosition, messageLimit)
+        .reverse()
+        .map(hydrateChatMessage);
+    } else {
+      const offset = messageOffset ?? 0;
+      const msgStmt = db.query<ChatMessageRow, [string, number, number]>(
+        "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson, metrics_json as metricsJson FROM messages WHERE chat_id = ? ORDER BY position DESC LIMIT ? OFFSET ?",
+      );
+      chat.messages = msgStmt.all(id, messageLimit, offset).reverse().map(hydrateChatMessage);
+    }
   } else {
     const msgStmt = db.query<ChatMessageRow, [string]>(
       "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson, metrics_json as metricsJson FROM messages WHERE chat_id = ? ORDER BY position ASC",
@@ -352,7 +408,7 @@ export async function getChat(
       `SELECT id, message_id as messageId, mime_type as mimeType, file_path as filePath, file_name as fileName, vir_budget as virBudget, created_at as createdAt FROM attachments WHERE message_id IN (${placeholders})`,
     );
     const allAttachments = attStmt.all(...messageIds);
-    const attMap = new Map<string, any[]>();
+    const attMap = new Map<string, Attachment[]>();
     for (const att of allAttachments) {
       const arr = attMap.get(att.messageId) || [];
       arr.push({ ...att, virBudget: att.virBudget ?? undefined });
@@ -364,21 +420,6 @@ export async function getChat(
   }
 
   return chat;
-}
-
-/**
- * M10 fix: Returns the total message count for a chat without loading them all.
- * Used by the frontend to display "load more" UI.
- *
- * @param chatId - The unique UUID of the chat session.
- * @returns The total number of messages in the chat.
- */
-export function getChatMessageCount(chatId: string): number {
-  const db = getDb();
-  const row = db
-    .query<{ cnt: number }, [string]>("SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?")
-    .get(chatId);
-  return row?.cnt ?? 0;
 }
 
 /**
@@ -439,6 +480,7 @@ export async function deleteChat(id: string): Promise<void> {
     )
     .all(id);
 
+  db.prepare("UPDATE chats SET parent_id = NULL WHERE parent_id = ?").run(id);
   db.prepare("DELETE FROM chats WHERE id = ?").run(id);
 
   // M11 fix: evict prompt cache stats for the deleted chat
@@ -484,25 +526,31 @@ export async function deleteChat(id: string): Promise<void> {
  */
 export async function addMessage(message: ChatMessage): Promise<void> {
   const db = getDb();
-  const stmt = db.prepare(`
+  const insert = db.transaction((msg: ChatMessage) => {
+    const position = getNextPosition(msg.chatId);
+    msg.position = position;
+    db.prepare(
+      `
     INSERT INTO messages (id, chat_id, role, content, raw_content, thinking_content, position, created_at, tool_call_id, tool_calls_json, metrics_json)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `);
-  stmt.run(
-    message.id,
-    message.chatId,
-    message.role,
-    message.content,
-    message.rawContent,
-    message.thinkingContent || null,
-    message.position,
-    message.createdAt,
-    message.toolCallId || null,
-    normalizeToolCallsJson(message.toolCallsJson, "message save") || null,
-    message.metrics ? JSON.stringify(message.metrics) : null,
-  );
+  `,
+    ).run(
+      msg.id,
+      msg.chatId,
+      msg.role,
+      msg.content,
+      msg.rawContent,
+      msg.thinkingContent || null,
+      position,
+      msg.createdAt,
+      msg.toolCallId || null,
+      normalizeToolCallsJson(msg.toolCallsJson, "message save") || null,
+      msg.metrics ? JSON.stringify(msg.metrics) : null,
+    );
 
-  db.prepare("UPDATE chats SET updated_at = ? WHERE id = ?").run(Date.now(), message.chatId);
+    db.prepare("UPDATE chats SET updated_at = ? WHERE id = ?").run(Date.now(), msg.chatId);
+  });
+  insert(message);
 }
 
 /**
@@ -601,16 +649,43 @@ export async function deleteMessageAndSubsequent(chatId: string, messageId: stri
 }
 
 /**
+ * Companion mmproj identity stored alongside a primary GGUF cache row so a
+ * changed projector invalidates vision/audio encoder flags.
+ */
+export type GgufCacheCompanion = {
+  /** Absolute path to the companion mmproj file, or empty when none. */
+  mmprojPath?: string | null;
+  /** mtime of the companion file in milliseconds, or 0 when none. */
+  mmprojMtime?: number | null;
+};
+
+/**
  * Retrieves cached GGUF metadata for a specific file version.
+ *
+ * When `companion` is provided, the mmproj path and mtime must also match so a
+ * replaced projector is not served from a stale cache row.
  *
  * @param filePath - Absolute path to the .gguf file.
  * @param mtime - Last modified timestamp of the file.
+ * @param companion - Optional mmproj identity that must match the cache row.
  * @returns The cached metadata or null if not found.
  */
 export async function cachedGgufMetadata(
   filePath: string,
   mtime: number,
+  companion?: GgufCacheCompanion,
 ): Promise<GgufDisplayMetadata | null> {
+  if (companion !== undefined) {
+    const mmprojPath = companion.mmprojPath ?? "";
+    const mmprojMtime = companion.mmprojMtime ?? 0;
+    const row = getDb()
+      .query<{ metadata_json: string }, [string, number, string, number]>(
+        "SELECT metadata_json FROM model_cache WHERE file_path = ? AND mtime = ? AND mmproj_path = ? AND mmproj_mtime = ?",
+      )
+      .get(filePath, mtime, mmprojPath, mmprojMtime);
+    return row ? JSON.parse(row.metadata_json) : null;
+  }
+
   const row = getDb()
     .query<{ metadata_json: string }, [string, number]>(
       "SELECT metadata_json FROM model_cache WHERE file_path = ? AND mtime = ?",
@@ -640,18 +715,23 @@ export async function getMetadataForPath(filePath: string): Promise<GgufDisplayM
  * @param filePath - The full absolute path to the local GGUF file.
  * @param mtime - The current modified time of the GGUF file (to invalidate cache appropriately).
  * @param metadata - The loaded and processed metadata variables mapping to standard properties.
+ * @param companion - Optional mmproj identity included in the cache key.
  * @returns A promise that resolves once the cache row has been written.
  */
 export async function setCachedGgufMetadata(
   filePath: string,
   mtime: number,
   metadata: GgufDisplayMetadata,
+  companion?: GgufCacheCompanion,
 ): Promise<void> {
+  const mmprojPath = companion?.mmprojPath ?? "";
+  const mmprojMtime = companion?.mmprojMtime ?? 0;
+  getDb().prepare("DELETE FROM model_cache WHERE file_path = ?").run(filePath);
   getDb()
     .prepare(
-      "INSERT OR REPLACE INTO model_cache (file_path, mtime, metadata_json) VALUES (?, ?, ?)",
+      "INSERT INTO model_cache (file_path, mtime, mmproj_path, mmproj_mtime, metadata_json) VALUES (?, ?, ?, ?, ?)",
     )
-    .run(filePath, mtime, JSON.stringify(metadata));
+    .run(filePath, mtime, mmprojPath, mmprojMtime, JSON.stringify(metadata));
 }
 
 /**
@@ -814,8 +894,8 @@ export async function exportChat(chatId: string, format: "json" | "markdown"): P
             let b64 = "";
             if (fp) {
               try {
-                const arrBuffer = await Bun.file(fp).arrayBuffer();
-                b64 = Buffer.from(arrBuffer).toString("base64");
+                const bytes = await Bun.file(fp).bytes();
+                b64 = bytesToBase64(bytes);
               } catch (_e) {
                 logWarn("[chatRepo] Missing attachment file during export", {
                   filePath: att.file_path,
@@ -834,7 +914,7 @@ export async function exportChat(chatId: string, format: "json" | "markdown"): P
               createdAt: att.created_at,
               virBudget: att.vir_budget ?? undefined,
               base64Data: b64,
-            } as any; // base64Data is for export
+            };
           }),
         );
       }
@@ -879,7 +959,7 @@ export async function exportChat(chatId: string, format: "json" | "markdown"): P
  */
 export async function importChat(jsonContent: string): Promise<string> {
   const db = getDb();
-  let parsed: any;
+  let parsed: unknown;
   try {
     parsed = JSON.parse(jsonContent);
   } catch (err) {
@@ -891,6 +971,12 @@ export async function importChat(jsonContent: string): Promise<string> {
   }
 
   assertImportPayload(parsed);
+
+  const MAX_IMPORT_JSON_CHARS = 50 * 1024 * 1024;
+  const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024;
+  if (jsonContent.length > MAX_IMPORT_JSON_CHARS) {
+    throw new Error("Import payload exceeds 50MB.");
+  }
 
   const newChatId = Bun.randomUUIDv7();
   const now = Date.now();
@@ -952,6 +1038,12 @@ export async function importChat(jsonContent: string): Promise<string> {
         if (Array.isArray(msg.attachments)) {
           for (const att of msg.attachments) {
             if (!att.base64Data) continue;
+            const decodedBytes = base64ToBytes(att.base64Data).byteLength;
+            if (decodedBytes > MAX_ATTACHMENT_SIZE_BYTES) {
+              throw new Error(
+                `Imported attachment ${att.fileName || "unnamed"} exceeds the 10MB limit.`,
+              );
+            }
             const attId = Bun.randomUUIDv7();
             const ext = path.extname(sanitizeFileName(att.fileName)) || "";
             const safeName = Bun.randomUUIDv7() + ext;
@@ -984,7 +1076,7 @@ export async function importChat(jsonContent: string): Promise<string> {
   for (const fw of fileWrites) {
     try {
       await fs.mkdir(path.dirname(fw.filePath), { recursive: true });
-      await Bun.write(fw.filePath, Buffer.from(fw.base64Data, "base64"));
+      await Bun.write(fw.filePath, base64ToBytes(fw.base64Data));
       // File written successfully — now insert the DB record
       insertAttachment.run(
         fw.attId,

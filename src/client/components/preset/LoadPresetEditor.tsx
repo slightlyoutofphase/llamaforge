@@ -5,12 +5,15 @@
  */
 
 import { markdown } from "@codemirror/lang-markdown";
-import type {
-  LoadPreset,
-  ModelEntry,
-  ModelLoadConfig,
-  ThinkingTagConfig,
-} from "../../../shared/types";
+import type { LoadPreset, ModelEntry, ModelLoadConfig } from "../../../shared/types";
+import { detectThinkingConfig } from "../../../shared/thinkingTags";
+import {
+  DEFAULT_IMAGE_MAX_TOKENS,
+  IMAGE_MAX_TOKEN_OPTIONS,
+  applyImageTokenBatchFloor,
+  defaultBatchingForImageTokens,
+  minUbatchForImageTokens,
+} from "../../../shared/imageTokens";
 import CodeMirror from "@uiw/react-codemirror";
 import { ChevronDown, ChevronRight, Copy, Plus, Save, Trash2, X, Zap } from "lucide-react";
 import type React from "react";
@@ -25,28 +28,19 @@ import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { HardwareOptimizationModal } from "./HardwareOptimizationModal";
 
-const DEFAULT_THINKING_TAG_CONFIG: ThinkingTagConfig = {
-  openTag: "<think>",
-  closeTag: "</think>",
-  enableToken: undefined,
-};
-
-const GEMMA4_THINKING_TAG_CONFIG: ThinkingTagConfig = {
-  openTag: "<|channel>thought\n",
-  closeTag: "<channel|>",
-  enableToken: "<|think|>",
-};
+function detectThinkingTagOverride(architecture?: string) {
+  return detectThinkingConfig(architecture);
+}
 
 /**
- * Selects the default thinking-tag configuration for a model architecture.
+ * Returns the directory prefix of a model path, handling both POSIX and Windows separators.
  *
- * @param architecture - GGUF architecture name associated with the selected model.
- * @returns The default thinking-tag override for that model family.
+ * @param primaryPath - Absolute or relative model file path.
+ * @returns Directory prefix including the trailing separator, or an empty string.
  */
-function detectThinkingTagOverride(architecture?: string): ThinkingTagConfig {
-  return architecture?.toLowerCase() === "gemma4"
-    ? GEMMA4_THINKING_TAG_CONFIG
-    : DEFAULT_THINKING_TAG_CONFIG;
+function modelDirectoryPrefix(primaryPath: string): string {
+  const slash = Math.max(primaryPath.lastIndexOf("/"), primaryPath.lastIndexOf("\\"));
+  return slash >= 0 ? primaryPath.slice(0, slash + 1) : "";
 }
 
 /**
@@ -61,7 +55,8 @@ function getSpeculativeDecodingAvailability(
   allModels: ModelEntry[],
 ): { draftModel: boolean; mtp: boolean } {
   if (!model) return { draftModel: false, mtp: false };
-  const modelDir = model.primaryPath.substring(0, model.primaryPath.lastIndexOf("/") + 1);
+  const modelDir = modelDirectoryPrefix(model.primaryPath);
+  if (!modelDir) return { draftModel: false, mtp: false };
   const hasDraftModel = allModels.some(
     (m) => m.metadata?.isDraftModel && m.primaryPath.startsWith(modelDir),
   );
@@ -109,7 +104,7 @@ function Accordion({
  */
 export function LoadPresetEditor() {
   const { setRightPanelView, activePresetId } = useUiStore();
-  const { models } = useAppStore();
+  const models = useAppStore((s) => s.models);
   const { data: presets } = useLoadPresets();
   const createMut = useCreateLoadPreset();
   const updateMut = useUpdateLoadPreset();
@@ -126,6 +121,23 @@ export function LoadPresetEditor() {
       prev?.id === activePreset.id ? prev : { ...activePreset, config: { ...activePreset.config } },
     );
   }, [activePreset]);
+
+  useEffect(() => {
+    const config = localState?.config;
+    if (!config) return;
+    const matching = models.find(
+      (m) => m.primaryPath === config.modelPath || m.primaryPath === localState.modelPath,
+    );
+    const availability = getSpeculativeDecodingAvailability(matching, models);
+    const currentType = config.specType ?? "off";
+    const isInvalid =
+      (currentType === "draft-simple" && !availability.draftModel) ||
+      (currentType === "draft-mtp" && !availability.mtp);
+    if (!isInvalid) return;
+    setLocalState((prev) =>
+      prev?.config ? { ...prev, config: { ...prev.config, specType: "off" } } : prev,
+    );
+  }, [localState?.config, localState?.modelPath, models]);
 
   if (!localState?.config)
     return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
@@ -169,12 +181,18 @@ export function LoadPresetEditor() {
   const handleApplyOptimization = (optimizedConfig: Partial<ModelLoadConfig>) => {
     setLocalState((prev) => {
       if (!prev?.config) return prev;
+      const merged = { ...prev.config, ...optimizedConfig } as ModelLoadConfig;
+      const floored = applyImageTokenBatchFloor(
+        merged.batchSize,
+        merged.microBatchSize,
+        merged.imageMaxTokens,
+      );
       return {
         ...prev,
         config: {
-          ...prev.config,
-          ...optimizedConfig,
-        } as ModelLoadConfig,
+          ...merged,
+          ...floored,
+        },
       };
     });
     setShowOptimization(false);
@@ -226,11 +244,10 @@ export function LoadPresetEditor() {
         modelPath: "",
         contextSize: 4096,
         contextShift: false,
-        gpuLayers: -1,
+        gpuLayers: 0,
         threads: 3,
         threadsBatch: -1,
-        batchSize: 2048,
-        microBatchSize: 512,
+        ...defaultBatchingForImageTokens(DEFAULT_IMAGE_MAX_TOKENS),
         ropeScaling: "none",
         ropeFreqBase: 0,
         ropeFreqScale: 0,
@@ -245,7 +262,7 @@ export function LoadPresetEditor() {
         noKvOffload: false,
         cacheReuse: 0,
         contextCheckpoints: 32,
-        imageMaxTokens: 560,
+        imageMaxTokens: DEFAULT_IMAGE_MAX_TOKENS,
         logLevel: 3,
         seedOverride: -1,
         specType: "off",
@@ -444,18 +461,38 @@ export function LoadPresetEditor() {
             </label>
             <select
               id="imageMaxTokens"
-              value={config.imageMaxTokens ?? 560}
-              onChange={(e) => updateConfigField("imageMaxTokens", parseInt(e.target.value, 10))}
+              value={config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS}
+              onChange={(e) => {
+                const imageMaxTokens = parseInt(e.target.value, 10);
+                setLocalState((prev) => {
+                  if (!prev?.config) return prev;
+                  const existing = prev.config;
+                  const floored = applyImageTokenBatchFloor(
+                    existing.batchSize,
+                    existing.microBatchSize,
+                    imageMaxTokens,
+                  );
+                  return {
+                    ...prev,
+                    config: { ...existing, imageMaxTokens, ...floored },
+                  };
+                });
+              }}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm">
-              <option value={70}>70</option>
-              <option value={140}>140</option>
-              <option value={280}>280</option>
-              <option value={560}>560</option>
-              <option value={1120}>1120</option>
+              {IMAGE_MAX_TOKEN_OPTIONS.map((budget) => (
+                <option key={budget} value={budget}>
+                  {budget}
+                </option>
+              ))}
             </select>
             <p className="text-[11px] text-[var(--color-text-muted)]">
-              Applies at model load time as `--image-min-tokens 70 --image-max-tokens {"<value>"}`.
+              Applied at model load as `--image-max-tokens{" "}
+              {config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS}`. Micro-batch (`--ubatch-size`)
+              and batch size are raised to at least{" "}
+              {minUbatchForImageTokens(config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS)} (2× this
+              budget) so Gemma 4 vision's non-causal attention does not crash. `--image-min-tokens`
+              is omitted unless you set it explicitly.
             </p>
           </div>
           <div className="space-y-1">
@@ -585,7 +622,7 @@ export function LoadPresetEditor() {
             </label>
             <select
               id="flashAttn"
-              value={config.flashAttn ?? "on"}
+              value={config.flashAttn ?? "auto"}
               onChange={(e) =>
                 updateConfigField("flashAttn", e.target.value as "on" | "off" | "auto")
               }
@@ -710,7 +747,7 @@ export function LoadPresetEditor() {
               id="ropeFreqScale"
               type="number"
               step="0.1"
-              value={config.ropeFreqScale || 1.0}
+              value={config.ropeFreqScale ?? 0}
               onChange={(e) => updateConfigField("ropeFreqScale", parseFloat(e.target.value))}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"

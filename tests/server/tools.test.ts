@@ -54,6 +54,12 @@ describe("tools", () => {
     expect(parsed.error).toBeDefined();
   });
 
+  it("returns a tool error for malformed JSON arguments instead of throwing", async () => {
+    const result = await executeTool("calculate", "{not json");
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toContain("invalid JSON");
+  });
+
   const {
     __setToolApprovalTimeoutMs,
     waitForToolApproval,

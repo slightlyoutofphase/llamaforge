@@ -1,4 +1,2 @@
-[serve.static]
-plugins = ["bun-plugin-tailwind"]
 [test]
 preload = ["./tests/happy-setup.ts"]

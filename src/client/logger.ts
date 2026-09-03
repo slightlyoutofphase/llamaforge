@@ -7,9 +7,11 @@ import { useAppStore } from "./store";
 
 let isSilent = false;
 try {
-  isSilent =
-    (globalThis as any).process?.env?.NODE_ENV === "test" ||
-    (globalThis as any).Bun?.env?.NODE_ENV === "test";
+  const runtime = globalThis as typeof globalThis & {
+    process?: { env?: { NODE_ENV?: string } };
+    Bun?: { env?: { NODE_ENV?: string } };
+  };
+  isSilent = runtime.process?.env?.NODE_ENV === "test" || runtime.Bun?.env?.NODE_ENV === "test";
 } catch {
   // Ignore
 }
@@ -30,7 +32,7 @@ export function setSilent(silent: boolean) {
  * @param args - Additional log arguments supplied alongside the primary message.
  * @returns A space-prefixed string representation of the extra log arguments.
  */
-function formatArgs(args: any[]): string {
+function formatArgs(args: unknown[]): string {
   if (args.length === 0) return "";
   return ` ${args.map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ")}`;
 }
@@ -42,7 +44,7 @@ function formatArgs(args: any[]): string {
  * @param args - Additional diagnostic values appended to the log message.
  * @returns No return value.
  */
-export function logInfo(message: string, ...args: any[]) {
+export function logInfo(message: string, ...args: unknown[]) {
   if (!isSilent) console.log(message, ...args);
   useAppStore.getState().addLog("info", message + formatArgs(args));
 }
@@ -54,7 +56,7 @@ export function logInfo(message: string, ...args: any[]) {
  * @param args - Additional diagnostic values appended to the log message.
  * @returns No return value.
  */
-export function logWarn(message: string, ...args: any[]) {
+export function logWarn(message: string, ...args: unknown[]) {
   if (!isSilent) console.warn(message, ...args);
   useAppStore.getState().addLog("warn", message + formatArgs(args));
 }
@@ -66,7 +68,7 @@ export function logWarn(message: string, ...args: any[]) {
  * @param args - Additional diagnostic values appended to the log message.
  * @returns No return value.
  */
-export function logError(message: string, ...args: any[]) {
+export function logError(message: string, ...args: unknown[]) {
   if (!isSilent) console.error(message, ...args);
   useAppStore.getState().addLog("error", message + formatArgs(args));
 }
@@ -78,7 +80,7 @@ export function logError(message: string, ...args: any[]) {
  * @param args - Additional diagnostic values appended to the log message.
  * @returns No return value.
  */
-export function logDebug(message: string, ...args: any[]) {
+export function logDebug(message: string, ...args: unknown[]) {
   if (!isSilent) console.debug(message, ...args);
   useAppStore.getState().addLog("debug", message + formatArgs(args));
 }

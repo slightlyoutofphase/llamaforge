@@ -7,6 +7,7 @@ import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
+import { DEFAULT_IMAGE_MAX_TOKENS, defaultBatchingForImageTokens } from "../../shared/imageTokens";
 import { logError, logInfo, logWarn } from "../logger";
 
 let _db: Database | null = null;
@@ -42,6 +43,56 @@ function hasTable(db: Database, tableName: string): boolean {
     )
     .get(tableName);
   return Boolean(table?.name);
+}
+
+/**
+ * Rebuilds the chats table so `parent_id` uses `ON DELETE SET NULL`.
+ *
+ * SQLite cannot ALTER an existing foreign key. This rebuild must run outside
+ * an enclosing transaction so `PRAGMA foreign_keys` can actually be toggled.
+ *
+ * @param db - Database instance to migrate.
+ * @returns No return value.
+ */
+function migrateChatsParentDeleteSetNull(db: Database): void {
+  if (!hasTable(db, "chats")) return;
+
+  const tableSql = db
+    .query<{ sql: string | null }, []>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'chats' LIMIT 1",
+    )
+    .get()?.sql;
+  if (tableSql?.includes("ON DELETE SET NULL")) return;
+
+  db.exec("PRAGMA foreign_keys = OFF;");
+  db.exec(`
+    CREATE TABLE chats_new (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL DEFAULT 'New Chat',
+      created_at  INTEGER NOT NULL,
+      updated_at  INTEGER NOT NULL,
+      parent_id   TEXT REFERENCES chats_new(id) ON DELETE SET NULL,
+      is_branch   INTEGER NOT NULL DEFAULT 0,
+      model_path  TEXT,
+      system_preset_id TEXT,
+      inference_preset_id TEXT
+    );
+  `);
+  db.exec(`
+    INSERT INTO chats_new (
+      id, name, created_at, updated_at, parent_id, is_branch,
+      model_path, system_preset_id, inference_preset_id
+    )
+    SELECT
+      id, name, created_at, updated_at, parent_id, is_branch,
+      model_path, system_preset_id, inference_preset_id
+    FROM chats;
+  `);
+  db.exec("DROP TABLE chats;");
+  db.exec("ALTER TABLE chats_new RENAME TO chats;");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_chats_created_at ON chats(created_at);");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_chats_updated_at ON chats(updated_at);");
+  db.exec("PRAGMA foreign_keys = ON;");
 }
 
 /**
@@ -180,17 +231,29 @@ export function getDb(path?: string): Database {
     },
     10 * 60 * 1000,
   );
+  _vacuumInterval.unref?.();
 
-  const currentVersion = _db.query<any, []>("PRAGMA user_version").get().user_version;
-  const LATEST_DB_VERSION = 2;
-  const MIGRATIONS: Array<(d: Database) => void> = [
-    (_d: Database) => {
-      // v0 -> v1: initial schema creation is handled by initDbSchema.
-    },
+  const currentVersion =
+    _db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
+  const LATEST_DB_VERSION = 4;
+  const CHATS_PARENT_FK_MIGRATION_INDEX = 3;
+  const MIGRATIONS: Array<((d: Database) => void) | undefined> = [
+    undefined, // v0 -> v1: initial schema creation is handled by initDbSchema.
     (d: Database) => {
       if (hasTable(d, "messages") && !hasColumn(d, "messages", "metrics_json")) {
         d.run("ALTER TABLE messages ADD COLUMN metrics_json TEXT");
       }
+    },
+    (d: Database) => {
+      if (hasTable(d, "model_cache") && !hasColumn(d, "model_cache", "mmproj_path")) {
+        d.run("ALTER TABLE model_cache ADD COLUMN mmproj_path TEXT NOT NULL DEFAULT ''");
+      }
+      if (hasTable(d, "model_cache") && !hasColumn(d, "model_cache", "mmproj_mtime")) {
+        d.run("ALTER TABLE model_cache ADD COLUMN mmproj_mtime INTEGER NOT NULL DEFAULT 0");
+      }
+    },
+    (d: Database) => {
+      migrateChatsParentDeleteSetNull(d);
     },
   ];
 
@@ -217,16 +280,24 @@ export function getDb(path?: string): Database {
     try {
       _db.exec("BEGIN TRANSACTION;");
       for (let i = currentVersion; i < LATEST_DB_VERSION; i++) {
+        if (i === CHATS_PARENT_FK_MIGRATION_INDEX) continue;
         const migration = MIGRATIONS[i];
         if (migration) migration(_db);
       }
-      _db.exec(`PRAGMA user_version = ${LATEST_DB_VERSION};`);
       _db.exec("COMMIT;");
+      if (currentVersion < 4) {
+        migrateChatsParentDeleteSetNull(_db);
+      }
+      _db.exec(`PRAGMA user_version = ${LATEST_DB_VERSION};`);
       if (hasAnyTables) {
         logInfo(`Migration to version ${LATEST_DB_VERSION} complete.`);
       }
     } catch (e) {
-      _db.exec("ROLLBACK;");
+      try {
+        _db.exec("ROLLBACK;");
+      } catch {
+        // No active transaction (failure happened after COMMIT).
+      }
       logError("Database migration failed:", e);
       throw e;
     }
@@ -249,7 +320,7 @@ export function initDbSchema(db: Database): void {
       name        TEXT NOT NULL DEFAULT 'New Chat',
       created_at  INTEGER NOT NULL,
       updated_at  INTEGER NOT NULL,
-      parent_id   TEXT REFERENCES chats(id),
+      parent_id   TEXT REFERENCES chats(id) ON DELETE SET NULL,
       is_branch   INTEGER NOT NULL DEFAULT 0,
       model_path  TEXT,
       system_preset_id TEXT,
@@ -328,8 +399,10 @@ export function initDbSchema(db: Database): void {
   // GGUF metadata cache
   db.run(`
     CREATE TABLE IF NOT EXISTS model_cache (
-      file_path   TEXT NOT NULL,
-      mtime       INTEGER NOT NULL,
+      file_path     TEXT NOT NULL,
+      mtime         INTEGER NOT NULL,
+      mmproj_path   TEXT NOT NULL DEFAULT '',
+      mmproj_mtime  INTEGER NOT NULL DEFAULT 0,
       metadata_json TEXT NOT NULL,
       PRIMARY KEY (file_path, mtime)
     );
@@ -434,8 +507,7 @@ export async function initDb(path?: string): Promise<void> {
           gpuLayers: 0,
           threads: 3,
           threadsBatch: -1,
-          batchSize: 2048,
-          microBatchSize: 512,
+          ...defaultBatchingForImageTokens(DEFAULT_IMAGE_MAX_TOKENS),
           ropeScaling: "none",
           ropeFreqBase: 0,
           ropeFreqScale: 0,
@@ -450,7 +522,7 @@ export async function initDb(path?: string): Promise<void> {
           noKvOffload: false,
           cacheReuse: 0,
           contextCheckpoints: 32,
-          imageMaxTokens: 560,
+          imageMaxTokens: DEFAULT_IMAGE_MAX_TOKENS,
           logLevel: 3,
           seedOverride: -1,
           specType: "off",

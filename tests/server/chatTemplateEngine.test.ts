@@ -4,11 +4,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import {
-  detectThinkingConfig,
-  parseThinkTags,
-  prepareHistoryForRender,
-} from "../../src/server/chatTemplateEngine";
+import { detectThinkingConfig, parseThinkTags } from "../../src/server/chatTemplateEngine";
 
 describe("chatTemplateEngine", () => {
   describe("detectThinkingConfig", () => {
@@ -16,6 +12,11 @@ describe("chatTemplateEngine", () => {
       const config = detectThinkingConfig("gemma4");
       expect(config.openTag).toBe("<|channel>thought\n");
       expect(config.closeTag).toBe("<channel|>");
+    });
+
+    it("detects thinking config for hyphen and underscore Gemma 4 variants", () => {
+      expect(detectThinkingConfig("gemma-4").openTag).toBe("<|channel>thought\n");
+      expect(detectThinkingConfig("gemma_4").closeTag).toBe("<channel|>");
     });
 
     it("defaults to plain <think> tags for standard models", () => {
@@ -106,56 +107,6 @@ describe("chatTemplateEngine", () => {
         thinking: "",
         isThinking: false,
       });
-    });
-  });
-
-  describe("prepareHistoryForRender", () => {
-    it("formats history properly without thinking tags for assistant", () => {
-      const history = prepareHistoryForRender(
-        [
-          {
-            id: "1",
-            chatId: "2",
-            role: "assistant",
-            content: "Final",
-            rawContent: "<think>\nhmm</think>\nFinal",
-            thinkingContent: "hmm",
-            position: 0,
-            createdAt: 0,
-          },
-        ],
-        {
-          openTag: "<think>\n",
-          closeTag: "</think>\n",
-          enableToken: undefined,
-        },
-      );
-
-      // Fallback parser strips think
-      expect(history[0].content).toBe("Final");
-    });
-
-    it("handles multiple thinking blocks and half-open tags in history rendering", () => {
-      const history = prepareHistoryForRender(
-        [
-          {
-            id: "1",
-            chatId: "2",
-            role: "assistant",
-            content: "Part 1 Part 2 Half",
-            rawContent: "<think>\n1</think>\nPart 1 <think>\n2</think>\nPart 2 <think>\nhalf... ",
-            position: 0,
-            createdAt: 0,
-          },
-        ],
-        {
-          openTag: "<think>\n",
-          closeTag: "</think>\n",
-          enableToken: undefined,
-        },
-      );
-
-      expect(history[0].content).toBe("Part 1 Part 2");
     });
   });
 });

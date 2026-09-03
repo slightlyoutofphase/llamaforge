@@ -93,7 +93,9 @@ describe("stores logic", () => {
     });
 
     await act(async () => {
-      await useAppStore.getState().sendMessage("Hello world");
+      await expect(useAppStore.getState().sendMessage("Hello world")).rejects.toThrow(
+        "Server returned 500",
+      );
     });
 
     const state = useAppStore.getState();

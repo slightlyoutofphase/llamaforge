@@ -4,6 +4,7 @@
  */
 
 import type { ChatMessage } from "../shared/types";
+import { parseToolCallsJson } from "../shared/toolCalls";
 
 const tokenCountCache = new Map<string, number>();
 const DEFAULT_CTX_SIZE = 4096;
@@ -69,7 +70,7 @@ function buildMessagesKey(messages: ChatMessage[], port?: number): string {
  * @returns A cache key for prompt-level token counts.
  */
 function buildSerializedPromptKey(serializedPrompt: string, port?: number): string {
-  return `payload:${port ?? 0}:${serializedPrompt}`;
+  return `payload:${port ?? 0}:${String(Bun.hash(serializedPrompt))}`;
 }
 
 /**
@@ -130,8 +131,15 @@ async function fetchTokenCount(text: string, port?: number): Promise<number> {
       body: JSON.stringify({ content: text }),
     });
     if (!res.ok) return Math.ceil(text.length / 3.5);
-    const data: any = await res.json();
-    if (Array.isArray(data.tokens)) return data.tokens.length;
+    const data: unknown = await res.json();
+    if (
+      data &&
+      typeof data === "object" &&
+      "tokens" in data &&
+      Array.isArray((data as { tokens: unknown }).tokens)
+    ) {
+      return (data as { tokens: unknown[] }).tokens.length;
+    }
   } catch {
     // Fallback to heuristic token count
   }
@@ -256,6 +264,57 @@ function getReservedTokens(maxTokens: number): number {
 }
 
 /**
+ * Groups chat messages so an assistant tool-call turn and its tool responses
+ * are truncated as a single unit.
+ *
+ * @param messages - Chat messages in prompt order.
+ * @returns Atomic message groups.
+ */
+function groupMessagesAtomically(messages: ChatMessage[]): ChatMessage[][] {
+  const groups: ChatMessage[][] = [];
+  let index = 0;
+  while (index < messages.length) {
+    const message = messages[index];
+    if (!message) break;
+    if (message.role === "assistant" && parseToolCallsJson(message.toolCallsJson)) {
+      const group: ChatMessage[] = [message];
+      index += 1;
+      while (index < messages.length && messages[index]?.role === "tool") {
+        const toolMessage = messages[index];
+        if (toolMessage) group.push(toolMessage);
+        index += 1;
+      }
+      groups.push(group);
+      continue;
+    }
+    groups.push([message]);
+    index += 1;
+  }
+  return groups;
+}
+
+/**
+ * Maps a message-index prefix length onto the group that starts at or after it.
+ *
+ * If the index lands inside a tool-call group, the whole group is preserved.
+ *
+ * @param groups - Atomic message groups.
+ * @param messageIndex - Number of leading messages that must be kept.
+ * @returns Group index from which truncation may delete.
+ */
+function preservedGroupCount(groups: ChatMessage[][], messageIndex: number): number {
+  let counted = 0;
+  for (let groupIndex = 0; groupIndex < groups.length; groupIndex++) {
+    const group = groups[groupIndex];
+    if (!group) continue;
+    if (messageIndex <= counted) return groupIndex;
+    counted += group.length;
+    if (messageIndex < counted) return groupIndex + 1;
+  }
+  return groups.length;
+}
+
+/**
  * Determines how many leading messages must be preserved during overflow truncation.
  *
  * @param messages - Prompt messages currently under consideration.
@@ -268,6 +327,13 @@ function getProtectedPrefixLength(messages: ChatMessage[], roleSystemPrompt: boo
     protectedCount = 1;
   }
   return protectedCount;
+}
+
+export class ContextOverflowError extends Error {
+  constructor(message = "Conversation exceeds the context window (Stop At Limit).") {
+    super(message);
+    this.name = "ContextOverflowError";
+  }
 }
 
 /**
@@ -291,7 +357,17 @@ export async function truncateMessages(
   roleSystemPrompt: boolean = true,
   tokenOptions?: TokenEstimationOptions,
 ): Promise<ChatMessage[]> {
-  if (overflowPolicy === "StopAtLimit") return rawMessages;
+  if (overflowPolicy === "StopAtLimit") {
+    const reservedTokens = getReservedTokens(maxTokens);
+    const maxPromptTokens = normalizeCtxSize(ctxSize) - reservedTokens;
+    if (maxPromptTokens > 0) {
+      const currentTokens = await getPromptTokens(rawMessages, port, tokenOptions);
+      if (currentTokens > maxPromptTokens) {
+        throw new ContextOverflowError();
+      }
+    }
+    return rawMessages;
+  }
 
   const messages = [...rawMessages].map(cloneMessage);
   const normalizedCtxSize = normalizeCtxSize(ctxSize);
@@ -304,31 +380,63 @@ export async function truncateMessages(
 
   const protectedPrefix = getProtectedPrefixLength(messages, roleSystemPrompt);
   const keepLastCount = 1;
+  const groups = groupMessagesAtomically(messages);
+
+  const removeGroupsUntilFit = async (
+    startGroupIndex: number,
+    minRemainingGroups: number,
+  ): Promise<void> => {
+    if (currentTokens <= maxPromptTokens) return;
+    if (startGroupIndex < 0 || startGroupIndex >= groups.length) return;
+    const lastRemovableIndex =
+      keepLastCount > 0 ? Math.max(startGroupIndex, groups.length - 1) - 1 : groups.length - 1;
+    const maxK = Math.min(
+      Math.max(0, groups.length - minRemainingGroups),
+      Math.max(0, lastRemovableIndex - startGroupIndex + 1),
+    );
+    if (maxK <= 0) return;
+
+    let lo = 1;
+    let hi = maxK;
+    let answer = maxK;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const candidate = [
+        ...groups.slice(0, startGroupIndex),
+        ...groups.slice(startGroupIndex + mid),
+      ];
+      const tokens = await getPromptTokens(candidate.flat(), port, tokenOptions);
+      if (tokens <= maxPromptTokens) {
+        answer = mid;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    groups.splice(startGroupIndex, answer);
+    currentTokens = await getPromptTokens(groups.flat(), port, tokenOptions);
+  };
 
   if (overflowPolicy === "TruncateMiddle") {
     const firstUserIndex = messages.findIndex(
       (m, idx) => idx >= protectedPrefix && m.role === "user",
     );
     const preserveUntil = firstUserIndex !== -1 ? firstUserIndex + 1 : protectedPrefix;
-    while (currentTokens > maxPromptTokens && messages.length > preserveUntil + keepLastCount) {
-      const removed = messages.splice(preserveUntil, 1)[0];
-      if (!removed) break;
-      currentTokens = await getPromptTokens(messages, port, tokenOptions);
-    }
+    const preserveGroups = Math.max(
+      preservedGroupCount(groups, preserveUntil),
+      preservedGroupCount(groups, protectedPrefix),
+    );
+    await removeGroupsUntilFit(preserveGroups, preserveGroups + keepLastCount);
   } else {
-    while (currentTokens > maxPromptTokens && messages.length > protectedPrefix + keepLastCount) {
-      const removed = messages.splice(protectedPrefix, 1)[0];
-      if (!removed) break;
-      currentTokens = await getPromptTokens(messages, port, tokenOptions);
-    }
+    const preserveGroups = preservedGroupCount(groups, protectedPrefix);
+    await removeGroupsUntilFit(preserveGroups, preserveGroups + keepLastCount);
   }
 
-  const hardProtectedIndex = protectedPrefix;
-  while (currentTokens > maxPromptTokens && messages.length > hardProtectedIndex + keepLastCount) {
-    const removed = messages.splice(hardProtectedIndex, 1)[0];
-    if (!removed) break;
-    currentTokens = await getPromptTokens(messages, port, tokenOptions);
-  }
+  const hardProtectedGroups = preservedGroupCount(groups, protectedPrefix);
+  await removeGroupsUntilFit(hardProtectedGroups, hardProtectedGroups + keepLastCount);
+
+  messages.length = 0;
+  messages.push(...groups.flat());
 
   const lastMessage = messages.at(-1);
   if (currentTokens > maxPromptTokens && lastMessage) {

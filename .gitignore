@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+package-lock.json
+docs_html/
+tests/data/.llamaforge/
+tests/data/*.mp4

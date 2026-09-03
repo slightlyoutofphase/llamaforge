@@ -5,6 +5,6 @@
 
 /// <reference types="vite/client" />
 declare module "*.css" {
-  const content: any;
+  const content: string;
   export default content;
 }

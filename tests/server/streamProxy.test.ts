@@ -9,9 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:te
 import fs from "node:fs/promises";
 import { addMessage, createChat, getChat, updateChat } from "../../src/server/persistence/chatRepo";
 import { getDb, initDb, resetDb } from "../../src/server/persistence/db";
-import { createInferencePreset } from "../../src/server/persistence/presetRepo";
+import { createInferencePreset, createSystemPreset } from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
-import { proxyCompletion } from "../../src/server/streamProxy";
+import { abortGeneration, proxyCompletion } from "../../src/server/streamProxy";
 import { cancelPendingApprovals, resolveToolApproval } from "../../src/server/tools";
 import * as llamaServerModule from "../../src/server/llamaServer";
 
@@ -79,7 +79,7 @@ function chatStop(finishReason: string = "stop"): object {
 describe("streamProxy", () => {
   let capturedEndpoint: string | null;
   let capturedBody: any;
-  let writeFileSpy: ReturnType<typeof spyOn<typeof fs, "writeFile">>;
+  let writeSpy: ReturnType<typeof spyOn<typeof Bun, "write">>;
 
   beforeEach(async () => {
     spyOn(llamaServerModule, "getServerStatus").mockReturnValue({
@@ -89,7 +89,7 @@ describe("streamProxy", () => {
     });
     spyOn(llamaServerModule, "getActiveThinkingTagOverride").mockReturnValue(undefined);
     spyOn(fs, "mkdir").mockResolvedValue(undefined);
-    writeFileSpy = spyOn(fs, "writeFile").mockResolvedValue(undefined as never);
+    writeSpy = spyOn(Bun, "write").mockResolvedValue(3);
 
     await initDb(":memory:");
     capturedEndpoint = null;
@@ -97,7 +97,7 @@ describe("streamProxy", () => {
   });
 
   afterEach(() => {
-    writeFileSpy.mockRestore();
+    writeSpy.mockRestore();
     cancelPendingApprovals();
     resetDb();
     mock.restore();
@@ -344,7 +344,7 @@ describe("streamProxy", () => {
     expect(assistantMsg.reasoning_content).toBe("I am pondering");
   });
 
-  it("does not include reasoning_content when preserve_thinking is disabled", async () => {
+  it("still sends reasoning_content when preserve_thinking is disabled", async () => {
     const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
@@ -402,7 +402,8 @@ describe("streamProxy", () => {
 
     const assistantMsg = capturedBody.messages.find((m: any) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
-    expect(assistantMsg.reasoning_content).toBeUndefined();
+    expect(assistantMsg.reasoning_content).toBe("I am pondering");
+    expect(capturedBody.chat_template_kwargs?.preserve_thinking).toBe(false);
   });
 
   it("persists the user message and creates an assistant message row", async () => {
@@ -1151,5 +1152,328 @@ describe("streamProxy", () => {
     const reloaded = await getChat(chat.id);
     const assistantMsg = reloaded?.messages?.find((m) => m.id === messageId);
     expect(assistantMsg).toBeUndefined();
+  });
+
+  it("does not inject <|think|> into system message content", async () => {
+    spyOn(llamaServerModule, "getActiveThinkingTagOverride").mockReturnValue({
+      openTag: "<|channel>thought\n",
+      closeTag: "<channel|>",
+      enableToken: "<|think|>",
+    });
+    const stream = buildSSEStream([chatDelta("ok"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const systemPresetId = "sys-no-think-inject";
+    await createSystemPreset({
+      id: systemPresetId,
+      name: "Helpful",
+      content: "You are helpful.",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const chat = await createChat("No Think Inject");
+    await updateChat(chat.id, { systemPresetId });
+
+    await proxyCompletion({ chatId: chat.id, content: "hi", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const systemMsg = capturedBody.messages.find((m: { role: string }) => m.role === "system");
+    expect(systemMsg.content).toBe("You are helpful.");
+    expect(systemMsg.content).not.toContain("<|think|>");
+    expect(capturedBody.chat_template_kwargs).toEqual({
+      enable_thinking: true,
+      preserve_thinking: false,
+    });
+  });
+
+  it("keeps assistant rows that have thinking content when generation is aborted", async () => {
+    const encoder = new TextEncoder();
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal;
+      return {
+        ok: true,
+        body: {
+          getReader: () => {
+            let sent = false;
+            return {
+              read: () =>
+                new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+                  if (signal.aborted) {
+                    reject(new DOMException("Aborted", "AbortError"));
+                    return;
+                  }
+                  if (!sent) {
+                    sent = true;
+                    resolve({
+                      done: false,
+                      value: encoder.encode(
+                        `data: ${JSON.stringify(chatDelta("<think>I am reasoning about this</think>"))}\n\n`,
+                      ),
+                    });
+                    return;
+                  }
+                  signal.addEventListener(
+                    "abort",
+                    () => reject(new DOMException("Aborted", "AbortError")),
+                    { once: true },
+                  );
+                }),
+              cancel: async () => {},
+            };
+          },
+        },
+      } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Abort Thinking Test");
+    const msgId = await proxyCompletion({
+      chatId: chat.id,
+      content: "think",
+      attachments: [],
+    });
+
+    await new Promise((r) => setTimeout(r, 80));
+    abortGeneration(chat.id);
+    await new Promise((r) => setTimeout(r, 80));
+
+    const reloaded = await getChat(chat.id);
+    const assistant = reloaded?.messages?.find((m) => m.id === msgId);
+    expect(assistant).toBeDefined();
+    expect(assistant?.thinkingContent).toContain("I am reasoning");
+  });
+
+  it("does not overwrite a trailing tool message when continuing", async () => {
+    const stream = buildSSEStream([chatDelta("follow-up"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Continue Tool Tail");
+    await addMessage({
+      id: "user-1",
+      chatId: chat.id,
+      role: "user",
+      content: "calc",
+      rawContent: "calc",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: "asst-1",
+      chatId: chat.id,
+      role: "assistant",
+      content: "",
+      rawContent: "",
+      position: 1,
+      createdAt: Date.now(),
+      toolCallsJson: JSON.stringify([
+        {
+          id: "tc_continue",
+          type: "function",
+          function: { name: "calculate", arguments: '{"expression":"2+2"}' },
+        },
+      ]),
+    });
+    await addMessage({
+      id: "tool-1",
+      chatId: chat.id,
+      role: "tool",
+      content: "4",
+      rawContent: "4",
+      position: 2,
+      createdAt: Date.now(),
+      toolCallId: "tc_continue",
+    });
+
+    const newId = await proxyCompletion({
+      chatId: chat.id,
+      content: "",
+      attachments: [],
+      isContinue: true,
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(newId).not.toBe("tool-1");
+    expect(newId).not.toBe("asst-1");
+    const reloaded = await getChat(chat.id);
+    const toolRow = reloaded?.messages?.find((m) => m.id === "tool-1");
+    expect(toolRow?.role).toBe("tool");
+    expect(toolRow?.content).toBe("4");
+    const newAssistant = reloaded?.messages?.find((m) => m.id === newId);
+    expect(newAssistant?.role).toBe("assistant");
+    expect(newAssistant?.content).toBe("follow-up");
+  });
+
+  it("sends tool-call arguments as objects, not JSON strings", async () => {
+    const stream = buildSSEStream([chatDelta("done"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Tool Args Object");
+    await addMessage({
+      id: "asst-tools",
+      chatId: chat.id,
+      role: "assistant",
+      content: "",
+      rawContent: "",
+      position: 0,
+      createdAt: Date.now(),
+      toolCallsJson: JSON.stringify([
+        {
+          id: "tc_args",
+          type: "function",
+          function: { name: "calculate", arguments: '{"expression":"1+1"}' },
+        },
+      ]),
+    });
+    await addMessage({
+      id: "tool-args",
+      chatId: chat.id,
+      role: "tool",
+      content: "2",
+      rawContent: "2",
+      position: 1,
+      createdAt: Date.now(),
+      toolCallId: "tc_args",
+    });
+
+    await proxyCompletion({ chatId: chat.id, content: "thanks", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const assistantMsg = capturedBody.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg.tool_calls[0].function.arguments).toEqual({ expression: "1+1" });
+    expect(typeof assistantMsg.tool_calls[0].function.arguments).toBe("object");
+  });
+
+  it("completes a tool round trip and deserializes arguments on the follow-up request", async () => {
+    const capturedBodies: unknown[] = [];
+    let chatCompletionFetchCount = 0;
+    const fetchMock = mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/tokenize")) {
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 }) as any;
+      }
+
+      chatCompletionFetchCount += 1;
+      if (init?.body) {
+        capturedBodies.push(JSON.parse(init.body as string));
+      }
+
+      if (chatCompletionFetchCount === 1) {
+        const stream = buildSSEStream([
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "tc_roundtrip",
+                      function: { name: "calculate", arguments: '{"expression":' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [{ index: 0, id: "", function: { name: "", arguments: '"2+2"}' } }],
+                },
+              },
+            ],
+          },
+          chatStop("tool_calls"),
+        ]);
+        return { ok: true, body: stream } as any;
+      }
+
+      const stream = buildSSEStream([chatDelta("The answer is 4"), chatStop()]);
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Tool Round Trip");
+    const inferencePresetId = "tool-roundtrip-preset";
+    await createInferencePreset({
+      id: inferencePresetId,
+      name: "Tool Round Trip Preset",
+      isDefault: false,
+      temperature: 0.8,
+      topK: 40,
+      topP: 0.95,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      repeatLastN: 64,
+      typicalP: 1.0,
+      presencePenalty: 0.0,
+      frequencyPenalty: 0.0,
+      mirostat: 0,
+      mirostatTau: 5.0,
+      mirostatEta: 0.1,
+      dynaTempRange: 0.0,
+      dynaTempExponent: 1.0,
+      seed: -1,
+      maxTokens: -1,
+      stopStrings: [],
+      toolCallsEnabled: true,
+      tools: [
+        {
+          name: "calculate",
+          description: "Evaluate a mathematical expression.",
+          parameters: {
+            type: "object",
+            properties: {
+              expression: { type: "string" },
+            },
+            required: ["expression"],
+          },
+        },
+      ],
+      structuredOutput: undefined,
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "what is 2+2",
+      attachments: [],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    resolveToolApproval("tc_roundtrip", true);
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    expect(chatCompletionFetchCount).toBe(2);
+    const followUp = capturedBodies[1] as {
+      messages: { role: string; tool_calls?: { function: { arguments: unknown } }[] }[];
+    };
+    const assistantWithTools = followUp.messages.find((m) => m.tool_calls);
+    expect(assistantWithTools?.tool_calls?.[0]?.function.arguments).toEqual({
+      expression: "2+2",
+    });
+
+    const reloaded = await getChat(chat.id);
+    expect(reloaded?.messages?.some((m) => m.role === "tool" && m.content.includes("4"))).toBe(
+      true,
+    );
   });
 });

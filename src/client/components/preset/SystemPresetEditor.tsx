@@ -27,23 +27,29 @@ import { useUiStore } from "../../uiStore";
  */
 export function SystemPresetEditor() {
   const { setRightPanelView, activePresetId } = useUiStore();
-  const { currentChatId, loadChat } = useAppStore();
+  const { currentChatId } = useAppStore();
   const { data: presets } = useSystemPresets();
   const createMut = useCreateSystemPreset();
   const updateMut = useUpdateSystemPreset();
   const deleteMut = useDeleteSystemPreset();
   const updateChatMut = useUpdateChat();
 
-  const activePreset = presets?.find((p) => p.id === activePresetId) || presets?.[0];
+  const explicitNone = activePresetId === "";
+  const activePreset = explicitNone
+    ? undefined
+    : activePresetId
+      ? presets?.find((p) => p.id === activePresetId)
+      : presets?.[0];
 
   const [localState, setLocalState] = useState<Partial<SystemPromptPreset> | null>(null);
 
   useEffect(() => {
-    if (!activePreset) return;
+    if (!activePreset) {
+      setLocalState(null);
+      return;
+    }
     setLocalState((prev) => (prev?.id === activePreset.id ? prev : activePreset));
   }, [activePreset]);
-
-  if (!localState) return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
 
   /**
    * Updates a single system preset field within local editor state.
@@ -62,12 +68,12 @@ export function SystemPresetEditor() {
    * @returns A promise that resolves once the chat has been updated and reloaded.
    */
   const handleApplyToChat = async () => {
-    if (!currentChatId || !localState.id) return;
+    if (!currentChatId || !localState?.id) return;
     await updateChatMut.mutateAsync({
       id: currentChatId,
       updates: { systemPresetId: localState.id },
     });
-    await loadChat(currentChatId);
+    useAppStore.getState().patchCurrentChatMetadata({ systemPresetId: localState.id });
     setRightPanelView(null);
   };
 
@@ -77,7 +83,7 @@ export function SystemPresetEditor() {
    * @returns No return value.
    */
   const handleSave = () => {
-    if (!localState.id) return;
+    if (!localState?.id) return;
     updateMut.mutate({ id: localState.id, updates: localState });
   };
 
@@ -122,9 +128,9 @@ export function SystemPresetEditor() {
    * @returns No return value.
    */
   const handleDelete = () => {
-    if (!localState.id) return;
+    if (!localState?.id) return;
     deleteMut.mutate(localState.id);
-    setRightPanelView("systemPreset", presets?.find((p) => p.id !== localState.id)?.id);
+    setRightPanelView("systemPreset", presets?.find((p) => p.id !== localState.id)?.id ?? "");
   };
 
   return (
@@ -133,7 +139,7 @@ export function SystemPresetEditor() {
         <div className="flex flex-col flex-1 min-w-0">
           <h2 className="font-semibold text-lg flex items-center gap-2 truncate">System Preset</h2>
           <select
-            value={activePreset?.id || ""}
+            value={explicitNone ? "" : activePreset?.id || ""}
             onChange={(e) => setRightPanelView("systemPreset", e.target.value)}
             className="text-xs bg-transparent border-none text-[var(--color-text-muted)] outline-none focus:text-[var(--color-text-primary)] w-full truncate">
             <option value="" className="bg-[var(--color-surface)]">
@@ -177,42 +183,49 @@ export function SystemPresetEditor() {
         </div>
       </div>
 
-      <div className="flex-1 p-4 flex flex-col space-y-4 overflow-y-auto">
-        <div className="space-y-2">
-          <label htmlFor="systemPresetName" className="text-sm font-medium">
-            Preset Name
-          </label>
-          <input
-            id="systemPresetName"
-            type="text"
-            value={localState.name || ""}
-            onChange={(e) => updateField("name", e.target.value)}
-            className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md"
-          />
+      {!localState ? (
+        <div className="flex-1 p-4 flex flex-col items-center justify-center gap-3 text-center text-sm text-[var(--color-text-muted)]">
+          <p>No system preset selected.</p>
+          <p>Choose a preset above or create a new one.</p>
         </div>
-
-        <div className="flex-1 space-y-2 flex flex-col">
-          <label
-            htmlFor="systemPromptInput"
-            className="text-sm font-medium flex justify-between items-center">
-            <span>System Prompt</span>
-          </label>
-          <div className="border border-[var(--color-border)] rounded-md overflow-hidden flex-1 flex flex-col min-h-[300px]">
-            <CodeMirror
-              id="systemPromptInput"
-              value={localState.content || ""}
-              extensions={[markdown()]}
-              theme="dark"
-              onChange={(val) => updateField("content", val)}
-              className="text-sm flex-1 h-full"
-              height="100%"
+      ) : (
+        <div className="flex-1 p-4 flex flex-col space-y-4 overflow-y-auto">
+          <div className="space-y-2">
+            <label htmlFor="systemPresetName" className="text-sm font-medium">
+              Preset Name
+            </label>
+            <input
+              id="systemPresetName"
+              type="text"
+              value={localState.name || ""}
+              onChange={(e) => updateField("name", e.target.value)}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md"
             />
           </div>
+
+          <div className="flex-1 space-y-2 flex flex-col">
+            <label
+              htmlFor="systemPromptInput"
+              className="text-sm font-medium flex justify-between items-center">
+              <span>System Prompt</span>
+            </label>
+            <div className="border border-[var(--color-border)] rounded-md overflow-hidden flex-1 flex flex-col min-h-[300px]">
+              <CodeMirror
+                id="systemPromptInput"
+                value={localState.content || ""}
+                extensions={[markdown()]}
+                theme="dark"
+                onChange={(val) => updateField("content", val)}
+                className="text-sm flex-1 h-full"
+                height="100%"
+              />
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] flex flex-col gap-2">
-        {currentChatId && (
+        {currentChatId && localState && (
           <button
             type="button"
             onClick={handleApplyToChat}
@@ -224,7 +237,8 @@ export function SystemPresetEditor() {
         <button
           type="button"
           onClick={handleSave}
-          className="w-full flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md active:scale-95 active:shadow-none transition-all font-semibold text-sm">
+          disabled={!localState}
+          className="w-full flex items-center justify-center gap-2 bg-[var(--color-accent)] text-white p-2 rounded-lg hover:shadow-md active:scale-95 active:shadow-none transition-all font-semibold text-sm disabled:opacity-50">
           <Save size={16} /> Save Changes
         </button>
       </div>

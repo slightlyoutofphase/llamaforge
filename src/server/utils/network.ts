@@ -2,7 +2,6 @@
  * @packageDocumentation
  * Utilities for network interfaces.
  */
-import net from "node:net";
 
 /**
  * Finds a free port within the given range.
@@ -16,16 +15,25 @@ export async function findFreePort(minPort: number, maxPort: number): Promise<nu
    * Tests whether a single TCP port can be bound on the loopback interface.
    *
    * @param port - Candidate port to probe.
-   * @returns A promise resolving to `true` when the port is currently free.
+   * @returns `true` when the port is currently free.
    */
-  const isPortFree = (port: number): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const server = net.createServer();
-      server.listen(port, "127.0.0.1", () => {
-        server.close(() => resolve(true));
+  const isPortFree = async (port: number): Promise<boolean> => {
+    try {
+      const listener = Bun.listen({
+        hostname: "127.0.0.1",
+        port,
+        socket: {
+          data() {},
+          open() {},
+          close() {},
+          error() {},
+        },
       });
-      server.on("error", () => resolve(false));
-    });
+      listener.stop();
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   for (let port = minPort; port <= maxPort; port++) {

@@ -3,7 +3,7 @@
  * Defines the client-side routing structure using @tanstack/react-router.
  */
 
-import { createRootRoute, createRoute, createRouter } from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter, Link } from "@tanstack/react-router";
 import App from "../App";
 import { ChatView } from "../components/chat/ChatView";
 import { ModelSelector } from "../ModelSelector";
@@ -53,7 +53,33 @@ export const chatRoute = createRoute({
   errorComponent: ErrorFallback,
 });
 
-const routeTree = rootRoute.addChildren([modelsRoute, chatRoute]);
+/**
+ * Catch-all 404 route for unmatched paths.
+ */
+function NotFoundPage() {
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-4 p-8 text-center">
+      <h1 className="text-2xl font-semibold">Page not found</h1>
+      <p className="max-w-md text-sm text-[var(--color-text-secondary)]">
+        That path does not match a model registry or chat workspace route.
+      </p>
+      <Link
+        to="/"
+        className="rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-medium text-white">
+        Return to model registry
+      </Link>
+    </div>
+  );
+}
+
+export const notFoundRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "$",
+  component: NotFoundPage,
+  errorComponent: ErrorFallback,
+});
+
+const routeTree = rootRoute.addChildren([modelsRoute, chatRoute, notFoundRoute]);
 
 /**
  * The main application router instance.

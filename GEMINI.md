@@ -1,11 +1,9 @@
-# GOAL
-Your sole task is to complete a real full implementation of `LLAMAFORGE_PROJECT_PLAN.md`, with the correct multi file project structure exactly as the plan mandates.
 # STRICTLY PROHIBITED:
-- ANY use of PowerShell scripts WHATSOEVER for tasks that can more easily be accomplished via the specific native Agent tools that are available to you here in the specific context of the Cora VSCode Extension.
-- Stub code, placeholder code, todos, simplifications, and any other kind of code that does not correctly fulfill **all** requirements of the project plan.
+- ANY use of PowerShell scripts WHATSOEVER for tasks that can more easily be accomplished via the specific native Agent tools that are available to you here in the specific context of the Cursor IDE environment.
+- Stub code, placeholder code, todos, simplifications, and any other kind of deficient code.
+- Using any Git command whatsoever without explicit user permission
 # REMEMBER:
-This **IS** a real implementation. This **IS** a full implementation. The user will immediately notice any failure to implement the project plan correctly and fully.
-You **ABSOLUTELY MUST AT ALL TIMES** follow the TypeScript compiler flag rules and TypeDoc documentation comment requirements that are outlined in the project plan.
+This **IS** a real implementation. This **IS** a full implementation. The user will immediately notice any failure to implement the project correctly and fully.
 You **ABSOLUTELY MUST AT ALL TIMES** consider edge cases and handle them properly. "Happy path only" programming is **NOT** acceptable.
 This is a **SINGLE-USER OFFLINE APPLICATION.** Do not write or suggest code that optimizes for non-existent multi-user concurrency while sacrificing any aspect of the intended single-user experience.
 **DO NOT** use Node.js APIs if a native Bun API providing the same functionality, which should be used instead, specifically exists.

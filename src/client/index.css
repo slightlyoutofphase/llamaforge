@@ -1,4 +1,39 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap");
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/inter-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/inter-latin-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("./assets/fonts/inter-latin-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/jetbrains-mono-latin-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./assets/fonts/jetbrains-mono-latin-500.woff2") format("woff2");
+}
+
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
@@ -7,7 +42,7 @@
   --color-surface: oklch(16% 0.02 260);
   --color-surface-elevated: oklch(20% 0.025 260);
   --color-border: oklch(28% 0.03 260);
-  --color-accent: oklch(65% 0.18 280);
+  --color-accent: #7b6ef6;
   --color-accent-dim: oklch(50% 0.14 280);
   --color-text-primary: oklch(92% 0.01 260);
   --color-text-secondary: oklch(65% 0.02 260);

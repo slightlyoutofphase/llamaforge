@@ -141,56 +141,37 @@ describe("SettingsPanel", () => {
     );
   });
 
-  it("renders browse buttons for file and directory path inputs", async () => {
+  it("renders text inputs for llama-server and models paths", async () => {
     await act(async () => {
       render(<SettingsPanel />);
     });
 
-    const browseButtons = screen.getAllByRole("button", { name: /browse/i });
-    expect(browseButtons.length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByLabelText(/llama-server path/i)).toBeDefined();
+    expect(screen.getByLabelText(/models root directory/i)).toBeDefined();
   });
 
-  it("opens directory picker and appends llama-server executable when browse button is clicked", async () => {
-    const showDirectoryPicker = mock().mockResolvedValue({
-      name: "bin",
-      path: "/opt/bin",
-    });
-    (window as any).showDirectoryPicker = showDirectoryPicker;
-
+  it("accepts a typed llama-server path", async () => {
     await act(async () => {
       render(<SettingsPanel />);
     });
 
-    const browseButtons = screen.getAllByRole("button", { name: /browse/i });
-    const llamaBrowse = browseButtons[0];
-
+    const llamaInput = await screen.findByDisplayValue("/usr/bin/llama-server");
     await act(async () => {
-      fireEvent.click(llamaBrowse);
+      fireEvent.change(llamaInput, { target: { value: "/opt/bin/llama-server" } });
     });
-
-    expect(showDirectoryPicker).toHaveBeenCalled();
     expect(await screen.findByDisplayValue("/opt/bin/llama-server")).toBeDefined();
   });
 
-  it("opens directory picker when browse button is clicked for models path", async () => {
-    const showDirectoryPicker = mock().mockResolvedValue({
-      name: "models",
-    });
-    (window as any).showDirectoryPicker = showDirectoryPicker;
-
+  it("accepts a typed models path", async () => {
     await act(async () => {
       render(<SettingsPanel />);
     });
 
-    const browseButtons = screen.getAllByRole("button", { name: /browse/i });
-    // Models path is the second browse button
-    const modelsBrowse = browseButtons[1];
-
+    const modelsInput = await screen.findByDisplayValue("/home/user/models");
     await act(async () => {
-      fireEvent.click(modelsBrowse);
+      fireEvent.change(modelsInput, { target: { value: "/data/models" } });
     });
-
-    expect(showDirectoryPicker).toHaveBeenCalled();
+    expect(await screen.findByDisplayValue("/data/models")).toBeDefined();
   });
 
   it("saves settings and triggers rescanModels when rescan button is clicked with a changed path", async () => {
@@ -229,120 +210,16 @@ describe("SettingsPanel", () => {
     expect(rescanButton.className).toContain("active:");
   });
 
-  it("renders browse buttons for all optional binary path fields", async () => {
+  it("exposes optional binary path fields as text inputs", async () => {
     await act(async () => {
       render(<SettingsPanel />);
     });
 
-    expect(screen.getByRole("button", { name: /browse for nvidia-smi/i })).toBeDefined();
-    expect(screen.getByRole("button", { name: /browse for rocm-smi/i })).toBeDefined();
-    expect(screen.getByRole("button", { name: /browse for sysctl/i })).toBeDefined();
-    expect(screen.getByRole("button", { name: /browse for system_profiler/i })).toBeDefined();
-    expect(screen.getByRole("button", { name: /browse for powershell/i })).toBeDefined();
-  });
-
-  it("opens directory picker and appends nvidia-smi executable when browse button is clicked", async () => {
-    const showDirectoryPicker = mock().mockResolvedValue({
-      name: "bin",
-      path: "/usr/bin",
-    });
-    (window as any).showDirectoryPicker = showDirectoryPicker;
-
-    await act(async () => {
-      render(<SettingsPanel />);
-    });
-
-    const nvidiaBrowse = screen.getByRole("button", { name: /browse for nvidia-smi/i });
-
-    await act(async () => {
-      fireEvent.click(nvidiaBrowse);
-    });
-
-    expect(showDirectoryPicker).toHaveBeenCalled();
-    expect(await screen.findByDisplayValue("/usr/bin/nvidia-smi")).toBeDefined();
-  });
-
-  it("opens directory picker and appends rocm-smi executable when browse button is clicked", async () => {
-    const showDirectoryPicker = mock().mockResolvedValue({
-      name: "bin",
-      path: "/usr/bin",
-    });
-    (window as any).showDirectoryPicker = showDirectoryPicker;
-
-    await act(async () => {
-      render(<SettingsPanel />);
-    });
-
-    const rocmBrowse = screen.getByRole("button", { name: /browse for rocm-smi/i });
-
-    await act(async () => {
-      fireEvent.click(rocmBrowse);
-    });
-
-    expect(showDirectoryPicker).toHaveBeenCalled();
-    expect(await screen.findByDisplayValue("/usr/bin/rocm-smi")).toBeDefined();
-  });
-
-  it("opens directory picker and appends sysctl executable when browse button is clicked", async () => {
-    const showDirectoryPicker = mock().mockResolvedValue({
-      name: "sbin",
-      path: "/usr/sbin",
-    });
-    (window as any).showDirectoryPicker = showDirectoryPicker;
-
-    await act(async () => {
-      render(<SettingsPanel />);
-    });
-
-    const sysctlBrowse = screen.getByRole("button", { name: /browse for sysctl/i });
-
-    await act(async () => {
-      fireEvent.click(sysctlBrowse);
-    });
-
-    expect(showDirectoryPicker).toHaveBeenCalled();
-    expect(await screen.findByDisplayValue("/usr/sbin/sysctl")).toBeDefined();
-  });
-
-  it("opens directory picker and appends system_profiler executable when browse button is clicked", async () => {
-    const showDirectoryPicker = mock().mockResolvedValue({
-      name: "bin",
-      path: "/usr/bin",
-    });
-    (window as any).showDirectoryPicker = showDirectoryPicker;
-
-    await act(async () => {
-      render(<SettingsPanel />);
-    });
-
-    const profilerBrowse = screen.getByRole("button", { name: /browse for system_profiler/i });
-
-    await act(async () => {
-      fireEvent.click(profilerBrowse);
-    });
-
-    expect(showDirectoryPicker).toHaveBeenCalled();
-    expect(await screen.findByDisplayValue("/usr/bin/system_profiler")).toBeDefined();
-  });
-
-  it("opens directory picker and appends powershell executable when browse button is clicked", async () => {
-    const showDirectoryPicker = mock().mockResolvedValue({
-      name: "System32",
-      path: "C:\\Windows\\System32",
-    });
-    (window as any).showDirectoryPicker = showDirectoryPicker;
-
-    await act(async () => {
-      render(<SettingsPanel />);
-    });
-
-    const psBrowse = screen.getByRole("button", { name: /browse for powershell/i });
-
-    await act(async () => {
-      fireEvent.click(psBrowse);
-    });
-
-    expect(showDirectoryPicker).toHaveBeenCalled();
-    expect(await screen.findByDisplayValue("C:\\Windows\\System32\\powershell.exe")).toBeDefined();
+    expect(screen.getByLabelText(/nvidia-smi path/i)).toBeDefined();
+    expect(screen.getByLabelText(/rocm-smi path/i)).toBeDefined();
+    expect(screen.getByLabelText(/sysctl path/i)).toBeDefined();
+    expect(screen.getByLabelText(/system_profiler path/i)).toBeDefined();
+    expect(screen.getByLabelText(/powershell path/i)).toBeDefined();
+    expect(screen.queryByRole("button", { name: /browse for/i })).toBeNull();
   });
 });

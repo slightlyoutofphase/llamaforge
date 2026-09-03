@@ -3,8 +3,11 @@
  * Tests for llama-server command line argument construction and lifecycle.
  */
 
-import { describe, expect, it } from "bun:test";
-import { buildArgs, loadModel } from "../../src/server/llamaServer";
+import { describe, expect, it, spyOn } from "bun:test";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { buildArgs, getServerStatus, loadModel } from "../../src/server/llamaServer";
 import { getAppDataDir } from "../../src/server/persistence/db";
 import type { ModelLoadConfig } from "../../src/shared/types";
 
@@ -34,7 +37,6 @@ describe("llamaServer", () => {
   it("buildArgs constructs correct flags array", () => {
     const config: ModelLoadConfig = {
       ...baseConfig,
-      chatTemplateFile: "/tmp/custom.jinja",
     };
 
     const args = buildArgs(config, 12345);
@@ -48,10 +50,12 @@ describe("llamaServer", () => {
     expect(args).toContain("--n-gpu-layers");
     expect(args[args.indexOf("--n-gpu-layers") + 1]).toBe("33");
 
-    expect(args).toContain("--mlock");
+    expect(args).toContain("--load-mode");
+    expect(args[args.indexOf("--load-mode") + 1]).toBe("mmap+mlock");
+    expect(args).not.toContain("--mlock");
     expect(args).not.toContain("--no-mmap");
-    expect(args).toContain("--parallel");
-    expect(args).toContain("--jinja");
+    expect(args).not.toContain("--parallel");
+    expect(args).not.toContain("--jinja");
     expect(args).toContain("--cont-batching");
     expect(args).toContain("--flash-attn");
     expect(args[args.indexOf("--flash-attn") + 1]).toBe("on");
@@ -61,8 +65,7 @@ describe("llamaServer", () => {
     expect(args[args.indexOf("--cache-reuse") + 1]).toBe("0");
     expect(args).toContain("--ctx-checkpoints");
     expect(args[args.indexOf("--ctx-checkpoints") + 1]).toBe("32");
-    expect(args).toContain("--chat-template-file");
-    expect(args[args.indexOf("--chat-template-file") + 1]).toBe("/tmp/custom.jinja");
+    expect(args).not.toContain("--chat-template-file");
     expect(args).toContain("--media-path");
     expect(args[args.indexOf("--media-path") + 1]).toBe(getAppDataDir());
   });
@@ -145,7 +148,7 @@ describe("llamaServer", () => {
     expect(args).not.toContain("--spec-draft-model");
   });
 
-  it("adds image token load flags when configured", () => {
+  it("adds image-max-tokens when configured and omits image-min-tokens by default", () => {
     const config: ModelLoadConfig = {
       ...baseConfig,
       gpuLayers: 0,
@@ -163,13 +166,34 @@ describe("llamaServer", () => {
 
     const args = buildArgs(config, 8080);
 
-    expect(args).toContain("--image-min-tokens");
-    expect(args[args.indexOf("--image-min-tokens") + 1]).toBe("70");
+    expect(args).not.toContain("--image-min-tokens");
     expect(args).toContain("--image-max-tokens");
     expect(args[args.indexOf("--image-max-tokens") + 1]).toBe("560");
+    expect(args[args.indexOf("--ubatch-size") + 1]).toBe("1120");
+    expect(Number(args[args.indexOf("--batch-size") + 1])).toBeGreaterThanOrEqual(1120);
   });
 
-  it("always includes the fixed image minimum token flag", () => {
+  it("emits image-min-tokens only when set alongside image-max-tokens", () => {
+    const withBoth: ModelLoadConfig = {
+      ...baseConfig,
+      imageMaxTokens: 560,
+      imageMinTokens: 70,
+    };
+    const withMinOnly: ModelLoadConfig = {
+      ...baseConfig,
+      imageMinTokens: 70,
+    };
+
+    const bothArgs = buildArgs(withBoth, 8080);
+    const minOnlyArgs = buildArgs(withMinOnly, 8080);
+
+    expect(bothArgs).toContain("--image-min-tokens");
+    expect(bothArgs[bothArgs.indexOf("--image-min-tokens") + 1]).toBe("70");
+    expect(minOnlyArgs).not.toContain("--image-min-tokens");
+    expect(minOnlyArgs).not.toContain("--image-max-tokens");
+  });
+
+  it("does not emit image-min-tokens when no image budget is configured", () => {
     const config: ModelLoadConfig = {
       ...baseConfig,
       gpuLayers: 0,
@@ -186,14 +210,37 @@ describe("llamaServer", () => {
 
     const args = buildArgs(config, 8080);
 
-    expect(args).toContain("--image-min-tokens");
-    expect(args[args.indexOf("--image-min-tokens") + 1]).toBe("70");
+    expect(args).not.toContain("--image-min-tokens");
     expect(args).not.toContain("--image-max-tokens");
+    expect(args[args.indexOf("--ubatch-size") + 1]).toBe("1");
   });
 
   it("rejects invalid llama-server port ranges before spawning", async () => {
     await expect(loadModel(baseConfig, "/missing/llama-server", 13000, 12000)).rejects.toThrow(
       "minimum exceeds maximum",
     );
+  });
+
+  it("resets status to idle when load fails after status is set to loading", async () => {
+    const dummyBin = path.join(os.tmpdir(), `llamaforge-dummy-bin-${Date.now()}`);
+    await Bun.write(dummyBin, "not-an-executable");
+    if (process.platform !== "win32") {
+      await fs.chmod(dummyBin, 0o755);
+    }
+    const writeSpy = spyOn(Bun, "write").mockRejectedValue(new Error("disk full"));
+    try {
+      await expect(
+        loadModel(
+          { ...baseConfig, chatTemplateContent: "{{ bos_token }}" },
+          dummyBin,
+          18000,
+          18010,
+        ),
+      ).rejects.toThrow("disk full");
+      expect(getServerStatus().status).toBe("idle");
+    } finally {
+      writeSpy.mockRestore();
+      await fs.unlink(dummyBin).catch(() => undefined);
+    }
   });
 });

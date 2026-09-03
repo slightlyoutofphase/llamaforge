@@ -72,7 +72,7 @@ export function addConnection(ws: ServerWebSocket<unknown>): void {
   connections.add(ws);
   // Send buffered logs to new connection
   for (const log of logBuffer) {
-    ws.send(JSON.stringify(log));
+    sendPayload(ws, JSON.stringify(log));
   }
   lastPongTimes.set(ws, Date.now());
   startHeartbeat();
@@ -100,6 +100,44 @@ export function recordPong(ws: ServerWebSocket<unknown>): void {
 }
 
 /**
+ * Returns the number of currently registered WebSocket connections.
+ *
+ * @returns Active connection count.
+ */
+export function getConnectionCount(): number {
+  return connections.size;
+}
+
+/**
+ * Sends a JSON payload to a WebSocket client, dropping the socket on backpressure or send failure.
+ *
+ * @param ws - Target WebSocket.
+ * @param data - Serialized frame text.
+ * @returns `true` when the send was accepted.
+ */
+function sendPayload(ws: ServerWebSocket<unknown>, data: string): boolean {
+  try {
+    const result = ws.send(data);
+    if (typeof result === "number" && result < 0) {
+      connections.delete(ws);
+      stopHeartbeatIfEmpty();
+      try {
+        ws.close(1013, "Backpressure");
+      } catch {
+        // Connection already dead
+      }
+      return false;
+    }
+    return true;
+  } catch (err) {
+    connections.delete(ws);
+    stopHeartbeatIfEmpty();
+    logWarn("Failed to send frame to websocket, removing connection:", err);
+    return false;
+  }
+}
+
+/**
  * Broadcasts a standard WebSocket frame to all connected clients.
  *
  * @param frame - The {@link WsFrame} to stringify and send.
@@ -108,12 +146,7 @@ export function recordPong(ws: ServerWebSocket<unknown>): void {
 export function broadcast(frame: WsFrame): void {
   const data = JSON.stringify(frame);
   for (const ws of Array.from(connections)) {
-    try {
-      ws.send(data);
-    } catch (err) {
-      connections.delete(ws);
-      logWarn("Failed to send frame to websocket, removing connection:", err);
-    }
+    sendPayload(ws, data);
   }
 }
 

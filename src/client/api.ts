@@ -4,7 +4,7 @@
  * All functions return promises and throw Errors on non-OK responses.
  */
 
-import type { InferencePreset, LoadPreset, SystemPromptPreset } from "../shared/types";
+import type { AppSettings, InferencePreset, LoadPreset, SystemPromptPreset } from "../shared/types";
 import { request } from "./http";
 
 /**
@@ -245,12 +245,9 @@ export async function deleteChat(id: string): Promise<void> {
  *
  * @param id - The source chat ID.
  * @param messageId - The message ID to branch from.
- * @returns A promise resolving to the new {@link ChatSession}.
+ * @returns A promise resolving to the new chat identifier.
  */
-export async function branchChat(
-  id: string,
-  messageId: string,
-): Promise<import("../shared/types").ChatSession> {
+export async function branchChat(id: string, messageId: string): Promise<{ id: string }> {
   const res = await request(`/api/chats/${id}/branch`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -301,8 +298,7 @@ export async function exportChat(
     body: JSON.stringify({ format }),
   });
   if (!res.ok) throw new Error("Failed to export chat");
-  const data = await res.json();
-  return data.content;
+  return res.text();
 }
 
 /**
@@ -384,7 +380,7 @@ export async function deleteSystemPreset(id: string): Promise<void> {
  *
  * @returns A promise resolving to the settings object.
  */
-export async function fetchSettings(): Promise<any> {
+export async function fetchSettings(): Promise<AppSettings> {
   const res = await fetch("/api/settings");
   if (!res.ok) throw new Error("Failed to fetch settings");
   return res.json();
@@ -396,7 +392,9 @@ export async function fetchSettings(): Promise<any> {
  * @param updates - Partial settings object.
  * @returns A promise that resolves when complete.
  */
-export async function updateSettings(updates: any): Promise<void> {
+export async function updateSettings(
+  updates: Partial<import("../shared/types").AppSettings>,
+): Promise<void> {
   const res = await request("/api/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

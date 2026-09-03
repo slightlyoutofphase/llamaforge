@@ -29,23 +29,21 @@ import { useUiStore } from "./uiStore";
  * @returns React functional component.
  */
 export default function App() {
-  const {
-    connectWs,
-    disconnectWs,
-    fetchHardware,
-    fetchModels,
-    fetchServerStatus,
-    serverStatus,
-    isConnected,
-    errorMessage,
-    errorActionLabel,
-    errorAction,
-    clearError,
-    notifications,
-    removeNotification,
-    unloadModel,
-    currentChatId,
-  } = useAppStore();
+  const connectWs = useAppStore((s) => s.connectWs);
+  const disconnectWs = useAppStore((s) => s.disconnectWs);
+  const fetchHardware = useAppStore((s) => s.fetchHardware);
+  const fetchModels = useAppStore((s) => s.fetchModels);
+  const fetchServerStatus = useAppStore((s) => s.fetchServerStatus);
+  const serverStatus = useAppStore((s) => s.serverStatus);
+  const isConnected = useAppStore((s) => s.isConnected);
+  const errorMessage = useAppStore((s) => s.errorMessage);
+  const errorActionLabel = useAppStore((s) => s.errorActionLabel);
+  const errorAction = useAppStore((s) => s.errorAction);
+  const clearError = useAppStore((s) => s.clearError);
+  const notifications = useAppStore((s) => s.notifications);
+  const removeNotification = useAppStore((s) => s.removeNotification);
+  const unloadModel = useAppStore((s) => s.unloadModel);
+  const currentChatId = useAppStore((s) => s.currentChatId);
   const { setRightPanelView, rightPanelView, toggleConsole, isConsoleVisible } = useUiStore();
   const { data: settings } = useSettings();
   const createChatMut = useCreateChat();
@@ -154,10 +152,17 @@ export default function App() {
     const handlePresetsInvalidate = () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.presetsLoad() });
       queryClient.invalidateQueries({ queryKey: queryKeys.presetsInference() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.presetsSystem() });
+    };
+    const handleChatsInvalidate = () => {
+      queryClient.invalidateQueries({ queryKey: ["chats"] });
     };
     window.addEventListener("llamaforge:presets-invalidate", handlePresetsInvalidate);
-    return () =>
+    window.addEventListener("llamaforge:chats-invalidate", handleChatsInvalidate);
+    return () => {
       window.removeEventListener("llamaforge:presets-invalidate", handlePresetsInvalidate);
+      window.removeEventListener("llamaforge:chats-invalidate", handleChatsInvalidate);
+    };
   }, [queryClient]);
 
   /**

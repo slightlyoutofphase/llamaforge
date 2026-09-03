@@ -58,7 +58,7 @@ function buildLoadRequest(loadPreset: LoadPreset): {
   const config: ModelLoadConfig = {
     ...loadPreset.config,
     ...(loadPreset.chatTemplateOverride
-      ? { chatTemplateFile: loadPreset.chatTemplateOverride }
+      ? { chatTemplateContent: loadPreset.chatTemplateOverride }
       : {}),
   };
 

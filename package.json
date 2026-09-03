@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "//": "typescript is the 6.x compiler/API used by tsc, eslint, and typedoc. Do not alias it to @typescript/typescript6: that remaps @typescript/old onto itself and breaks eslint. @typescript/native is the unused TS 7 native compiler (tsgo).",
   "scripts": {
     "dev": "concurrently \"bun run src/server/index.ts\" \"vite\"",
     "build": "vite build && bun build src/server/index.ts --target bun --outdir dist/server",
@@ -11,6 +12,7 @@
     "test": "bun test",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit --project tsconfig.json && tsc --noEmit --project tsconfig.server.json",
+    "typecheck:tests": "tsc --noEmit --project tsconfig.test.json",
     "lint": "npm run typecheck && biome lint . --max-diagnostics 500 && eslint",
     "clean": "bun run scripts/clean.mjs",
     "docs": "typedoc"
@@ -26,7 +28,6 @@
     "@tanstack/react-router": "^1.170.29",
     "@uiw/react-codemirror": "^4.25.11",
     "@vitejs/plugin-react": "~6.0.5",
-    "bun-plugin-tailwind": "^0.1.2",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
     "dotenv": "^17.4.2",
@@ -72,7 +73,7 @@
     "typedoc": "^0.28.20",
     "typedoc-plugin-markdown": "^4.12.0",
     "@typescript/native": "npm:typescript@~7.0.2",
-    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript": "~6.0.2",
     "vite": "~8.2.1"
   },
   "allowScripts": {

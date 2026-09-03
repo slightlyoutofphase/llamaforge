@@ -3,14 +3,14 @@
  * Provides an inline model selector for choosing and loading models.
  */
 
-import type { LoadModelRequest, ModelEntry, ModelLoadConfig } from "../shared/types";
+import type { ChatMessage, LoadModelRequest, ModelEntry, ModelLoadConfig } from "../shared/types";
 import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { ChevronDown, Cpu, Database, Loader2, Play, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { MultimodalGuardModal } from "./components/sidebar/MultimodalGuardModal";
 import { logError } from "./logger";
-import { useCreateChat, useLoadPresets } from "./queries";
+import { useCreateChat, useLoadPresets, useSettings } from "./queries";
 import { useAppStore } from "./store";
 
 /**
@@ -20,19 +20,18 @@ import { useAppStore } from "./store";
  * @returns The rendered React element.
  */
 export function ModelSelector() {
-  const {
-    models,
-    loadModel,
-    unloadModel,
-    serverStatus,
-    loadedModel,
-    messages,
-    isGenerating,
-    loadProgress,
-    loadProgressPhase,
-    loadProgressDetail,
-  } = useAppStore();
+  const models = useAppStore((s) => s.models);
+  const loadModel = useAppStore((s) => s.loadModel);
+  const unloadModel = useAppStore((s) => s.unloadModel);
+  const serverStatus = useAppStore((s) => s.serverStatus);
+  const loadedModel = useAppStore((s) => s.loadedModel);
+  const messages = useAppStore((s) => s.messages);
+  const isGenerating = useAppStore((s) => s.isGenerating);
+  const loadProgress = useAppStore((s) => s.loadProgress);
+  const loadProgressPhase = useAppStore((s) => s.loadProgressPhase);
+  const loadProgressDetail = useAppStore((s) => s.loadProgressDetail);
   const { data: loadPresets } = useLoadPresets();
+  const { data: settings } = useSettings();
   const createChatMut = useCreateChat();
   const navigate = useNavigate();
 
@@ -50,7 +49,7 @@ export function ModelSelector() {
 
   const [guardModal, setGuardModal] = useState<{
     reason: "vision" | "audio" | "both";
-    messages: any[];
+    messages: ChatMessage[];
     configToLoad: LoadModelRequest;
   } | null>(null);
   const [isCreatingChat, setIsCreatingChat] = useState(false);
@@ -88,7 +87,7 @@ export function ModelSelector() {
           microBatchSize: 512,
           ropeScaling: "none",
           ropeFreqBase: 0,
-          ropeFreqScale: 1.0,
+          ropeFreqScale: 0,
           kvCacheTypeK: "f16",
           kvCacheTypeV: "f16",
           mlock: true,
@@ -124,7 +123,7 @@ export function ModelSelector() {
       preset.chatTemplateOverride.length > 0 &&
       preset.chatTemplateOverride !== defaultTemplate
     ) {
-      request.chatTemplateFile = preset.chatTemplateOverride;
+      request.chatTemplateContent = preset.chatTemplateOverride;
     }
 
     // Check for multimodal incompatibility
@@ -270,7 +269,10 @@ export function ModelSelector() {
           {models.filter((m) => !m.metadata?.isDraftModel).length === 0 ? (
             <div className="flex flex-col items-center justify-center py-24 text-[var(--color-text-muted)] bg-[var(--color-surface)] border border-[var(--color-border)] rounded-2xl border-dashed">
               <Database size={48} className="opacity-30 mb-4" />
-              <p className="text-sm font-mono">No localized GGUF structures detected in ~/Models</p>
+              <p className="text-sm font-mono">
+                No localized GGUF structures detected in{" "}
+                {settings?.modelsPath || "the configured models directory"}
+              </p>
             </div>
           ) : (
             models

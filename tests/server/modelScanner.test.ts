@@ -29,8 +29,6 @@ const baseMockMetadata = {
   defaultMinP: 0.05,
   defaultRepeatPenalty: 1.1,
   chatTemplate: undefined,
-  bosToken: undefined,
-  eosToken: undefined,
   isDraftModel: false,
 };
 
@@ -168,5 +166,33 @@ describe("modelScanner", () => {
     expect(entries[0]?.primaryPath.includes("model-7b-q4.gguf")).toBeTrue();
 
     parseSpy.mockImplementation(originalImpl);
+  });
+
+  it("keeps qwen in companion keys so Qwen models do not collide with unrelated mmprojs", async () => {
+    const qwenRoot = path.join(tmpDir, "QwenPublisher", "VL-Chat");
+    await fs.mkdir(qwenRoot, { recursive: true });
+    await Bun.write(path.join(qwenRoot, "Qwen-VL-Chat-Q4_K_M.gguf"), "mock");
+    await Bun.write(path.join(qwenRoot, "Qwen-VL-Chat-mmproj.gguf"), "mock");
+    await Bun.write(path.join(qwenRoot, "a-mmproj.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "QwenPublisher"));
+    const qwen = entries.find((e) => e.primaryPath.includes("Qwen-VL-Chat-Q4_K_M.gguf"));
+    expect(qwen).toBeDefined();
+    expect(qwen?.mmProjPath?.includes("Qwen-VL-Chat-mmproj.gguf")).toBeTrue();
+    expect(qwen?.mmProjPath?.endsWith("a-mmproj.gguf")).toBeFalse();
+  });
+
+  it("links draft models by companion key instead of directory alone", async () => {
+    const draftRoot = path.join(tmpDir, "DraftAmbiguous", "Family");
+    await fs.mkdir(draftRoot, { recursive: true });
+    await Bun.write(path.join(draftRoot, "alpha-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(draftRoot, "alpha-7b-q4-assistant.gguf"), "mock");
+    await Bun.write(path.join(draftRoot, "unrelated-eagle3.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "DraftAmbiguous"));
+    const mainModel = entries.find((e) => e.primaryPath.includes("alpha-7b-q4.gguf"));
+    expect(entries).toHaveLength(1);
+    expect(mainModel?.draftModelPath?.includes("alpha-7b-q4-assistant.gguf")).toBeTrue();
+    expect(mainModel?.draftModelPath?.includes("unrelated-eagle3.gguf")).toBeFalse();
   });
 });

@@ -20,10 +20,74 @@ type ResolvedAttachmentText = {
   truncated: boolean;
 };
 
-const _pdfTextCache = new Map<string, ResolvedAttachmentText>();
-const _PDF_CACHE_MAX_SIZE = 50;
-// M8 fix: max PDF file size for text extraction (50MB) to prevent OOM on low-memory machines
+const _attachmentTextCache = new Map<string, ResolvedAttachmentText>();
+const _ATTACHMENT_CACHE_MAX_SIZE = 50;
 const MAX_PDF_EXTRACTION_BYTES = 50 * 1024 * 1024;
+
+function rememberAttachmentText(
+  key: string,
+  value: ResolvedAttachmentText,
+): ResolvedAttachmentText {
+  _attachmentTextCache.set(key, value);
+  if (_attachmentTextCache.size > _ATTACHMENT_CACHE_MAX_SIZE) {
+    const firstKey = _attachmentTextCache.keys().next().value;
+    if (firstKey) _attachmentTextCache.delete(firstKey);
+  }
+  return value;
+}
+
+/**
+ * Infers a MIME type from magic bytes, falling back to the client-supplied type.
+ *
+ * @param bytes - File prefix used for signature detection.
+ * @param fallback - Client-supplied MIME type.
+ * @returns Detected or fallback MIME type.
+ */
+function detectMimeFromMagic(bytes: Uint8Array, fallback: string): string {
+  if (bytes.length >= 4) {
+    if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+      return "application/pdf";
+    }
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+      return "image/png";
+    }
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+      return "image/jpeg";
+    }
+    if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) {
+      return "image/gif";
+    }
+    if (
+      bytes.length >= 12 &&
+      bytes[0] === 0x52 &&
+      bytes[1] === 0x49 &&
+      bytes[2] === 0x46 &&
+      bytes[3] === 0x46
+    ) {
+      const brand = String.fromCharCode(
+        bytes[8] ?? 0,
+        bytes[9] ?? 0,
+        bytes[10] ?? 0,
+        bytes[11] ?? 0,
+      );
+      if (brand === "WEBP") return "image/webp";
+      if (brand === "WAVE") return "audio/wav";
+    }
+    if (
+      bytes.length >= 8 &&
+      bytes[4] === 0x66 &&
+      bytes[5] === 0x74 &&
+      bytes[6] === 0x79 &&
+      bytes[7] === 0x70
+    ) {
+      return "video/mp4";
+    }
+    if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+      return "video/webm";
+    }
+  }
+  return fallback || "application/octet-stream";
+}
 
 /**
  * Normalizes an attachment path stored in persistence into a safe POSIX-relative path.
@@ -212,9 +276,11 @@ export async function processUpload(
   chatId: string,
   messageId: string,
   fileName: string,
-  mimeType: string,
+  suppliedMimeType: string,
   buffer: ArrayBuffer,
 ): Promise<ProcessedAttachment> {
+  const bytes = new Uint8Array(buffer);
+  const mimeType = detectMimeFromMagic(bytes, suppliedMimeType);
   const appData = resolveAppDataPath("attachments", chatId, messageId);
   await fs.mkdir(appData, { recursive: true });
 
@@ -222,7 +288,7 @@ export async function processUpload(
   const safeName = Bun.randomUUIDv7() + ext;
   const filePath = path.join(appData, safeName);
 
-  await fs.writeFile(filePath, Buffer.from(buffer));
+  await Bun.write(filePath, buffer);
 
   const relPath = path.relative(getAppDataDir(), filePath).split(path.sep).join("/");
 
@@ -254,7 +320,9 @@ export async function processUpload(
         for (let i = 1; i <= doc.numPages; i++) {
           const page = await doc.getPage(i);
           const content = await page.getTextContent();
-          fullText += `${content.items.map((item: any) => item.str).join(" ")}\n`;
+          fullText += `${content.items
+            .map((item) => ("str" in item && typeof item.str === "string" ? item.str : ""))
+            .join(" ")}\n`;
         }
         assignExtractedText(attachment, fullText);
       } catch (e) {
@@ -271,7 +339,7 @@ export async function processUpload(
     !mimeType.startsWith("video/")
   ) {
     // text, markdown, csv, json, xml, code...
-    assignExtractedText(attachment, Buffer.from(buffer).toString("utf-8"));
+    assignExtractedText(attachment, new TextDecoder("utf-8").decode(buffer));
   }
 
   // NOTE: We no longer store base64Data in the attachment object permanently to save RAM.
@@ -303,15 +371,21 @@ export async function processUpload(
  * @param metadata - Projecting boundaries like supported capabilities via the server config.
  * @returns The complex content parts array or a simple string if no supported attachments exist.
  */
+type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } }
+  | { type: "input_audio"; input_audio: { url: string } }
+  | { type: "input_video"; input_video: { url: string } };
+
 export async function buildContentParts(
   text: string,
   attachments: Attachment[],
   metadata?: GgufDisplayMetadata,
-): Promise<any[] | string> {
+): Promise<ChatContentPart[] | string> {
   // Multimodal guard
 
   let finalString = "";
-  const parts: any[] = [];
+  const parts: ChatContentPart[] = [];
   const extractedTextAttachments: ProcessedAttachment[] = [];
 
   /**
@@ -346,7 +420,7 @@ export async function buildContentParts(
       const absPath = resolveStoredAttachmentPath(attachment.filePath);
       if (!absPath) return undefined;
       // S8 fix: check in-memory cache before re-parsing
-      const cached = _pdfTextCache.get(absPath);
+      const cached = _attachmentTextCache.get(absPath);
       if (cached !== undefined) return cached;
       // M8 fix: check file size before extraction to prevent OOM
       try {
@@ -355,7 +429,7 @@ export async function buildContentParts(
           const sizeMsg = clampExtractedText(
             `[PDF text extraction skipped: file size (${(fileSize / (1024 * 1024)).toFixed(1)}MB) exceeds the ${MAX_PDF_EXTRACTION_BYTES / (1024 * 1024)}MB extraction limit]`,
           );
-          _pdfTextCache.set(absPath, sizeMsg);
+          rememberAttachmentText(absPath, sizeMsg);
           return sizeMsg;
         }
       } catch {
@@ -369,15 +443,13 @@ export async function buildContentParts(
         for (let i = 1; i <= doc.numPages; i++) {
           const page = await doc.getPage(i);
           const content = await page.getTextContent();
-          fullText += `${content.items.map((item: any) => item.str).join(" ")}\n`;
+          fullText += `${content.items
+            .map((item) => ("str" in item && typeof item.str === "string" ? item.str : ""))
+            .join(" ")}\n`;
         }
         const clamped = clampExtractedText(fullText);
         // S8 fix: store in cache with LRU eviction
-        _pdfTextCache.set(absPath, clamped);
-        if (_pdfTextCache.size > _PDF_CACHE_MAX_SIZE) {
-          const firstKey = _pdfTextCache.keys().next().value;
-          if (firstKey) _pdfTextCache.delete(firstKey);
-        }
+        rememberAttachmentText(absPath, clamped);
         return clamped;
       } catch (e) {
         logWarn("PDF extraction failed", e);
@@ -392,8 +464,11 @@ export async function buildContentParts(
     ) {
       const absPath = resolveStoredAttachmentPath(attachment.filePath);
       if (!absPath) return undefined;
+      const cached = _attachmentTextCache.get(absPath);
+      if (cached !== undefined) return cached;
       try {
-        return clampExtractedText(await Bun.file(absPath).text());
+        const extracted = clampExtractedText(await Bun.file(absPath).text());
+        return rememberAttachmentText(absPath, extracted);
       } catch (e) {
         logWarn(`Failed reading attachment file: ${attachment.filePath}`, e);
       }
@@ -441,7 +516,7 @@ export async function buildContentParts(
         }
         const isAudio = a.mimeType.startsWith("audio/");
         const isVideo = a.mimeType.startsWith("video/");
-        const mediaPart: any = isAudio
+        const mediaPart: ChatContentPart = isAudio
           ? { type: "input_audio", input_audio: { url } }
           : isVideo
             ? { type: "input_video", input_video: { url } }
