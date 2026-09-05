@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { restoreBunNativeWebGlobals } from "../happy-setup";
 import { toApiToolCalls } from "../../src/shared/toolCalls";
 
 const hasRealGemma4 =
@@ -51,6 +52,7 @@ describeGemma4("Gemma 4 live tool round trip", () => {
       const { defaultBatchingForImageTokens, DEFAULT_IMAGE_MAX_TOKENS } =
         await import("../../src/shared/imageTokens");
 
+      restoreBunNativeWebGlobals();
       await initDb(":memory:");
       try {
         await saveSettings({

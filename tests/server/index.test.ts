@@ -24,6 +24,7 @@ const productionSettings: AppSettings = {
   chatBubbleStyle: "bubble",
   autonameEnabled: true,
   autoloadLastModel: false,
+  includeVideoAudio: false,
   llamaPortRangeMin: 12000,
   llamaPortRangeMax: 13000,
   requestTimeoutSeconds: 60,

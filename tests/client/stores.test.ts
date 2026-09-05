@@ -132,11 +132,113 @@ describe("stores logic", () => {
     expect(capturedInit?.body).toBeInstanceOf(FormData);
     const body = capturedInit?.body as FormData;
     expect(body.get("content")).toBe("Hello world");
+    expect(body.get("expectedHeadMessageId")).toBe("");
     const uploadedFile = body.getAll("file")[0];
     expect(uploadedFile).toBeInstanceOf(File);
     expect((uploadedFile as File).name).toBe(file.name);
     expect((uploadedFile as File).size).toBe(file.size);
     expect(await (uploadedFile as File).text()).toBe("hello");
+
+    globalThis.fetch = originalFetch;
+  });
+
+  it("sendMessage refuses to send while chat history is syncing", async () => {
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [],
+        isGenerating: false,
+        isSyncingHistory: true,
+      });
+    });
+
+    await act(async () => {
+      await expect(useAppStore.getState().sendMessage("Hello")).rejects.toThrow(
+        "Please wait for the chat history to finish updating before sending.",
+      );
+    });
+
+    expect(useAppStore.getState().messages).toHaveLength(0);
+    useAppStore.setState({ isSyncingHistory: false });
+  });
+
+  it("sendMessage reloads the transcript when the server reports a head mismatch", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/chats/chat-1/messages") {
+        return new Response(
+          JSON.stringify({
+            error: "Chat history on the server does not match this window.",
+            code: "TRANSCRIPT_MISMATCH",
+            lastMessageId: "old-user",
+          }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url === "/api/chats/chat-1" || url.startsWith("/api/chats/chat-1?")) {
+        return new Response(
+          JSON.stringify({
+            id: "chat-1",
+            name: "AudioTest2",
+            messages: [
+              {
+                id: "old-user",
+                chatId: "chat-1",
+                role: "user",
+                content: "old video turn",
+                rawContent: "old video turn",
+                position: 0,
+                createdAt: 1,
+              },
+              {
+                id: "old-asst",
+                chatId: "chat-1",
+                role: "assistant",
+                content: "old reply",
+                rawContent: "old reply",
+                position: 1,
+                createdAt: 2,
+              },
+            ],
+            totalMessages: 2,
+            systemPresetId: null,
+            inferencePresetId: null,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (typeof url === "string" && url.endsWith("/context-usage")) {
+        return new Response(JSON.stringify({ usedTokens: 0, contextSize: null }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+    globalThis.fetch = fetchMock;
+
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [],
+        isGenerating: false,
+        isWaitingForToolApproval: false,
+        isSyncingHistory: false,
+        currentChatMetadata: { name: "AudioTest2", systemPresetId: null, inferencePresetId: null },
+      });
+    });
+
+    await act(async () => {
+      await expect(
+        useAppStore.getState().sendMessage("Transcribe the audio attachment."),
+      ).rejects.toThrow("Chat history was out of date and has been reloaded. Please send again.");
+    });
+
+    const state = useAppStore.getState();
+    expect(state.messages.map((message) => message.id)).toEqual(["old-user", "old-asst"]);
+    expect(state.messages.some((message) => message.id.startsWith("temp-"))).toBe(false);
+    expect(state.isGenerating).toBe(false);
 
     globalThis.fetch = originalFetch;
   });
@@ -314,6 +416,12 @@ describe("stores logic", () => {
       if (url === "/api/chats/chat-a/messages") {
         sentMessageUrls.push(url);
         return new Response(null, { status: 200 });
+      }
+      if (url.endsWith("/context-usage")) {
+        return new Response(JSON.stringify({ usedTokens: 0, contextSize: null }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
       }
       throw new Error(`Unexpected fetch: ${url} ${init?.method ?? "GET"}`);
     });
@@ -621,6 +729,226 @@ describe("stores logic", () => {
     });
 
     expect(sentFrames.some((frame) => frame.includes('"type":"cancel"'))).toBe(true);
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  it("does not recreate a deleted assistant from a late token frame", () => {
+    const originalWebSocket = globalThis.WebSocket;
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 3;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+      send() {}
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [
+          {
+            id: "u1",
+            chatId: "chat-1",
+            role: "user",
+            content: "hello",
+            rawContent: "hello",
+            position: 0,
+            createdAt: 1,
+          },
+        ],
+        isGenerating: false,
+        isSyncingHistory: false,
+        currentGenerationId: null,
+      });
+      useAppStore.getState().connectWs();
+    });
+
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "token",
+          chatId: "chat-1",
+          messageId: "deleted-assistant",
+          generationId: "gen-old",
+          delta: "ghost",
+        }),
+      });
+    });
+
+    expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(["u1"]);
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  it("applies thinking tokens that arrive before the assistant placeholder during generate", () => {
+    const originalWebSocket = globalThis.WebSocket;
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 3;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+      send() {}
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [
+          {
+            id: "u2",
+            chatId: "chat-1",
+            role: "user",
+            content: "edited",
+            rawContent: "edited",
+            position: 0,
+            createdAt: 1,
+          },
+        ],
+        isGenerating: true,
+        isSyncingHistory: false,
+        currentGenerationId: null,
+      });
+      useAppStore.getState().connectWs();
+    });
+
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "token",
+          chatId: "chat-1",
+          messageId: "a-regen",
+          generationId: "gen-edit",
+          delta: "",
+          thinkingDelta: "plan",
+        }),
+      });
+    });
+
+    const assistant = useAppStore.getState().messages.find((message) => message.id === "a-regen");
+    expect(assistant?.thinkingContent).toBe("plan");
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  it("creates a missing assistant from stop while generating, but not after history sync", () => {
+    const originalWebSocket = globalThis.WebSocket;
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 3;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+      send() {}
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    const emptyTimings = {
+      tokens_cached: 0,
+      tokens_evaluated: 0,
+      predicted_ms: 0,
+      predicted_n: 0,
+      predicted_per_second: 0,
+      predicted_per_token_ms: 0,
+      prompt_ms: 0,
+      prompt_n: 0,
+      prompt_per_second: 0,
+      prompt_per_token_ms: 0,
+    };
+
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [],
+        isGenerating: true,
+        isSyncingHistory: false,
+      });
+      useAppStore.getState().connectWs();
+    });
+
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "stop",
+          chatId: "chat-1",
+          messageId: "a-empty",
+          stopReason: "eos",
+          timings: emptyTimings,
+          fullContent: "",
+        }),
+      });
+    });
+
+    expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(["a-empty"]);
+
+    act(() => {
+      useAppStore.setState({
+        messages: [
+          {
+            id: "u1",
+            chatId: "chat-1",
+            role: "user",
+            content: "hello",
+            rawContent: "hello",
+            position: 0,
+            createdAt: 1,
+          },
+        ],
+        isGenerating: false,
+        isSyncingHistory: true,
+      });
+    });
+
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "stop",
+          chatId: "chat-1",
+          messageId: "ghost-stop",
+          stopReason: "eos",
+          timings: emptyTimings,
+          fullContent: "nope",
+        }),
+      });
+    });
+
+    expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(["u1"]);
     globalThis.WebSocket = originalWebSocket;
   });
 });

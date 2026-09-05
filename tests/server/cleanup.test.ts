@@ -8,8 +8,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { cleanupOrphanedAttachments } from "../../src/server/persistence/cleanup";
-import { getDb, initDb, resetDb } from "../../src/server/persistence/db";
 import * as dbModule from "../../src/server/persistence/db";
+import { getDb, initDb, resetDb } from "../../src/server/persistence/db";
 
 describe("cleanupOrphanedAttachments", () => {
   let tmpDir: string;
@@ -68,6 +68,44 @@ describe("cleanupOrphanedAttachments", () => {
     const files = await fs.readdir(msgDir);
     expect(files).toContain("referenced.txt");
     expect(files).not.toContain("orphaned.txt");
+  });
+
+  it("keeps extracted video audio sidecars when the parent video is still referenced", async () => {
+    const db = getDb();
+    const chatDir = path.join(rootDir, "video-chat");
+    const msgDir = path.join(chatDir, "msg-v");
+    await fs.mkdir(msgDir, { recursive: true });
+
+    const videoRel = "attachments/video-chat/msg-v/clip.mp4";
+    const wavRel = "attachments/video-chat/msg-v/clip.extracted-audio.wav";
+    const markerRel = "attachments/video-chat/msg-v/clip.no-audio";
+    const strayWavRel = "attachments/video-chat/msg-v/other.extracted-audio.wav";
+
+    await Bun.write(path.join(tmpDir, videoRel), "video");
+    await Bun.write(path.join(tmpDir, wavRel), "wav");
+    await Bun.write(path.join(tmpDir, markerRel), "");
+    await Bun.write(path.join(tmpDir, strayWavRel), "stray");
+
+    db.prepare("INSERT INTO chats (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)").run(
+      "video-chat",
+      "Video",
+      Date.now(),
+      Date.now(),
+    );
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, role, content, raw_content, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run("msg-v", "video-chat", "user", "watch", "watch", 0, Date.now());
+    db.prepare(
+      "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("att-v", "msg-v", "video/mp4", videoRel, "clip.mp4", Date.now());
+
+    await cleanupOrphanedAttachments();
+
+    const files = await fs.readdir(msgDir);
+    expect(files).toContain("clip.mp4");
+    expect(files).toContain("clip.extracted-audio.wav");
+    expect(files).toContain("clip.no-audio");
+    expect(files).not.toContain("other.extracted-audio.wav");
   });
 
   it("removes empty chat directories", async () => {

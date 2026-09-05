@@ -4,32 +4,43 @@
  * Handles thinking tag splitting and prompt cache bookkeeping.
  */
 
-import type { ChatMessage, MessageMetrics } from "../shared/types";
+import { createDefaultInferenceSampling } from "../shared/defaults";
+import { isExtractedVideoAudioAttachment } from "../shared/extractedAudio";
+import { buildMessageMetrics } from "../shared/generationMetrics";
+import { resolveInferencePreset } from "../shared/inferencePresetResolve";
 import { parseToolCallsJson, toApiToolCalls } from "../shared/toolCalls";
+import type { ChatMessage } from "../shared/types";
 import { triggerAutoname } from "./autoname";
-import { detectThinkingConfig, parseThinkTags } from "./chatTemplateEngine";
+import {
+  applyAssistantStreamDelta,
+  type AssistantStreamState,
+  detectThinkingConfig,
+  inferNativeReasoningReuse,
+  reconstructPreservedAssistantContent,
+  shouldReconstructPreservedAssistantContent,
+  shouldSendAssistantReasoningContent,
+} from "./chatTemplateEngine";
+import { getActiveGenerations } from "./generationRegistry";
 import {
   getActiveThinkingTagOverride,
   getProc,
   getRecentServerLogs,
   getServerStatus,
 } from "./llamaServer";
-import { logDebug, logError, logInfo, logWarn } from "./logger";
+import { logDebug, logError, logInfo, logVerbose, logWarn } from "./logger";
 import {
   mergeExtractedAttachmentText,
-  processUpload,
   type ProcessedAttachment,
+  processUpload,
 } from "./multimodal";
-import { addMessage, getChat, updateChat } from "./persistence/chatRepo";
-import { getInferencePresets, getSystemPresets } from "./persistence/presetRepo";
+import { ContextOverflowError, getTokens, truncateMessages } from "./overflow";
+import { addMessage, getChat, getMetadataForPath, updateChat } from "./persistence/chatRepo";
+import { getDb } from "./persistence/db";
+import { getInferencePresets, getLoadPresets, getSystemPresets } from "./persistence/presetRepo";
 import { loadSettings } from "./persistence/settingsRepo";
 import { updatePromptCacheStats } from "./promptCache";
-import { broadcast } from "./wsHub";
-import { truncateMessages, getTokens } from "./overflow";
 import { cancelPendingApprovals } from "./tools";
-import { getMetadataForPath } from "./persistence/chatRepo";
-import { getDb } from "./persistence/db";
-import { getActiveGenerations } from "./generationRegistry";
+import { broadcast } from "./wsHub";
 
 export { getActiveGenerationChatIds } from "./generationRegistry";
 
@@ -78,30 +89,13 @@ type ChatCompletionRequestBody = {
     type: "json_schema";
     json_schema: Record<string, unknown>;
   };
-  chat_template_kwargs?: { enable_thinking: true; preserve_thinking?: boolean };
+  chat_template_kwargs?: {
+    enable_thinking: boolean;
+    preserve_thinking?: boolean;
+    enable_token?: string;
+  };
   reasoning_format?: "none";
 };
-
-/**
- * Converts raw llama.cpp timing metrics into the message metrics stored on assistant turns.
- *
- * @param timings - Timing payload reported by llama-server.
- * @param promptTokensCount - Prompt token count used for the generation request.
- * @returns Message-level metrics suitable for persistence and UI display.
- */
-function buildMessageMetrics(
-  timings: import("../shared/types").LlamaTimings,
-  promptTokensCount: number,
-): MessageMetrics {
-  return {
-    predictedTokens: timings.predicted_n || 0,
-    tokensPerSecond: timings.predicted_per_second || 0,
-    promptTokens: promptTokensCount,
-    promptTokensPerSecond: timings.prompt_per_second || 0,
-    cachedPromptTokens: timings.tokens_cached || 0,
-    evaluatedPromptTokens: timings.tokens_evaluated || 0,
-  };
-}
 
 /**
  * Logs a structured stream-proxy failure with optional contextual metadata.
@@ -118,6 +112,39 @@ function logStreamProxyError(context: string, err: unknown, details?: Record<str
     details ? JSON.stringify(details) : undefined,
     err instanceof Error ? err.stack || err.message : err,
   );
+}
+
+/**
+ * Summarizes a chat-completion `content` field as part types for logs.
+ *
+ * @param content - String body or OpenAI-style content-part array.
+ * @returns `"text"` for a string body, or the ordered part `type` values.
+ */
+function summarizeContentPartTypes(content: unknown): string | string[] {
+  if (typeof content === "string") return "text";
+  if (!Array.isArray(content)) return [];
+  return content.map((part) => {
+    if (part && typeof part === "object" && "type" in part && typeof part.type === "string") {
+      return part.type;
+    }
+    return "unknown";
+  });
+}
+
+/**
+ * Builds a per-message outline of the llama-server payload for verbose logs.
+ * Each entry is one chat turn (system, user, assistant, or tool), not a growing bag of parts.
+ *
+ * @param messages - OpenAI-style messages about to be sent.
+ * @returns Role plus content-part types for each message.
+ */
+function summarizeRequestMessages(
+  messages: ChatCompletionMessage[],
+): Array<{ role: string; content: string | string[] }> {
+  return messages.map((message) => ({
+    role: message.role,
+    content: summarizeContentPartTypes(message.content),
+  }));
 }
 
 /**
@@ -211,6 +238,50 @@ function getToolApprovalFailureMessage(reason?: string): string {
 }
 
 /**
+ * Reads `preserve_thinking` from the load preset that produced the running model.
+ *
+ * This is a per-request Jinja kwarg, so the saved load preset is consulted on
+ * each generation rather than being frozen at spawn time.
+ *
+ * @param presetId - Load-preset id stored on the running `ModelLoadConfig`.
+ * @returns `true` when that load preset has preserve-thinking enabled.
+ */
+async function resolveLoadedPreserveThinking(presetId: string | undefined): Promise<boolean> {
+  if (!presetId) return false;
+  const presets = await getLoadPresets();
+  return Boolean(presets.find((preset) => preset.id === presetId)?.preserveThinking);
+}
+
+/**
+ * Replaces the textual portion of an OpenAI chat-completion `content` value.
+ *
+ * Multipart messages keep image/audio/video parts and only the `text` part is
+ * updated. String content is replaced entirely.
+ *
+ * @param content - Current string or multipart content.
+ * @param text - Replacement visible or tagged text.
+ * @returns The same shape as `content`, with the text part updated.
+ */
+function replaceApiMessageText(content: unknown, text: string): unknown {
+  if (!Array.isArray(content)) return text;
+  let replaced = false;
+  const next = content.map((part: unknown) => {
+    if (
+      part &&
+      typeof part === "object" &&
+      "type" in part &&
+      (part as { type: unknown }).type === "text"
+    ) {
+      replaced = true;
+      return { ...(part as object), text };
+    }
+    return part;
+  });
+  if (!replaced) next.push({ type: "text", text });
+  return next;
+}
+
+/**
  * Defines the parameters for proxying completion requests against the backend server.
  */
 export interface ProxyCompletionParams {
@@ -219,7 +290,7 @@ export interface ProxyCompletionParams {
   /** User content to send to the backend as the new message. */
   content: string;
   /** Files attached to the completion request. */
-  attachments: File[];
+  attachments?: File[];
   /** Whether this request should continue the last assistant response. */
   isContinue?: boolean;
   /** Whether this request should regenerate the current assistant message. */
@@ -228,6 +299,11 @@ export interface ProxyCompletionParams {
   isToolRecurse?: boolean;
   /** The current depth of internal tool-call recursion for this request chain. */
   toolRecursionDepth?: number;
+  /**
+   * Inference preset the client is currently displaying. Used when the chat row
+   * has not yet persisted `inferencePresetId`.
+   */
+  inferencePresetId?: string | undefined;
 }
 
 /**
@@ -241,11 +317,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const {
     chatId,
     content: newMessage,
-    attachments,
+    attachments = [],
     isContinue = false,
     isRegenerate = false,
     isToolRecurse = false,
     toolRecursionDepth = 0,
+    inferencePresetId: requestedInferencePresetId,
   } = params;
 
   if (!isToolRecurse) {
@@ -306,7 +383,15 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const [sysPresets, infPresets] = await Promise.all([getSystemPresets(), getInferencePresets()]);
 
   const sysPreset = sysPresets.find((p) => p.id === chat.systemPresetId);
-  const infPreset = infPresets.find((p) => p.id === chat.inferencePresetId) || infPresets[0];
+  const infPreset = resolveInferencePreset(infPresets, {
+    chatPresetId: chat.inferencePresetId,
+    preferredPresetId: requestedInferencePresetId,
+    modelPath: server.config?.modelPath ?? chat.modelPath,
+  });
+  if (infPreset && infPreset.id !== chat.inferencePresetId && !isToolRecurse) {
+    await updateChat(chatId, { inferencePresetId: infPreset.id });
+    chat.inferencePresetId = infPreset.id;
+  }
 
   const processedAttachments: ProcessedAttachment[] = [];
   let userMsg: ChatMessage | null = null;
@@ -370,10 +455,8 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const modelMeta = server.config?.modelPath
     ? await getMetadataForPath(server.config.modelPath)
     : null;
-  const thinkingConfig = detectThinkingConfig(
-    modelMeta?.architecture,
-    getActiveThinkingTagOverride(),
-  );
+  const thinkingTagOverride = getActiveThinkingTagOverride();
+  const thinkingConfig = detectThinkingConfig(modelMeta?.architecture, thinkingTagOverride);
 
   let rawMessages: ChatMessage[] = [];
   const sysContent = sysPreset?.content || "";
@@ -413,16 +496,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
 
   // --- Overflow Policy Truncation ---
   // C7 fix: guard against infPreset being undefined (edge case after data wipe)
-  const safeInfPreset = infPreset ?? {
-    maxTokens: -1,
-    contextOverflowPolicy: "TruncateMiddle" as const,
-    temperature: 0.8,
-    topK: 40,
-    topP: 0.95,
-    minP: 0.05,
-    stopStrings: [] as string[],
-  };
-  const overflowPolicy = safeInfPreset?.contextOverflowPolicy || "TruncateMiddle";
+  const inferenceDefaults = createDefaultInferenceSampling();
+  const safeInfPreset = infPreset ?? inferenceDefaults;
+  const overflowPolicy = safeInfPreset.contextOverflowPolicy ?? "TruncateMiddle";
   const ctxSize = server.config?.contextSize || 4096;
   const useTools = infPreset?.toolCallsEnabled && infPreset.tools && infPreset.tools.length > 0;
   const requestTools = useTools
@@ -438,16 +514,21 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
           json_schema: infPreset.structuredOutput.schema,
         }
       : undefined;
-  const requestThinkingConfig =
-    (infPreset?.thinkingEnabled ?? true)
-      ? {
-          chat_template_kwargs: {
-            enable_thinking: true as const,
-            preserve_thinking: infPreset?.preserveThinking ?? false,
-          },
-          reasoning_format: "none" as const,
-        }
-      : undefined;
+  const enableThinking = infPreset?.thinkingEnabled ?? true;
+  const requestThinkingConfig = {
+    chat_template_kwargs: {
+      enable_thinking: enableThinking,
+      preserve_thinking: await resolveLoadedPreserveThinking(server.config?.presetId),
+      ...(thinkingTagOverride?.enableToken
+        ? { enable_token: thinkingTagOverride.enableToken }
+        : {}),
+    },
+    // Always `none` so llama-server streams tagged tokens in `delta.content`
+    // instead of buffering the visible answer until native reasoning parsing
+    // finishes. This process splits open/close tags as they arrive so the
+    // reply can start streaming the moment thinking ends.
+    reasoning_format: "none" as const,
+  };
   const { buildContentParts } = await import("./multimodal");
 
   /**
@@ -458,8 +539,15 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
    */
   const buildApiMessages = async (messages: ChatMessage[]): Promise<ChatCompletionMessage[]> => {
     const apiMessages: ChatCompletionMessage[] = [];
+    const preserveThinking = Boolean(requestThinkingConfig.chat_template_kwargs.preserve_thinking);
+    let lastUserIdx = -1;
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i]?.role === "user") lastUserIdx = i;
+    }
 
-    for (const m of messages) {
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+      const m = messages[messageIndex];
+      if (!m) continue;
       const mediaAtts =
         m.attachments?.filter(
           (a) =>
@@ -475,7 +563,40 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
 
       let finalContent = contentParts;
 
+      const parsedToolCalls = parseToolCallsJson(m.toolCallsJson);
+      const sendReasoningContent =
+        m.role === "assistant" &&
+        Boolean(m.thinkingContent) &&
+        shouldSendAssistantReasoningContent({
+          messageIndex,
+          lastUserIndex: lastUserIdx,
+          preserveThinking,
+          hasToolCalls: Boolean(parsedToolCalls),
+        });
+
+      // Qwen templates (including froggeric) replay traces by splitting think
+      // tags out of `content` when preserve_thinking is on. Putting those traces
+      // in `reasoning_content` on older turns makes llama.cpp treat thinking as
+      // already finished (Gemma follow-up) or stay in a think-only parse (Qwen
+      // shows a trace and no answer). Continue and Gemma tool-call replay still
+      // use the field below.
+      if (
+        shouldReconstructPreservedAssistantContent({
+          preserveThinking,
+          sendReasoningContent,
+          openTag: thinkingConfig.openTag,
+        }) &&
+        m.role === "assistant" &&
+        m.thinkingContent
+      ) {
+        finalContent = replaceApiMessageText(
+          finalContent,
+          reconstructPreservedAssistantContent(m, thinkingConfig),
+        );
+      }
+
       const hasUnsupportedMedia = mediaAtts.some((a) => {
+        if (isExtractedVideoAudioAttachment(a)) return false;
         if (a.mimeType.startsWith("image/") && !modelMeta?.hasVisionEncoder) return true;
         if (a.mimeType.startsWith("audio/") && !modelMeta?.hasAudioEncoder) return true;
         if (a.mimeType.startsWith("video/") && !modelMeta?.hasVisionEncoder) return true;
@@ -498,12 +619,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       }
 
       const apiMsg: ChatCompletionMessage = { role: m.role, content: finalContent };
-
-      if (m.role === "assistant" && m.thinkingContent) {
+      if (sendReasoningContent) {
         apiMsg.reasoning_content = m.thinkingContent;
       }
-
-      const parsedToolCalls = parseToolCallsJson(m.toolCallsJson);
       if (parsedToolCalls) {
         apiMsg.tool_calls = toApiToolCalls(parsedToolCalls);
       }
@@ -541,7 +659,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     });
 
   if (!reuseAssistantRow) {
-    await addMessage({
+    const assistantPlaceholder: ChatMessage = {
       id: assistantMessageId,
       chatId,
       role: "assistant",
@@ -549,7 +667,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       rawContent: "",
       position: 0,
       createdAt: Date.now(),
-    });
+    };
+    await addMessage(assistantPlaceholder);
+    broadcast({ type: "message", chatId, message: assistantPlaceholder });
   }
 
   /**
@@ -627,31 +747,32 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     const requestBody: ChatCompletionRequestBody = {
       stream: true,
       cache_prompt: true,
-      temperature: infPreset?.temperature ?? 0.8,
-      top_k: infPreset?.topK ?? 40,
-      top_p: infPreset?.topP ?? 0.95,
-      min_p: infPreset?.minP ?? 0.05,
-      typical_p: infPreset?.typicalP ?? 1.0,
+      temperature: infPreset?.temperature ?? inferenceDefaults.temperature,
+      top_k: infPreset?.topK ?? inferenceDefaults.topK,
+      top_p: infPreset?.topP ?? inferenceDefaults.topP,
+      min_p: infPreset?.minP ?? inferenceDefaults.minP,
+      typical_p: infPreset?.typicalP ?? inferenceDefaults.typicalP,
 
-      repeat_penalty: infPreset?.repeatPenalty ?? 1.1,
-      repeat_last_n: infPreset?.repeatLastN ?? 64,
-      presence_penalty: infPreset?.presencePenalty ?? 0.0,
-      frequency_penalty: infPreset?.frequencyPenalty ?? 0.0,
-      mirostat: infPreset?.mirostat ?? 0,
-      mirostat_tau: infPreset?.mirostatTau ?? 5.0,
-      mirostat_eta: infPreset?.mirostatEta ?? 0.1,
-      dynatemp_range: infPreset?.dynaTempRange ?? 0.0,
-      dynatemp_exponent: infPreset?.dynaTempExponent ?? 1.0,
-      dry_multiplier: infPreset?.dryMultiplier ?? 0.0,
-      dry_base: infPreset?.dryBase ?? 1.75,
-      dry_allowed_length: infPreset?.dryAllowedLength ?? 2,
-      dry_penalty_last_n: infPreset?.dryPenaltyLastN ?? 64,
-      dry_sequence_breakers: infPreset?.drySequenceBreakers ?? ["\n", ":", '"', "*"],
-      xtc_probability: infPreset?.xtcProbability ?? 0.0,
-      xtc_threshold: infPreset?.xtcThreshold ?? 0.1,
+      repeat_penalty: infPreset?.repeatPenalty ?? inferenceDefaults.repeatPenalty,
+      repeat_last_n: infPreset?.repeatLastN ?? inferenceDefaults.repeatLastN,
+      presence_penalty: infPreset?.presencePenalty ?? inferenceDefaults.presencePenalty,
+      frequency_penalty: infPreset?.frequencyPenalty ?? inferenceDefaults.frequencyPenalty,
+      mirostat: infPreset?.mirostat ?? inferenceDefaults.mirostat,
+      mirostat_tau: infPreset?.mirostatTau ?? inferenceDefaults.mirostatTau,
+      mirostat_eta: infPreset?.mirostatEta ?? inferenceDefaults.mirostatEta,
+      dynatemp_range: infPreset?.dynaTempRange ?? inferenceDefaults.dynaTempRange,
+      dynatemp_exponent: infPreset?.dynaTempExponent ?? inferenceDefaults.dynaTempExponent,
+      dry_multiplier: infPreset?.dryMultiplier ?? inferenceDefaults.dryMultiplier ?? 0.0,
+      dry_base: infPreset?.dryBase ?? inferenceDefaults.dryBase ?? 1.75,
+      dry_allowed_length: infPreset?.dryAllowedLength ?? inferenceDefaults.dryAllowedLength ?? 2,
+      dry_penalty_last_n: infPreset?.dryPenaltyLastN ?? inferenceDefaults.dryPenaltyLastN ?? 64,
+      dry_sequence_breakers: infPreset?.drySequenceBreakers ??
+        inferenceDefaults.drySequenceBreakers ?? ["\n", ":", '"', "*"],
+      xtc_probability: infPreset?.xtcProbability ?? inferenceDefaults.xtcProbability ?? 0.0,
+      xtc_threshold: infPreset?.xtcThreshold ?? inferenceDefaults.xtcThreshold ?? 0.1,
       seed: infPreset?.seed !== undefined && infPreset.seed !== -1 ? infPreset.seed : undefined,
-      n_predict: infPreset?.maxTokens ?? -1,
-      stop: infPreset?.stopStrings ?? [],
+      n_predict: infPreset?.maxTokens ?? inferenceDefaults.maxTokens,
+      stop: infPreset?.stopStrings ?? inferenceDefaults.stopStrings,
       messages: apiMessages,
     };
 
@@ -665,7 +786,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
 
     if (requestThinkingConfig) {
       requestBody.chat_template_kwargs = requestThinkingConfig.chat_template_kwargs;
-      requestBody.reasoning_format = requestThinkingConfig.reasoning_format;
+      if (requestThinkingConfig.reasoning_format) {
+        requestBody.reasoning_format = requestThinkingConfig.reasoning_format;
+      }
     }
 
     const endpoint = `http://127.0.0.1:${server.port}/v1/chat/completions`;
@@ -674,6 +797,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       promptTokensCount,
       ctxSize,
       messagesCount: requestBody.messages.length,
+      messages: summarizeRequestMessages(requestBody.messages),
     });
 
     logInfo("Initiating model inference", {
@@ -682,6 +806,47 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       messages: requestBody.messages.length,
       maxTokens: requestBody.n_predict,
       thinking: requestBody.chat_template_kwargs?.enable_thinking,
+    });
+    logVerbose("Active inference settings", {
+      chatId,
+      generationId,
+      modelPath: server.config?.modelPath,
+      inferencePresetId: infPreset?.id ?? null,
+      inferencePresetName: infPreset?.name ?? null,
+      sampling: {
+        temperature: requestBody.temperature,
+        top_k: requestBody.top_k,
+        top_p: requestBody.top_p,
+        min_p: requestBody.min_p,
+        typical_p: requestBody.typical_p,
+        repeat_penalty: requestBody.repeat_penalty,
+        repeat_last_n: requestBody.repeat_last_n,
+        presence_penalty: requestBody.presence_penalty,
+        frequency_penalty: requestBody.frequency_penalty,
+        mirostat: requestBody.mirostat,
+        mirostat_tau: requestBody.mirostat_tau,
+        mirostat_eta: requestBody.mirostat_eta,
+        dynatemp_range: requestBody.dynatemp_range,
+        dynatemp_exponent: requestBody.dynatemp_exponent,
+        dry_multiplier: requestBody.dry_multiplier,
+        dry_base: requestBody.dry_base,
+        dry_allowed_length: requestBody.dry_allowed_length,
+        dry_penalty_last_n: requestBody.dry_penalty_last_n,
+        dry_sequence_breakers: requestBody.dry_sequence_breakers,
+        xtc_probability: requestBody.xtc_probability,
+        xtc_threshold: requestBody.xtc_threshold,
+        seed: requestBody.seed ?? null,
+        n_predict: requestBody.n_predict,
+        stop: requestBody.stop,
+      },
+      chat_template_kwargs: requestBody.chat_template_kwargs ?? null,
+      reasoning_format: requestBody.reasoning_format ?? null,
+      toolsEnabled: Boolean(requestBody.tools?.length),
+      structuredOutput: Boolean(requestBody.response_format),
+      messageCount: requestBody.messages.length,
+      messages: summarizeRequestMessages(requestBody.messages),
+      promptTokensCount,
+      ctxSize,
     });
 
     const settings = await loadSettings();
@@ -744,9 +909,22 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
 
-        let fullRawContent = reuseAssistantRow ? lastMessage?.rawContent || "" : "";
-        let prevContent = reuseAssistantRow ? lastMessage?.content || "" : "";
-        let prevThinking = reuseAssistantRow ? lastMessage?.thinkingContent || "" : "";
+        const reusedRaw = reuseAssistantRow ? lastMessage?.rawContent || "" : "";
+        const streamState: AssistantStreamState = {
+          fullRawContent: reusedRaw,
+          prevContent: reuseAssistantRow ? lastMessage?.content || "" : "",
+          prevThinking: reuseAssistantRow ? lastMessage?.thinkingContent || "" : "",
+          usedNativeReasoning: Boolean(
+            reuseAssistantRow &&
+            inferNativeReasoningReuse(
+              lastMessage?.thinkingContent,
+              reusedRaw,
+              thinkingConfig.openTag,
+              thinkingConfig.closeTag,
+              lastMessage?.metrics?.thinkingSource,
+            ),
+          ),
+        };
 
         const accumulatedToolCalls: {
           id: string;
@@ -756,6 +934,8 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         }[] = [];
         let lastFlushTime = Date.now();
         let streamBuffer = "";
+        let thinkingStartedAt: number | null = null;
+        let thinkingEndedAt: number | null = null;
 
         try {
           while (true) {
@@ -783,6 +963,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                 choices?: {
                   delta?: {
                     content?: string;
+                    reasoning_content?: string;
                     tool_calls?: {
                       index: number;
                       id: string;
@@ -821,7 +1002,58 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                     accumulatedToolCalls[idx].function.arguments += tc.function.arguments;
                 }
               }
-              const delta = parsed.choices?.[0]?.delta?.content || "";
+              const contentPiece = parsed.choices?.[0]?.delta?.content || "";
+              const reasoningPiece = parsed.choices?.[0]?.delta?.reasoning_content || "";
+
+              if (contentPiece || reasoningPiece) {
+                const { contentDelta, thinkingDelta, isThinking } = applyAssistantStreamDelta(
+                  streamState,
+                  contentPiece,
+                  reasoningPiece,
+                  thinkingConfig.openTag,
+                  thinkingConfig.closeTag,
+                );
+
+                if (thinkingDelta && thinkingStartedAt === null) {
+                  thinkingStartedAt = Date.now();
+                }
+                if (thinkingStartedAt !== null && !isThinking && thinkingEndedAt === null) {
+                  thinkingEndedAt = Date.now();
+                }
+
+                if (contentDelta || thinkingDelta) {
+                  const thinkingDurationMs =
+                    thinkingStartedAt !== null && thinkingEndedAt !== null
+                      ? Math.max(0, thinkingEndedAt - thinkingStartedAt)
+                      : undefined;
+                  broadcast({
+                    type: "token",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    delta: contentDelta,
+                    thinkingDelta: thinkingDelta || undefined,
+                    promptTokens: promptTokensCount,
+                    contextSize: ctxSize,
+                    ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+                  });
+                }
+
+                if (Date.now() - lastFlushTime > 1000) {
+                  lastFlushTime = Date.now();
+                  const dbInstance = await import("./persistence/db").then((m) => m.getDb());
+                  dbInstance
+                    .prepare(
+                      "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
+                    )
+                    .run(
+                      streamState.prevContent,
+                      streamState.fullRawContent,
+                      streamState.prevThinking || null,
+                      assistantMessageId,
+                    );
+                }
+              }
 
               if (useTools && parsed.choices?.[0]?.finish_reason === "tool_calls") {
                 const toolCalls = accumulatedToolCalls.filter(Boolean);
@@ -842,9 +1074,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                     "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, tool_calls_json = ? WHERE id = ?",
                   )
                   .run(
-                    prevContent,
-                    fullRawContent,
-                    prevThinking || null,
+                    streamState.prevContent,
+                    streamState.fullRawContent,
+                    streamState.prevThinking || null,
                     JSON.stringify(toolCalls),
                     assistantMessageId,
                   );
@@ -889,9 +1121,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                       generationId,
                       stopReason: "error",
                       timings: parsed.timings || ({} as import("../shared/types").LlamaTimings),
-                      fullContent: prevContent,
-                      fullRawContent,
-                      fullThinking: prevThinking,
+                      fullContent: streamState.prevContent,
+                      fullRawContent: streamState.fullRawContent,
+                      fullThinking: streamState.prevThinking,
                     });
                     shouldStop = true;
                     break;
@@ -948,9 +1180,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                       generationId,
                       stopReason: "error",
                       timings,
-                      fullContent: prevContent,
-                      fullRawContent,
-                      fullThinking: prevThinking,
+                      fullContent: streamState.prevContent,
+                      fullRawContent: streamState.fullRawContent,
+                      fullThinking: streamState.prevThinking,
                     });
                   } else {
                     broadcast({
@@ -960,9 +1192,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                       generationId,
                       stopReason: "tool_calls",
                       timings,
-                      fullContent: prevContent,
-                      fullRawContent,
-                      fullThinking: prevThinking,
+                      fullContent: streamState.prevContent,
+                      fullRawContent: streamState.fullRawContent,
+                      fullThinking: streamState.prevThinking,
                     });
 
                     const { proxyCompletion } = await import("./streamProxy");
@@ -978,42 +1210,6 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
 
                 shouldStop = true;
                 break;
-              }
-
-              if (delta) {
-                fullRawContent += delta;
-                const parsedTags = parseThinkTags(
-                  fullRawContent,
-                  thinkingConfig.openTag,
-                  thinkingConfig.closeTag,
-                );
-                const contentDelta = parsedTags.content.substring(prevContent.length);
-                const thinkingDelta = parsedTags.thinking.substring(prevThinking.length);
-                prevContent = parsedTags.content;
-                prevThinking = parsedTags.thinking;
-
-                if (contentDelta || thinkingDelta) {
-                  broadcast({
-                    type: "token",
-                    chatId,
-                    messageId: assistantMessageId,
-                    generationId,
-                    delta: contentDelta,
-                    thinkingDelta: thinkingDelta || undefined,
-                    promptTokens: promptTokensCount,
-                    contextSize: ctxSize,
-                  });
-                }
-
-                if (Date.now() - lastFlushTime > 1000) {
-                  lastFlushTime = Date.now();
-                  const dbInstance = await import("./persistence/db").then((m) => m.getDb());
-                  dbInstance
-                    .prepare(
-                      "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
-                    )
-                    .run(prevContent, fullRawContent, prevThinking || null, assistantMessageId);
-                }
               }
 
               // Detect stop condition from the chat completions response
@@ -1045,7 +1241,24 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                 }
 
                 updatePromptCacheStats(chatId, timings);
-                const messageMetrics = buildMessageMetrics(timings, promptTokensCount);
+                if (thinkingStartedAt !== null && thinkingEndedAt === null) {
+                  thinkingEndedAt = Date.now();
+                }
+                const thinkingDurationMs =
+                  thinkingStartedAt !== null
+                    ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
+                    : streamState.prevThinking
+                      ? Math.max(0, timings.predicted_ms || 0)
+                      : undefined;
+                const messageMetrics = buildMessageMetrics(timings, promptTokensCount, {
+                  thinkingDurationMs,
+                  stopReason,
+                  thinkingSource: streamState.prevThinking
+                    ? streamState.usedNativeReasoning
+                      ? "native"
+                      : "tags"
+                    : undefined,
+                });
                 broadcast({
                   type: "stop",
                   chatId,
@@ -1055,9 +1268,10 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                   timings,
                   promptTokens: promptTokensCount,
                   contextSize: ctxSize,
-                  fullContent: prevContent,
-                  fullRawContent,
-                  fullThinking: prevThinking,
+                  fullContent: streamState.prevContent,
+                  fullRawContent: streamState.fullRawContent,
+                  fullThinking: streamState.prevThinking,
+                  ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
                 });
 
                 // C8 fix: explicitly pass updatedAt instead of relying on implicit empty-object behavior
@@ -1068,9 +1282,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                     "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
                   )
                   .run(
-                    prevContent,
-                    fullRawContent,
-                    prevThinking || null,
+                    streamState.prevContent,
+                    streamState.fullRawContent,
+                    streamState.prevThinking || null,
                     JSON.stringify(messageMetrics),
                     assistantMessageId,
                   );
@@ -1089,7 +1303,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
             const db = await import("./persistence/db").then((m) => m.getDb());
             db.prepare(
               "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
-            ).run(prevContent, fullRawContent, prevThinking || null, assistantMessageId);
+            ).run(
+              streamState.prevContent,
+              streamState.fullRawContent,
+              streamState.prevThinking || null,
+              assistantMessageId,
+            );
             cleanupEmptyAssistantMessage();
             logWarn("[streamProxy] Generation aborted by user or timeout", {
               chatId,
@@ -1153,6 +1372,16 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       cancelPendingApprovals(chatId);
       activeGenerations.delete(generationId);
       cleanupEmptyAssistantMessage();
+      if (err instanceof ContextOverflowError) {
+        broadcast({
+          type: "error",
+          chatId,
+          messageId: assistantMessageId,
+          generationId,
+          message: err.message,
+        });
+        return;
+      }
       const failureContext = getModelFailureContext();
       logStreamProxyError("run-inference", err, {
         chatId,

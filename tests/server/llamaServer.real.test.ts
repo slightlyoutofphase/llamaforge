@@ -3,18 +3,27 @@
  * Real llama-server integration using the locally installed Qwen3.5-0.8B fixture.
  */
 
+import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
-import { createChat, getChat, updateChat } from "../../src/server/persistence/chatRepo";
+import { bunNativeFetch, restoreBunNativeWebGlobals } from "../happy-setup";
+import {
+  getProc,
+  getRecentServerLogs,
+  getServerStatus,
+  loadModel,
+  unloadModel,
+} from "../../src/server/llamaServer";
+import { buildContentParts } from "../../src/server/multimodal";
+import { addMessage, createChat, getChat, updateChat } from "../../src/server/persistence/chatRepo";
 import { initDb, resetDb } from "../../src/server/persistence/db";
-import { createInferencePreset } from "../../src/server/persistence/presetRepo";
+import { createInferencePreset, createSystemPreset } from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
-import { getProc, getServerStatus, loadModel, unloadModel } from "../../src/server/llamaServer";
 import { proxyCompletion } from "../../src/server/streamProxy";
 import type {
   AppSettings,
+  GgufDisplayMetadata,
   InferencePreset,
   LoadPreset,
   ModelLoadConfig,
@@ -38,6 +47,8 @@ const REAL_DB_PATH = path.join(TEST_APP_DATA_DIR, "real-llama-integration.db");
 const TEST_PORT_MIN = 12400;
 const TEST_PORT_MAX = 12410;
 const REAL_MEDIA_CHAT_ID = "real-qwen-multimodal-chat";
+const TEST_VIDEO_FILE = "test_vid.mp4";
+const VIDEO_COMPLETION_TIMEOUT_MS = 180_000;
 
 let fixture: {
   settings: RealLlamaFixture["settings"];
@@ -134,7 +145,7 @@ function buildLocalImageChatRequest(
   };
 }
 
-function _buildLocalVideoChatRequest(
+function buildLocalVideoChatRequest(
   inferencePreset: InferencePreset,
   mediaUrl: string,
   prompt: string,
@@ -153,6 +164,15 @@ function _buildLocalVideoChatRequest(
   };
 }
 
+async function requireDataFixture(fileName: string): Promise<void> {
+  const file = Bun.file(new URL(`../data/${fileName}`, import.meta.url));
+  if (!(await file.exists()) || file.size <= 0) {
+    throw new Error(
+      `Missing test fixture tests/data/${fileName}. The Qwen video test requires this file on disk.`,
+    );
+  }
+}
+
 async function stageMediaFixture(fileName: string, messageId: string): Promise<string> {
   const relativePath = `attachments/${REAL_MEDIA_CHAT_ID}/${messageId}/${fileName}`;
   const absolutePath = path.join(TEST_APP_DATA_DIR, ...relativePath.split("/"));
@@ -167,9 +187,7 @@ async function createFixtureFile(fileName: string, mimeType: string): Promise<Fi
 }
 
 async function assertHealthy(port: number): Promise<void> {
-  const health = await fetch(`http://127.0.0.1:${port}/health`, {
-    signal: AbortSignal.timeout(5_000),
-  });
+  const health = await bunNativeFetch(`http://127.0.0.1:${port}/health`);
   expect(health.ok).toBe(true);
 }
 
@@ -201,13 +219,14 @@ async function postChatCompletion(
   port: number,
   body: Record<string, unknown>,
   label: string,
+  timeoutMs: number = 20_000,
 ): Promise<Record<string, unknown>> {
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    const response = await bunNativeFetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     const rawBody = await response.text();
@@ -227,7 +246,8 @@ async function postChatCompletion(
     throw new Error(
       `${label} failed: ${error instanceof Error ? error.message : String(error)} | ` +
         `serverStatus=${status.status} | activePort=${status.port ?? "none"} | ` +
-        `exitCode=${exitCode === null || exitCode === undefined ? "null" : String(exitCode)}`,
+        `exitCode=${exitCode === null || exitCode === undefined ? "null" : String(exitCode)} | ` +
+        `serverLogs=${getRecentServerLogs(40).join(" | ")}`,
     );
   }
 }
@@ -261,6 +281,7 @@ async function waitForTerminalFrame(
 
 describeReal("llamaServer real integration", () => {
   beforeAll(async () => {
+    restoreBunNativeWebGlobals();
     previousAppDataDir = process.env.LLAMAFORGE_APP_DATA_DIR;
     process.env.LLAMAFORGE_APP_DATA_DIR = TEST_APP_DATA_DIR;
 
@@ -293,6 +314,10 @@ describeReal("llamaServer real integration", () => {
       ...fixture.inferencePreset,
       isDefault: false,
     });
+  });
+
+  beforeEach(() => {
+    restoreBunNativeWebGlobals();
   });
 
   afterAll(async () => {
@@ -395,6 +420,151 @@ describeReal("llamaServer real integration", () => {
     }
   }, 120_000);
 
+  it("sends the real tests/data/test_vid.mp4 fixture as native input_video to Qwen 3.5", async () => {
+    await requireDataFixture(TEST_VIDEO_FILE);
+    // Native video tokenization of this clip is ~22k tokens; the default 8k fixture window rejects it.
+    const loadRequest = buildLoadRequest({
+      ...fixture.loadPreset,
+      config: {
+        ...fixture.loadPreset.config,
+        contextSize: 32768,
+      },
+    });
+    const videoUrl = await stageMediaFixture(TEST_VIDEO_FILE, "msg-mp4");
+    const relativePath = videoUrl.replace(/^file:\/\//, "");
+    const stagedAbs = path.join(TEST_APP_DATA_DIR, ...relativePath.split("/"));
+    expect(await Bun.file(stagedAbs).exists()).toBe(true);
+    expect(Bun.file(stagedAbs).size).toBeGreaterThan(32);
+
+    const parts = await buildContentParts(
+      "Reply with a short sentence confirming the video request succeeded.",
+      [
+        {
+          id: "vid-1",
+          messageId: "msg-mp4",
+          mimeType: "video/mp4",
+          fileName: TEST_VIDEO_FILE,
+          filePath: relativePath,
+          createdAt: Date.now(),
+        },
+      ],
+      { hasVisionEncoder: true } as GgufDisplayMetadata,
+    );
+    expect(Array.isArray(parts)).toBe(true);
+    const videoPart = (parts as Array<{ type?: string; input_video?: { url?: string } }>)[0];
+    expect(videoPart?.type).toBe("input_video");
+    expect(videoPart?.input_video?.url).toBe(videoUrl);
+
+    const videoPresetId = Bun.randomUUIDv7();
+    await createInferencePreset({
+      ...fixture.inferencePreset,
+      id: videoPresetId,
+      name: "Qwen video input_video",
+      isDefault: false,
+      thinkingEnabled: false,
+      maxTokens: 32,
+    });
+    await saveSettings({ requestTimeoutSeconds: VIDEO_COMPLETION_TIMEOUT_MS / 1000 });
+
+    const wsHubModule = await import("../../src/server/wsHub");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast");
+    const capturedBodies: Array<{
+      messages?: Array<{ content?: unknown }>;
+    }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/v1/chat/completions") && init?.body) {
+        try {
+          capturedBodies.push(JSON.parse(String(init.body)));
+        } catch {
+          // Ignore malformed bodies; the original fetch still runs.
+        }
+      }
+      return bunNativeFetch(input, init);
+    }) as typeof fetch;
+
+    let port: number | null = null;
+    try {
+      port = await loadModel(
+        loadRequest.config,
+        fixture.settings.llamaServerPath,
+        TEST_PORT_MIN,
+        TEST_PORT_MAX,
+        loadRequest.thinkingTagOverride,
+      );
+      expect(loadRequest.config.mmProjPath).toBeTruthy();
+      await assertHealthy(port);
+
+      const directPayload = await postChatCompletion(
+        port,
+        buildLocalVideoChatRequest(
+          fixture.inferencePreset,
+          videoUrl,
+          "Reply with a short sentence confirming the video request succeeded.",
+        ),
+        "MP4 local-media input_video completion",
+        VIDEO_COMPLETION_TIMEOUT_MS,
+      );
+      expect(extractAssistantContent(directPayload).length).toBeGreaterThan(0);
+      await assertHealthy(port);
+
+      const chat = await createChat("Real Qwen input_video", fixture.loadPreset.modelPath);
+      await updateChat(chat.id, { inferencePresetId: videoPresetId });
+      const assistantId = await proxyCompletion({
+        chatId: chat.id,
+        content: "Reply with a short sentence confirming the video request succeeded.",
+        attachments: [await createFixtureFile(TEST_VIDEO_FILE, "video/mp4")],
+      });
+      const frame = await waitForTerminalFrame(
+        broadcastSpy,
+        chat.id,
+        assistantId,
+        VIDEO_COMPLETION_TIMEOUT_MS,
+      );
+      if (frame.type === "error") {
+        throw new Error(`streamProxy input_video request failed: ${frame.message}`);
+      }
+
+      const stored = await getChat(chat.id);
+      const userWithVideo = stored?.messages?.find(
+        (message) =>
+          message.role === "user" &&
+          message.attachments?.some((att) => att.fileName === TEST_VIDEO_FILE),
+      );
+      const assistant = stored?.messages?.find((message) => message.id === assistantId);
+      expect(userWithVideo).toBeDefined();
+      const visible =
+        assistant?.content ||
+        (frame.type === "stop" ? frame.fullContent || frame.fullRawContent || "" : "");
+      expect(visible.length).toBeGreaterThan(0);
+
+      const proxyBody = capturedBodies.at(-1);
+      const inputVideoUrls: string[] = [];
+      for (const message of proxyBody?.messages ?? []) {
+        if (!Array.isArray(message.content)) continue;
+        for (const part of message.content) {
+          if (
+            part &&
+            typeof part === "object" &&
+            (part as { type?: string }).type === "input_video"
+          ) {
+            const url = (part as { input_video?: { url?: string } }).input_video?.url;
+            if (url) inputVideoUrls.push(url);
+          }
+        }
+      }
+      expect(inputVideoUrls.length).toBeGreaterThan(0);
+      expect(inputVideoUrls.some((url) => url.endsWith(".mp4"))).toBe(true);
+      await assertHealthy(port);
+    } finally {
+      restoreBunNativeWebGlobals();
+      broadcastSpy.mockRestore();
+      await saveSettings({ requestTimeoutSeconds: 20 });
+      await unloadModel();
+      expect(getServerStatus().status).toBe("idle");
+    }
+  }, 300_000);
+
   it("completes real multimodal requests through streamProxy with persisted attachment replay", async () => {
     const loadRequest = buildLoadRequest(fixture.loadPreset);
     const wsHubModule = await import("../../src/server/wsHub");
@@ -483,4 +653,258 @@ describeReal("llamaServer real integration", () => {
       expect(getServerStatus().status).toBe("idle");
     }
   }, 180_000);
+
+  describe("context overflow policies", () => {
+    const FILLER =
+      "alpha bravo charlie delta echo foxtrot golf hotel india juliet kelvin lima ".repeat(80);
+
+    function buildOverflowLoadConfig(): ModelLoadConfig {
+      const config: ModelLoadConfig = {
+        ...fixture.loadPreset.config,
+        contextSize: 1024,
+      };
+      delete config.mmProjPath;
+      delete config.imageMaxTokens;
+      return config;
+    }
+
+    async function seedOversizedHistory(chatId: string): Promise<void> {
+      await addMessage({
+        id: Bun.randomUUIDv7(),
+        chatId,
+        role: "user",
+        content: "FIRST USER",
+        rawContent: "FIRST USER",
+        position: 0,
+        createdAt: Date.now(),
+      });
+      await addMessage({
+        id: Bun.randomUUIDv7(),
+        chatId,
+        role: "assistant",
+        content: `MIDDLE TURN ${FILLER}${FILLER}`,
+        rawContent: `MIDDLE TURN ${FILLER}${FILLER}`,
+        position: 1,
+        createdAt: Date.now(),
+      });
+      await addMessage({
+        id: Bun.randomUUIDv7(),
+        chatId,
+        role: "user",
+        content: `SECOND USER ${FILLER}`,
+        rawContent: `SECOND USER ${FILLER}`,
+        position: 2,
+        createdAt: Date.now(),
+      });
+      await addMessage({
+        id: Bun.randomUUIDv7(),
+        chatId,
+        role: "assistant",
+        content: `MORE MIDDLE ${FILLER}${FILLER}`,
+        rawContent: `MORE MIDDLE ${FILLER}${FILLER}`,
+        position: 3,
+        createdAt: Date.now(),
+      });
+    }
+
+    /**
+     * Captures llama-server chat-completion request bodies while still forwarding them.
+     *
+     * @returns Captured bodies plus a restore callback.
+     */
+    function captureCompletions(): {
+      bodies: Array<{ messages?: Array<{ role?: string; content?: string }> }>;
+      restore: () => void;
+    } {
+      const bodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/v1/chat/completions") && init?.body) {
+          try {
+            bodies.push(JSON.parse(String(init.body)));
+          } catch {
+            // Ignore malformed bodies; the original fetch still runs.
+          }
+        }
+        return bunNativeFetch(input, init);
+      }) as typeof fetch;
+      return {
+        bodies,
+        restore: () => {
+          restoreBunNativeWebGlobals();
+        },
+      };
+    }
+
+    it("StopAtLimit refuses to generate when the conversation exceeds the window", async () => {
+      const loadConfig = buildOverflowLoadConfig();
+      const presetId = "overflow-stop-at-limit";
+      await createInferencePreset({
+        ...fixture.inferencePreset,
+        id: presetId,
+        name: "StopAtLimit overflow",
+        isDefault: false,
+        contextOverflowPolicy: "StopAtLimit",
+        thinkingEnabled: false,
+        maxTokens: 8,
+      });
+
+      const wsHubModule = await import("../../src/server/wsHub");
+      const broadcastSpy = spyOn(wsHubModule, "broadcast");
+      try {
+        const port = await loadModel(
+          loadConfig,
+          fixture.settings.llamaServerPath,
+          TEST_PORT_MIN,
+          TEST_PORT_MAX,
+        );
+        await assertHealthy(port);
+
+        const chat = await createChat("StopAtLimit overflow", loadConfig.modelPath);
+        await updateChat(chat.id, { inferencePresetId: presetId });
+        await seedOversizedHistory(chat.id);
+
+        const assistantId = await proxyCompletion({
+          chatId: chat.id,
+          content: "Reply with the word ok.",
+          attachments: [],
+        });
+        const frame = await waitForTerminalFrame(broadcastSpy, chat.id, assistantId, 90_000);
+        expect(frame.type).toBe("error");
+        if (frame.type === "error") {
+          expect(frame.message.toLowerCase()).toContain("context");
+        }
+      } finally {
+        broadcastSpy.mockRestore();
+        await unloadModel();
+      }
+    }, 180_000);
+
+    it("TruncateMiddle keeps the system prompt and first user turn while dropping the middle", async () => {
+      const loadConfig = buildOverflowLoadConfig();
+      const presetId = "overflow-truncate-middle";
+      await createInferencePreset({
+        ...fixture.inferencePreset,
+        id: presetId,
+        name: "TruncateMiddle overflow",
+        isDefault: false,
+        contextOverflowPolicy: "TruncateMiddle",
+        thinkingEnabled: false,
+        maxTokens: 8,
+      });
+      await createSystemPreset({
+        id: "overflow-system",
+        name: "Overflow system",
+        content: "You are a terse assistant.",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+
+      const capture = captureCompletions();
+      const wsHubModule = await import("../../src/server/wsHub");
+      const broadcastSpy = spyOn(wsHubModule, "broadcast");
+      try {
+        const port = await loadModel(
+          loadConfig,
+          fixture.settings.llamaServerPath,
+          TEST_PORT_MIN,
+          TEST_PORT_MAX,
+        );
+        await assertHealthy(port);
+
+        const chat = await createChat("TruncateMiddle overflow", loadConfig.modelPath);
+        await updateChat(chat.id, {
+          inferencePresetId: presetId,
+          systemPresetId: "overflow-system",
+        });
+        await seedOversizedHistory(chat.id);
+
+        const assistantId = await proxyCompletion({
+          chatId: chat.id,
+          content: "LATEST QUERY reply with ok.",
+          attachments: [],
+        });
+        const frame = await waitForTerminalFrame(broadcastSpy, chat.id, assistantId, 90_000);
+        expect(frame.type).not.toBe("error");
+
+        const completion = capture.bodies.at(-1);
+        const contents = (completion?.messages ?? []).map((message) =>
+          String(message.content ?? ""),
+        );
+        expect(contents.some((content) => content.includes("You are a terse assistant."))).toBe(
+          true,
+        );
+        expect(contents.some((content) => content.includes("FIRST USER"))).toBe(true);
+        expect(contents.some((content) => content.includes("LATEST QUERY"))).toBe(true);
+        expect(contents.some((content) => content.includes("MORE MIDDLE"))).toBe(false);
+      } finally {
+        capture.restore();
+        broadcastSpy.mockRestore();
+        await unloadModel();
+      }
+    }, 180_000);
+
+    it("RollingWindow drops the oldest turns while preserving the system prompt and latest query", async () => {
+      const loadConfig = buildOverflowLoadConfig();
+      const presetId = "overflow-rolling-window";
+      await createInferencePreset({
+        ...fixture.inferencePreset,
+        id: presetId,
+        name: "RollingWindow overflow",
+        isDefault: false,
+        contextOverflowPolicy: "RollingWindow",
+        thinkingEnabled: false,
+        maxTokens: 8,
+      });
+      await createSystemPreset({
+        id: "overflow-system-rolling",
+        name: "Overflow rolling system",
+        content: "You are a terse assistant.",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+
+      const capture = captureCompletions();
+      const wsHubModule = await import("../../src/server/wsHub");
+      const broadcastSpy = spyOn(wsHubModule, "broadcast");
+      try {
+        const port = await loadModel(
+          loadConfig,
+          fixture.settings.llamaServerPath,
+          TEST_PORT_MIN,
+          TEST_PORT_MAX,
+        );
+        await assertHealthy(port);
+
+        const chat = await createChat("RollingWindow overflow", loadConfig.modelPath);
+        await updateChat(chat.id, {
+          inferencePresetId: presetId,
+          systemPresetId: "overflow-system-rolling",
+        });
+        await seedOversizedHistory(chat.id);
+
+        const assistantId = await proxyCompletion({
+          chatId: chat.id,
+          content: "LATEST QUERY reply with ok.",
+          attachments: [],
+        });
+        const frame = await waitForTerminalFrame(broadcastSpy, chat.id, assistantId, 90_000);
+        expect(frame.type).not.toBe("error");
+
+        const completion = capture.bodies.at(-1);
+        const contents = (completion?.messages ?? []).map((message) =>
+          String(message.content ?? ""),
+        );
+        expect(contents.some((content) => content.includes("You are a terse assistant."))).toBe(
+          true,
+        );
+        expect(contents.some((content) => content.includes("FIRST USER"))).toBe(false);
+        expect(contents.some((content) => content.includes("LATEST QUERY"))).toBe(true);
+      } finally {
+        capture.restore();
+        broadcastSpy.mockRestore();
+        await unloadModel();
+      }
+    }, 180_000);
+  });
 });

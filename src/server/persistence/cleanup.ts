@@ -7,7 +7,37 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { logError, logInfo } from "../logger";
 import { getActiveGenerationChatIds } from "../streamProxy";
+import { videoAudioSidecarOwnerStem } from "../videoAudio";
 import { getAppDataDir, getDb } from "./db";
+
+/**
+ * Whether a disk file is a video soundtrack cache that still belongs to a
+ * referenced video attachment, even if the sidecar has no `attachments` row.
+ *
+ * @param relPath - Path relative to the app data root, using `/` separators.
+ * @param referencedSet - `file_path` values currently stored in `attachments`.
+ * @returns `true` when the file must not be deleted as an orphan.
+ */
+export function isProtectedVideoAudioSidecar(
+  relPath: string,
+  referencedSet: ReadonlySet<string>,
+): boolean {
+  const parts = relPath.split("/");
+  const fileName = parts.at(-1);
+  if (!fileName) return false;
+  const stem = videoAudioSidecarOwnerStem(fileName);
+  if (!stem) return false;
+  const dirPrefix = `${parts.slice(0, -1).join("/")}/`;
+  for (const referenced of referencedSet) {
+    if (!referenced.startsWith(dirPrefix)) continue;
+    const referencedName = referenced.slice(dirPrefix.length);
+    if (referencedName.includes("/")) continue;
+    const dot = referencedName.lastIndexOf(".");
+    const referencedStem = dot > 0 ? referencedName.slice(0, dot) : referencedName;
+    if (referencedStem === stem) return true;
+  }
+  return false;
+}
 
 /**
  * Scans the attachments directory and deletes any files that are not referenced in the SQLite database.
@@ -55,7 +85,10 @@ export async function cleanupOrphanedAttachments() {
                 if (!file.isFile()) return;
 
                 const relPath = ["attachments", chatDir.name, msgDir.name, file.name].join("/");
-                if (!referencedSet.has(relPath)) {
+                if (
+                  !referencedSet.has(relPath) &&
+                  !isProtectedVideoAudioSidecar(relPath, referencedSet)
+                ) {
                   logInfo(`Cleaning up orphaned attachment: ${relPath}`);
                   await Bun.file(path.join(msgDirPath, file.name))
                     .delete()

@@ -113,6 +113,7 @@ export function ChatSidebar() {
     e.preventDefault();
     e.stopPropagation();
     if (deleteLockRef.current || deleteMut.isPending) return;
+    if (id === chatId) return;
     if (!confirm("Are you sure you want to delete this chat?")) return;
 
     const nextChatId = chatId === id ? chats.find((c) => c.id !== id)?.id : undefined;
@@ -399,9 +400,9 @@ export function ChatSidebar() {
                     <button
                       type="button"
                       onClick={(e) => handleDelete(c.id, e)}
-                      disabled={pendingDeleteId !== null}
-                      className="p-1.5 hover:bg-red-500/10 rounded-lg text-[var(--color-text-muted)] hover:text-red-400"
-                      title="Delete">
+                      disabled={pendingDeleteId !== null || c.id === chatId}
+                      className="p-1.5 hover:bg-red-500/10 rounded-lg text-[var(--color-text-muted)] hover:text-red-400 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
+                      title={c.id === chatId ? "Cannot delete the open chat" : "Delete"}>
                       <Trash2 size={14} />
                     </button>
                   </div>

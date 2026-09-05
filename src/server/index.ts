@@ -179,6 +179,10 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
 if (import.meta.main) {
   startServer().catch((err) => {
     logError("Server startup failed:", err);
+    // Always print fatal startup failures. Application logLevel can be "off",
+    // which would otherwise make `npm run start` look like an instant no-output exit.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Server startup failed: ${message}`);
     process.exit(1);
   });
 }

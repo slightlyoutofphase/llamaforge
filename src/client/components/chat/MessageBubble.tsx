@@ -4,8 +4,6 @@
  * Handles markdown rendering, tool call cards, thinking blocks, and message action toolbars.
  */
 
-import type { ChatMessage } from "../../../shared/types";
-import { parseToolCallsJson } from "../../../shared/toolCalls";
 import { Check, FileText, X } from "lucide-react";
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -13,8 +11,13 @@ import rehypeHighlight from "rehype-highlight";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { isExtractedVideoAudioAttachment } from "../../../shared/extractedAudio";
+import { isThinkingTraceLive } from "../../../shared/thinkingDisplay";
+import { parseToolCallsJson } from "../../../shared/toolCalls";
+import type { ChatMessage } from "../../../shared/types";
 import { useAppStore } from "../../store";
 import { MessageActions } from "./MessageActions";
+import { ResponseStatusBar } from "./ResponseStatusBar";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { ToolCard } from "./ToolCard";
 
@@ -71,7 +74,13 @@ function hasSameMetrics(prev: ChatMessage["metrics"], next: ChatMessage["metrics
     prev.promptTokens === next.promptTokens &&
     prev.promptTokensPerSecond === next.promptTokensPerSecond &&
     prev.cachedPromptTokens === next.cachedPromptTokens &&
-    prev.evaluatedPromptTokens === next.evaluatedPromptTokens
+    prev.evaluatedPromptTokens === next.evaluatedPromptTokens &&
+    prev.generationMs === next.generationMs &&
+    prev.promptMs === next.promptMs &&
+    prev.thinkingDurationMs === next.thinkingDurationMs &&
+    prev.stopReason === next.stopReason &&
+    prev.draftTokens === next.draftTokens &&
+    prev.draftTokensAccepted === next.draftTokensAccepted
   );
 }
 
@@ -105,13 +114,35 @@ function hasSameAttachments(
 }
 
 /**
- * Formats token throughput values for the assistant metrics footer.
+ * Resolves the HTTP URL used by an inline video player, or omits it while
+ * llama-server needs exclusive access to the same on-disk file.
  *
- * @param tokensPerSecond - Throughput value reported by the backend.
- * @returns A human-readable tokens-per-second string.
+ * @param filePath - Stored attachment path relative to the app data root.
+ * @param isGenerating - Whether a completion is currently reading media from disk.
+ * @returns Attachment URL, or `undefined` so the player does not open the file.
  */
-function formatRate(tokensPerSecond: number): string {
-  return `${tokensPerSecond.toFixed(tokensPerSecond >= 100 ? 0 : 1)} tokens/sec`;
+export function resolveVideoAttachmentSrc(
+  filePath: string,
+  isGenerating: boolean,
+): string | undefined {
+  if (isGenerating) return undefined;
+  return `/api/attachments/${filePath}`;
+}
+
+/**
+ * Resolves the plaintext that should seed the in-place message editor.
+ *
+ * Assistant bubbles often mount while `content` is still empty (thinking tokens
+ * first, then the visible reply). The editor must read the latest message text
+ * when edit mode starts, not the value captured on first mount.
+ *
+ * @param message - Message being edited.
+ * @returns Visible message text for the editor.
+ */
+export function resolveEditableMessageContent(message: ChatMessage): string {
+  if (message.content.length > 0) return message.content;
+  if (message.thinkingContent) return "";
+  return message.rawContent || "";
 }
 
 /**
@@ -125,10 +156,10 @@ interface MessageBubbleProps {
   /** Whether this message is currently being streamed/written by the assistant. */
   isStreaming?: boolean;
   /** Callback triggered when the user saves an edit to their own or assistant's message. */
-  onEdit: (id: string, newContent: string) => void;
+  onEdit: (id: string, newContent: string) => void | Promise<void>;
   /** Callback to branch the chat history from this message. */
   onBranch: (id: string) => void;
-  /** Callback to regenerate the assistant response for this turn. */
+  /** Callback to generate or regenerate the assistant response for this turn. */
   onRegenerate: (id: string) => void;
   /** Callback to continue a truncated assistant response. */
   onContinue: (id: string) => void;
@@ -161,8 +192,11 @@ export const MessageBubble = React.memo(
     onDelete,
   }: MessageBubbleProps) {
     const approveToolCall = useAppStore((state) => state.approveToolCall);
+    const isGenerating = useAppStore((state) => state.isGenerating);
+    const isSyncingHistory = useAppStore((state) => state.isSyncingHistory);
     const [isEditing, setIsEditing] = useState(false);
-    const [editContent, setEditContent] = useState(message.content);
+    const [isSavingEdit, setIsSavingEdit] = useState(false);
+    const [editContent, setEditContent] = useState(() => resolveEditableMessageContent(message));
 
     const toolCalls = React.useMemo(
       () => parseToolCallsJson(message.toolCallsJson),
@@ -170,19 +204,8 @@ export const MessageBubble = React.memo(
     );
 
     const textareaRef = useRef<HTMLTextAreaElement>(null);
-    const [displayContent, setDisplayContent] = useState(message.content);
-
-    useEffect(() => {
-      if (!isStreaming) {
-        setDisplayContent(message.content);
-        return;
-      }
-      const timer = window.setTimeout(() => setDisplayContent(message.content), 80);
-      return () => window.clearTimeout(timer);
-    }, [message.content, isStreaming]);
-
     const renderedContent =
-      displayContent || (message.thinkingContent ? "" : message.rawContent) || "";
+      message.content || (message.thinkingContent ? "" : message.rawContent) || "";
     const metrics = message.metrics;
     const wrapperSpacingClass = bubbleStyle === "compact" ? "my-3" : "my-6";
     const bubbleClassName =
@@ -198,16 +221,42 @@ export const MessageBubble = React.memo(
             ? "max-w-[85%] rounded-3xl p-5 shadow-sm text-base bg-[var(--color-surface-elevated)] border border-[var(--color-border)] text-[var(--color-text-primary)] rounded-tr-sm"
             : "max-w-[85%] rounded-3xl p-5 shadow-sm text-base bg-transparent text-[var(--color-text-primary)] rounded-tl-sm";
 
+    const editableContent = resolveEditableMessageContent(message);
+
+    useEffect(() => {
+      if (!isEditing) {
+        setEditContent(editableContent);
+      }
+    }, [editableContent, isEditing]);
+
     useEffect(() => {
       if (isEditing && textareaRef.current) {
         textareaRef.current.focus();
-        // Put cursor at end
         textareaRef.current.setSelectionRange(
           textareaRef.current.value.length,
           textareaRef.current.value.length,
         );
       }
     }, [isEditing]);
+
+    /**
+     * Enters in-place edit mode, seeding the textarea from the latest message text.
+     *
+     * @returns No return value.
+     */
+    const beginEditing = () => {
+      if (toolCalls && toolCalls.length > 0) {
+        if (
+          !window.confirm(
+            "WARNING: This message contains resolved tool calls. Editing it will invalidate downstream tool bindings. Continue?",
+          )
+        ) {
+          return;
+        }
+      }
+      setEditContent(resolveEditableMessageContent(message));
+      setIsEditing(true);
+    };
 
     /**
      * Copies the visible message content to the clipboard.
@@ -229,10 +278,24 @@ export const MessageBubble = React.memo(
      * @returns No return value.
      */
     const saveEdit = () => {
-      if (editContent.trim() !== message.content) {
-        onEdit(message.id, editContent);
+      if (isSavingEdit) return;
+      const next = editContent.trim();
+      const previous = resolveEditableMessageContent(message).trim();
+      if (next === previous) {
+        setIsEditing(false);
+        return;
       }
-      setIsEditing(false);
+      setIsSavingEdit(true);
+      void Promise.resolve(onEdit(message.id, next))
+        .then(() => {
+          setIsEditing(false);
+        })
+        .catch(() => {
+          // Stay in edit mode; ChatView already surfaced the failure.
+        })
+        .finally(() => {
+          setIsSavingEdit(false);
+        });
     };
 
     return (
@@ -247,6 +310,7 @@ export const MessageBubble = React.memo(
           <div
             className={`flex flex-wrap gap-2 max-w-[85%] ${message.role === "user" ? "ml-auto justify-end" : "justify-start"} mb-2`}>
             {message.attachments.map((att) => {
+              if (isExtractedVideoAudioAttachment(att)) return null;
               if (att.mimeType.startsWith("image/")) {
                 return (
                   <img
@@ -270,13 +334,17 @@ export const MessageBubble = React.memo(
                 );
               }
               if (att.mimeType.startsWith("video/")) {
+                const videoSrc = resolveVideoAttachmentSrc(att.filePath, isGenerating);
                 return (
                   <video
                     key={att.id}
-                    src={`/api/attachments/${att.filePath}`}
+                    {...(videoSrc ? { src: videoSrc } : {})}
                     controls
+                    playsInline
+                    preload="none"
+                    data-testid="chat-video-attachment"
                     className="max-h-32 rounded-xl border border-[var(--color-border)] object-contain bg-black/20">
-                    <track kind="captions" src="" label="No captions available" />
+                    <track kind="captions" label="No captions available" />
                   </video>
                 );
               }
@@ -295,13 +363,15 @@ export const MessageBubble = React.memo(
           <div className="w-full max-w-[85%] border border-[var(--color-accent)] rounded-2xl bg-[var(--color-surface-elevated)] p-2">
             <textarea
               ref={textareaRef}
+              data-testid="message-edit-textarea"
+              aria-label="Edit message"
               value={editContent}
               onChange={(e) => setEditContent(e.target.value)}
               className="w-full bg-transparent resize-none border-none outline-none text-[var(--color-text-primary)] min-h-[100px] font-sans"
               onKeyDown={(e) => {
                 if (e.key === "Escape") {
                   setIsEditing(false);
-                  setEditContent(message.content);
+                  setEditContent(editableContent);
                 } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
                   saveEdit();
                 }
@@ -312,7 +382,7 @@ export const MessageBubble = React.memo(
                 type="button"
                 onClick={() => {
                   setIsEditing(false);
-                  setEditContent(message.content);
+                  setEditContent(editableContent);
                 }}
                 className="px-3 py-1.5 text-xs font-semibold rounded hover:bg-[var(--color-surface)] text-[var(--color-text-muted)] flex items-center">
                 <X size={14} className="mr-1" /> Cancel
@@ -320,7 +390,8 @@ export const MessageBubble = React.memo(
               <button
                 type="button"
                 onClick={saveEdit}
-                className="px-3 py-1.5 text-xs font-semibold rounded bg-[var(--color-accent)] text-white flex items-center hover:opacity-90">
+                disabled={isSavingEdit}
+                className="px-3 py-1.5 text-xs font-semibold rounded bg-[var(--color-accent)] text-white flex items-center hover:opacity-90 disabled:opacity-50">
                 <Check size={14} className="mr-1" /> Save
               </button>
             </div>
@@ -328,7 +399,15 @@ export const MessageBubble = React.memo(
         ) : (
           <>
             {message.role === "assistant" && message.thinkingContent && (
-              <ThinkingBlock content={message.thinkingContent} isLive={!!isStreaming} />
+              <ThinkingBlock
+                content={message.thinkingContent}
+                isLive={isThinkingTraceLive(
+                  !!isStreaming,
+                  message.thinkingContent,
+                  message.content,
+                )}
+                durationMs={metrics?.thinkingDurationMs}
+              />
             )}
             <div
               data-bubble-style={bubbleStyle}
@@ -340,17 +419,8 @@ export const MessageBubble = React.memo(
                 </ReactMarkdown>
               </div>
             </div>
-            {message.role === "assistant" && metrics && (
-              <div className="mt-2 flex max-w-[85%] flex-wrap items-center gap-x-3 gap-y-1 text-[11px] font-medium text-[var(--color-text-muted)]">
-                <span>{formatRate(metrics.tokensPerSecond)}</span>
-                <span>{metrics.predictedTokens.toLocaleString()} output tokens</span>
-                {(metrics.cachedPromptTokens > 0 || metrics.evaluatedPromptTokens > 0) && (
-                  <span>
-                    Prompt cache reuse: {metrics.cachedPromptTokens.toLocaleString()} /{" "}
-                    {metrics.evaluatedPromptTokens.toLocaleString()} tokens
-                  </span>
-                )}
-              </div>
+            {message.role === "assistant" && metrics && !isStreaming && (
+              <ResponseStatusBar metrics={metrics} />
             )}
           </>
         )}
@@ -374,22 +444,14 @@ export const MessageBubble = React.memo(
             className={`mt-2 flex max-w-[85%] ${message.role === "user" ? "ml-auto justify-end" : "justify-start"}`}>
             <MessageActions
               role={message.role}
+              locked={isGenerating || isSyncingHistory}
               onCopy={handleCopy}
-              onEdit={() => {
-                if (toolCalls && toolCalls.length > 0) {
-                  if (
-                    !window.confirm(
-                      "WARNING: This message contains resolved tool calls. Editing it will invalidate downstream tool bindings. Continue?",
-                    )
-                  ) {
-                    return;
-                  }
-                }
-                setIsEditing(true);
-              }}
+              onEdit={beginEditing}
               onBranch={() => onBranch(message.id)}
               onRegenerate={
-                message.role === "assistant" ? () => onRegenerate(message.id) : undefined
+                message.role === "assistant" || (message.role === "user" && !isGenerating)
+                  ? () => onRegenerate(message.id)
+                  : undefined
               }
               onContinue={message.role === "assistant" ? () => onContinue(message.id) : undefined}
               onDelete={() => onDelete(message.id)}

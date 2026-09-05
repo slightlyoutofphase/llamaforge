@@ -19,7 +19,7 @@ export interface ModelLoadConfig {
   specDraftModelPath?: string | undefined;
   /** Maximum number of draft tokens to generate. */
   specDraftNMax?: number | undefined;
-  /** Minimum number of draft tokens to generate. */
+  /** Minimum number of draft tokens (`--spec-draft-n-min`, llama-server default 0). */
   specDraftNMin?: number | undefined;
   /** Minimum probability for draft token acceptance. */
   specDraftPMin?: number | undefined;
@@ -80,10 +80,15 @@ export interface ModelLoadConfig {
   /** Maximum number of image tokens for dynamic image resolution at model load time. */
   imageMaxTokens?: number;
   /**
-   * Optional minimum number of image tokens. Omitted unless the user sets it explicitly,
-   * and only emitted alongside `--image-max-tokens`.
+   * Minimum number of image tokens. Always emitted alongside `--image-max-tokens`
+   * (defaults to 70 when unset).
    */
   imageMinTokens?: number;
+  /**
+   * Target video frame rate passed as llama-server `--video-fps`.
+   * Defaults to 4 when unset.
+   */
+  videoFps?: number | undefined;
   /** ID of the preset used to generate this config. */
   presetId?: string;
 }
@@ -167,7 +172,7 @@ export interface ThinkingTagConfig {
   openTag: string;
   /** Closing tag string used to delimit thinking content. */
   closeTag: string;
-  /** Optional token used to enable thinking tag processing. */
+  /** Optional token passed to the chat template as `enable_token` when set. */
   enableToken: string | undefined;
 }
 
@@ -200,6 +205,12 @@ export interface LlamaTimings {
   tokens_cached: number;
   /** Number of tokens evaluated by the model. */
   tokens_evaluated: number;
+  /** Optional number of speculative draft tokens proposed. */
+  draft_n?: number;
+  /** Optional number of speculative draft tokens accepted. */
+  draft_n_accepted?: number;
+  /** Alternate llama-server name for accepted draft tokens. */
+  n_draft_accepted?: number;
 }
 
 /**
@@ -218,6 +229,24 @@ export interface MessageMetrics {
   cachedPromptTokens: number;
   /** Number of prompt tokens evaluated by the model. */
   evaluatedPromptTokens: number;
+  /** Generation (decode) duration in milliseconds. */
+  generationMs?: number;
+  /** Prompt-evaluation duration in milliseconds. */
+  promptMs?: number;
+  /** Wall-clock duration of the thinking/reasoning phase in milliseconds. */
+  thinkingDurationMs?: number;
+  /** Reason the generation stopped. */
+  stopReason?:
+    "eos" | "max_tokens" | "stop_string" | "error" | "contextLengthReached" | "tool_calls";
+  /**
+   * How the thinking trace was extracted for this message.
+   * `native` is llama-server `reasoning_content`; `tags` is in-stream delimiters.
+   */
+  thinkingSource?: "native" | "tags";
+  /** Number of speculative draft tokens proposed, when reported. */
+  draftTokens?: number;
+  /** Number of speculative draft tokens accepted, when reported. */
+  draftTokensAccepted?: number;
 }
 
 /**
@@ -242,6 +271,12 @@ export interface WsTokenFrame {
   promptTokens?: number;
   /** Optional current context size in tokens. */
   contextSize?: number;
+  /**
+   * Wall-clock thinking duration once the think block has closed.
+   * Present on later token frames so the thought bubble can freeze its timer
+   * while the visible answer is still streaming.
+   */
+  thinkingDurationMs?: number | undefined;
 }
 
 /**
@@ -271,6 +306,8 @@ export interface WsStopFrame {
   fullRawContent?: string;
   /** Optional thinking trace content captured during generation. */
   fullThinking?: string;
+  /** Optional wall-clock duration of the thinking phase in milliseconds. */
+  thinkingDurationMs?: number;
 }
 
 /**
@@ -566,8 +603,6 @@ export interface InferencePreset {
   contextOverflowPolicy?: ContextOverflowPolicy;
   /** Whether thinking tags are enabled. */
   thinkingEnabled?: boolean;
-  /** Whether to preserve thinking content in history (template-dependent). */
-  preserveThinking?: boolean;
   /** Preset creation timestamp. */
   createdAt: number;
   /** Preset last update timestamp. */
@@ -592,6 +627,11 @@ export interface LoadPreset {
   config: ModelLoadConfig;
   /** Optional custom chat template override. */
   chatTemplateOverride?: string | undefined;
+  /**
+   * Whether generations using this load preset pass `preserve_thinking` to the
+   * Jinja chat template. Independent of inference sampling presets.
+   */
+  preserveThinking?: boolean;
   /** Optional thinking tag override for the active loaded model. */
   thinkingTagOverride?: ThinkingTagConfig | undefined;
   /** Preset creation timestamp. */
@@ -723,6 +763,28 @@ export interface HardwareInfo {
 }
 
 /**
+ * Token occupancy of the currently selected conversation relative to the loaded context window.
+ */
+export interface ChatContextUsage {
+  /** Estimated tokens currently occupied by the active conversation (system prompt included). */
+  usedTokens: number;
+  /** Loaded model context window in tokens, or `null` when no model is running. */
+  contextSize: number | null;
+}
+
+/**
+ * Memory consumed by LlamaForge itself (the Bun backend plus llama-server), excluding unrelated processes.
+ */
+export interface AppProcessUsage {
+  /** Resident set size of the Bun process plus llama-server, in bytes. */
+  ramBytes: number;
+  /** GPU memory attributed to the llama-server process tree, in bytes. */
+  vramBytes: number;
+  /** PID of the active llama-server process, or `null` when no model is loaded. */
+  llamaServerPid: number | null;
+}
+
+/**
  * Globally applicable application configuration and UI preferences.
  */
 export interface AppSettings {
@@ -758,6 +820,13 @@ export interface AppSettings {
   defaultSystemPromptPresetId?: string;
   /** Whether the last loaded model should be automatically restored. */
   autoloadLastModel: boolean;
+  /**
+   * When enabled, video attachments that contain an audio stream also send that
+   * soundtrack as a separate `input_audio` part. llama-server cannot consume
+   * muxed video+audio as a single file. No-ops unless the loaded model has an
+   * audio encoder.
+   */
+  includeVideoAudio: boolean;
   /** Minimum allowed port for llama-server. */
   llamaPortRangeMin: number;
   /** Maximum allowed port for llama-server. */

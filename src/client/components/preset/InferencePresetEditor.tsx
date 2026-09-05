@@ -4,20 +4,18 @@
  */
 
 import { json } from "@codemirror/lang-json";
-import type { InferencePreset, ToolDefinition } from "../../../shared/types";
-import { BUILT_IN_TOOLS, isBuiltInToolName } from "../../../shared/builtInTools";
-import { analyzeTemplateCapabilities } from "../../../shared/templateCapabilities";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { BUILT_IN_TOOLS, isBuiltInToolName } from "../../../shared/builtInTools";
+import { createDefaultInferenceSampling } from "../../../shared/defaults";
+import type { InferencePreset, ToolDefinition } from "../../../shared/types";
 import {
   useCreateInferencePreset,
   useDeleteInferencePreset,
   useInferencePresets,
-  useLoadPresets,
   useUpdateInferencePreset,
 } from "../../queries";
-import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 
 /**
@@ -29,8 +27,6 @@ import { useUiStore } from "../../uiStore";
 export function InferencePresetEditor() {
   const { setRightPanelView, activePresetId } = useUiStore();
   const { data: presets } = useInferencePresets();
-  const { data: loadPresets } = useLoadPresets();
-  const loadedModel = useAppStore((s) => s.loadedModel);
   const [schemaDraft, setSchemaDraft] = useState("{}");
   const createMut = useCreateInferencePreset();
   const updateMut = useUpdateInferencePreset();
@@ -39,19 +35,6 @@ export function InferencePresetEditor() {
   const activePreset = presets?.find((p) => p.id === activePresetId) || presets?.[0];
 
   const [localState, setLocalState] = useState<Partial<InferencePreset> | null>(null);
-
-  const templateCapabilities = useMemo(() => {
-    const loadPreset = loadPresets?.find((p) => p.modelPath === loadedModel?.primaryPath);
-    const ggufTemplate = loadedModel?.metadata?.chatTemplate;
-    const overrideTemplate = loadPreset?.chatTemplateOverride;
-    const effectiveTemplate = overrideTemplate ?? ggufTemplate;
-    if (!effectiveTemplate) return null;
-    const capabilities = analyzeTemplateCapabilities(effectiveTemplate);
-    const provenance = overrideTemplate && overrideTemplate !== ggufTemplate ? "override" : "gguf";
-    return capabilities
-      ? { ...capabilities, provenance }
-      : { hasPreserveThinking: false, provenance };
-  }, [loadPresets, loadedModel]);
 
   useEffect(() => {
     if (!activePreset) return;
@@ -139,35 +122,7 @@ export function InferencePresetEditor() {
       id: crypto.randomUUID(),
       name: "New Inference Preset",
       isDefault: false,
-      temperature: 0.8,
-      topK: 40,
-      topP: 0.95,
-      minP: 0.05,
-      repeatPenalty: 1.1,
-      repeatLastN: 64,
-
-      typicalP: 1.0,
-      presencePenalty: 0.0,
-      frequencyPenalty: 0.0,
-      mirostat: 0,
-      mirostatTau: 5.0,
-      mirostatEta: 0.1,
-      dynaTempRange: 0.0,
-      dynaTempExponent: 1.0,
-      dryMultiplier: 0.0,
-      dryBase: 1.75,
-      dryAllowedLength: 2,
-      dryPenaltyLastN: 64,
-      drySequenceBreakers: ["\n", ":", '"', "*"],
-      xtcProbability: 0.0,
-      xtcThreshold: 0.1,
-      seed: -1,
-      maxTokens: -1,
-      stopStrings: [],
-      toolCallsEnabled: false,
-      tools: [],
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
+      ...createDefaultInferenceSampling(),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -799,40 +754,6 @@ export function InferencePresetEditor() {
           <p className="text-xs text-[var(--color-text-muted)] mt-2">
             Tag parsing is controlled by the active load preset. This toggle only controls whether
             `enable_thinking` is requested on subsequent generations.
-          </p>
-        </section>
-
-        <section className="space-y-4">
-          <h3
-            className={`text-xs font-bold uppercase tracking-wider flex items-center justify-between ${
-              templateCapabilities?.hasPreserveThinking
-                ? "text-[var(--color-text-muted)]"
-                : "text-[var(--color-text-muted)] opacity-50"
-            }`}>
-            <label
-              htmlFor="preserveThinking"
-              title="Passes preserve_thinking = true/false to the Jinja chat template">
-              Preserve Thinking
-            </label>
-            <input
-              id="preserveThinking"
-              type="checkbox"
-              disabled={!templateCapabilities?.hasPreserveThinking}
-              checked={
-                localState.preserveThinking ??
-                templateCapabilities?.preserveThinkingDefault ??
-                false
-              }
-              onChange={(e) => updateField("preserveThinking", e.target.checked)}
-              className="accent-[var(--color-accent)] disabled:opacity-30"
-            />
-          </h3>
-          <p className="text-xs text-[var(--color-text-muted)] mt-2">
-            {templateCapabilities?.hasPreserveThinking
-              ? "Controls whether the template preserves reasoning content in the conversation history."
-              : templateCapabilities?.provenance === "gguf"
-                ? "The GGUF-embedded chat template does not support preserve_thinking. Re-download the model or paste a current template into the load-preset override to enable this control."
-                : "The active chat template override does not support preserve_thinking. Paste a current template into the load-preset override to enable this control."}
           </p>
         </section>
 

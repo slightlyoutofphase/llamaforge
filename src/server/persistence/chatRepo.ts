@@ -5,6 +5,12 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  EXTRACTED_AUDIO_SUFFIX,
+  isExtractedVideoAudioAttachment,
+  videoAudioSidecarOwnerStem,
+} from "../../shared/extractedAudio";
+import { sanitizeToolCallsJson } from "../../shared/toolCalls";
 import type {
   Attachment,
   ChatMessage,
@@ -12,9 +18,10 @@ import type {
   GgufDisplayMetadata,
   MessageMetrics,
 } from "../../shared/types";
-import { sanitizeToolCallsJson } from "../../shared/toolCalls";
 import { logError, logWarn } from "../logger";
+import { videoAudioSidecarCopyPlan } from "../videoAudio";
 import { getAppDataDir, getDb, resolveAppDataPath } from "./db";
+
 type ChatMessageRow = Omit<ChatMessage, "metrics"> & {
   metricsJson?: string | null;
 };
@@ -85,6 +92,110 @@ function sanitizeFileName(fileName: string): string {
 }
 
 /**
+ * Returns the final path segment of a stored attachment path.
+ *
+ * @param filePath - Attachment path using `/` or `\` separators.
+ * @returns Basename of the stored file.
+ */
+function attachmentBasename(filePath: string): string {
+  const normalized = filePath.replaceAll("\\", "/");
+  const slash = normalized.lastIndexOf("/");
+  return slash === -1 ? normalized : normalized.slice(slash + 1);
+}
+
+/**
+ * Pairs an extracted soundtrack with the video it belongs to after a copy.
+ *
+ * @param soundtrack - Soundtrack attachment being copied.
+ * @param attachments - All attachments on the same message.
+ * @param videoNewStemById - New UUID stems assigned to video attachments.
+ * @returns New video stem, or `undefined` when the soundtrack cannot be paired.
+ */
+function findPairedVideoNewStem(
+  soundtrack: { filePath: string; fileName: string },
+  attachments: readonly { id: string; mimeType: string; filePath: string; fileName: string }[],
+  videoNewStemById: Map<string, string>,
+): string | undefined {
+  const ownerFromPath = videoAudioSidecarOwnerStem(attachmentBasename(soundtrack.filePath));
+  const ownerFromName = videoAudioSidecarOwnerStem(soundtrack.fileName);
+  const videos = attachments.filter((attachment) => attachment.mimeType.startsWith("video/"));
+  for (const video of videos) {
+    const storedStem = path.parse(attachmentBasename(video.filePath)).name;
+    const originalStem = path.parse(video.fileName).name;
+    if (
+      (ownerFromPath && ownerFromPath === storedStem) ||
+      (ownerFromName && (ownerFromName === originalStem || ownerFromName === storedStem))
+    ) {
+      return videoNewStemById.get(video.id);
+    }
+  }
+  const onlyVideo = videos[0];
+  if (videos.length === 1 && onlyVideo) return videoNewStemById.get(onlyVideo.id);
+  return undefined;
+}
+
+/**
+ * Chooses on-disk basenames for copied or imported attachments.
+ * Videos get a fresh UUID stem; extracted soundtracks keep `{videoStem}.extracted-audio.wav`.
+ *
+ * @param attachments - Attachments on a single message.
+ * @returns Map of attachment id to destination basename.
+ */
+function allocateCopiedAttachmentNames(
+  attachments: readonly { id: string; mimeType: string; filePath: string; fileName: string }[],
+): Map<string, string> {
+  const names = new Map<string, string>();
+  const videoNewStemById = new Map<string, string>();
+  for (const att of attachments) {
+    if (!att.mimeType.startsWith("video/")) continue;
+    const stem = Bun.randomUUIDv7();
+    videoNewStemById.set(att.id, stem);
+    const ext =
+      path.extname(sanitizeFileName(att.fileName)) ||
+      path.extname(attachmentBasename(att.filePath)) ||
+      "";
+    names.set(att.id, `${stem}${ext}`);
+  }
+  for (const att of attachments) {
+    if (names.has(att.id)) continue;
+    if (isExtractedVideoAudioAttachment(att)) {
+      const pairedStem = findPairedVideoNewStem(att, attachments, videoNewStemById);
+      if (pairedStem) {
+        names.set(att.id, `${pairedStem}${EXTRACTED_AUDIO_SUFFIX}`);
+        continue;
+      }
+    }
+    const ext = path.extname(sanitizeFileName(att.fileName)) || "";
+    names.set(att.id, `${Bun.randomUUIDv7()}${ext}`);
+  }
+  return names;
+}
+
+/**
+ * Appends a branch copy operation unless the destination is already scheduled.
+ *
+ * @param operations - Accumulated copy plan.
+ * @param operation - Candidate copy.
+ * @returns No return value.
+ */
+function pushUniqueCopy(operations: BranchAttachmentCopy[], operation: BranchAttachmentCopy): void {
+  if (operations.some((existing) => existing.newPath === operation.newPath)) return;
+  operations.push(operation);
+}
+
+/**
+ * Filesystem copy scheduled after a successful branch-chat transaction.
+ */
+interface BranchAttachmentCopy {
+  /** Absolute source path of the original attachment or sidecar. */
+  oldPath: string;
+  /** Absolute destination path in the branch attachments directory. */
+  newPath: string;
+  /** When true, a missing source is skipped instead of failing the branch. */
+  optional?: boolean | undefined;
+}
+
+/**
  * Encodes binary data as a base64 string without using Node's Buffer API.
  *
  * @param bytes - Raw bytes to encode.
@@ -144,6 +255,29 @@ function parseMessageMetrics(metricsJson: string | null | undefined): MessageMet
       typeof parsed.cachedPromptTokens === "number" &&
       typeof parsed.evaluatedPromptTokens === "number"
     ) {
+      const optionalNumber = (value: unknown): number | undefined =>
+        typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+      const stopReasons = new Set([
+        "eos",
+        "max_tokens",
+        "stop_string",
+        "error",
+        "contextLengthReached",
+        "tool_calls",
+      ]);
+      const stopReason =
+        typeof parsed.stopReason === "string" && stopReasons.has(parsed.stopReason)
+          ? parsed.stopReason
+          : undefined;
+      const generationMs = optionalNumber(parsed.generationMs);
+      const promptMs = optionalNumber(parsed.promptMs);
+      const thinkingDurationMs = optionalNumber(parsed.thinkingDurationMs);
+      const draftTokens = optionalNumber(parsed.draftTokens);
+      const draftTokensAccepted = optionalNumber(parsed.draftTokensAccepted);
+      const thinkingSource =
+        parsed.thinkingSource === "native" || parsed.thinkingSource === "tags"
+          ? parsed.thinkingSource
+          : undefined;
       return {
         predictedTokens: parsed.predictedTokens,
         tokensPerSecond: parsed.tokensPerSecond,
@@ -151,6 +285,13 @@ function parseMessageMetrics(metricsJson: string | null | undefined): MessageMet
         promptTokensPerSecond: parsed.promptTokensPerSecond,
         cachedPromptTokens: parsed.cachedPromptTokens,
         evaluatedPromptTokens: parsed.evaluatedPromptTokens,
+        ...(generationMs !== undefined ? { generationMs } : {}),
+        ...(promptMs !== undefined ? { promptMs } : {}),
+        ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+        ...(stopReason ? { stopReason } : {}),
+        ...(thinkingSource ? { thinkingSource } : {}),
+        ...(draftTokens !== undefined ? { draftTokens } : {}),
+        ...(draftTokensAccepted !== undefined ? { draftTokensAccepted } : {}),
       };
     }
   } catch (err) {
@@ -560,21 +701,48 @@ export async function addMessage(message: ChatMessage): Promise<void> {
  * @param content - Parsed content (with thinking tags removed if applicable).
  * @param rawContent - Original raw output from the model.
  * @param thinkingContent - Optional extracted thinking trace content.
- * @returns A promise that resolves once the message row and parent chat timestamp are updated.
+ * @param chatId - When provided, the message must belong to this chat.
+ * @returns `true` when a matching row was updated.
  */
 export async function updateMessage(
   id: string,
   content: string,
   rawContent: string,
   thinkingContent?: string,
-): Promise<void> {
+  chatId?: string,
+): Promise<boolean> {
   const db = getDb();
-  db.prepare(
-    "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
-  ).run(content, rawContent, thinkingContent || null, id);
+  const result = chatId
+    ? db
+        .prepare(
+          "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ? AND chat_id = ?",
+        )
+        .run(content, rawContent, thinkingContent || null, id, chatId)
+    : db
+        .prepare(
+          "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
+        )
+        .run(content, rawContent, thinkingContent || null, id);
+  if (result.changes === 0) return false;
   db.prepare(
     "UPDATE chats SET updated_at = ? WHERE id = (SELECT chat_id FROM messages WHERE id = ?)",
   ).run(Date.now(), id);
+  return true;
+}
+
+/**
+ * Reads the id of the latest message in a chat transcript.
+ *
+ * @param chatId - Chat whose persisted head should be returned.
+ * @returns The last message id, or `null` when the chat has no messages.
+ */
+export function getLastMessageId(chatId: string): string | null {
+  const row = getDb()
+    .query<{ id: string }, [string]>(
+      "SELECT id FROM messages WHERE chat_id = ? ORDER BY position DESC LIMIT 1",
+    )
+    .get(chatId);
+  return row?.id ?? null;
 }
 
 /**
@@ -613,39 +781,39 @@ export async function deleteMessagesAfter(chatId: string, position: number): Pro
  *
  * @param chatId - UUID of the chat session.
  * @param messageId - UUID of the message to delete.
- * @returns A promise that resolves once the target messages and attachment files are removed.
+ * @returns `true` when the message existed and was deleted with its successors.
  */
-export async function deleteMessageAndSubsequent(chatId: string, messageId: string): Promise<void> {
+export async function deleteMessageAndSubsequent(
+  chatId: string,
+  messageId: string,
+): Promise<boolean> {
   const db = getDb();
   const row = db
     .query<{ position: number }, [string, string]>(
       "SELECT position FROM messages WHERE id = ? AND chat_id = ?",
     )
     .get(messageId, chatId);
-  if (row) {
-    const attachRows = db
-      .query<{ file_path: string }, [string, number]>(
-        `
-      SELECT a.file_path 
-      FROM attachments a
-      JOIN messages m ON a.message_id = m.id
-      WHERE m.chat_id = ? AND m.position >= ?
-    `,
-      )
-      .all(chatId, row.position);
+  if (!row) return false;
+  const attachRows = db
+    .query<{ file_path: string }, [string, number]>(
+      `
+    SELECT a.file_path 
+    FROM attachments a
+    JOIN messages m ON a.message_id = m.id
+    WHERE m.chat_id = ? AND m.position >= ?
+  `,
+    )
+    .all(chatId, row.position);
 
-    db.prepare("DELETE FROM messages WHERE chat_id = ? AND position >= ?").run(
-      chatId,
-      row.position,
-    );
+  db.prepare("DELETE FROM messages WHERE chat_id = ? AND position >= ?").run(chatId, row.position);
 
-    for (const attach of attachRows) {
-      try {
-        const fullPath = resolveAttachmentPath(attach.file_path);
-        if (fullPath) await Bun.file(fullPath).delete();
-      } catch {}
-    }
+  for (const attach of attachRows) {
+    try {
+      const fullPath = resolveAttachmentPath(attach.file_path);
+      if (fullPath) await Bun.file(fullPath).delete();
+    } catch {}
   }
+  return true;
 }
 
 /**
@@ -767,8 +935,7 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
     "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
   );
 
-  // Files to copy after transaction
-  const fileOperations: { oldPath: string; newPath: string }[] = [];
+  const fileOperations: BranchAttachmentCopy[] = [];
 
   const runTransaction = db.transaction(() => {
     insertChat.run(
@@ -802,10 +969,12 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
       // We read attachments from the existing array in `getChat` since it's already there!
       // But we need to use a slightly different loop structure since `chat.messages` has them.
       const attachments = msg.attachments || [];
+      const copiedNames = allocateCopiedAttachmentNames(attachments);
 
       for (const att of attachments) {
-        const ext = path.extname(sanitizeFileName(att.fileName)) || "";
-        const safeName = Bun.randomUUIDv7() + ext;
+        const safeName =
+          copiedNames.get(att.id) ||
+          `${Bun.randomUUIDv7()}${path.extname(sanitizeFileName(att.fileName))}`;
         const newAppDir = resolveAppDataPath("attachments", newChatId, newMsgId);
         const newFilePath = path.join(newAppDir, safeName);
         const oldFilePath = resolveAttachmentPath(att.filePath);
@@ -817,7 +986,12 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
           });
           throw new Error(`Invalid attachment path for branch copy: ${att.filePath}`);
         }
-        fileOperations.push({ oldPath: oldFilePath, newPath: newFilePath });
+        pushUniqueCopy(fileOperations, { oldPath: oldFilePath, newPath: newFilePath });
+        if (att.mimeType.startsWith("video/")) {
+          for (const sidecar of videoAudioSidecarCopyPlan(oldFilePath, newFilePath)) {
+            pushUniqueCopy(fileOperations, { ...sidecar, optional: true });
+          }
+        }
 
         const relPath = path.relative(getAppDataDir(), newFilePath).split(path.sep).join("/");
 
@@ -839,10 +1013,29 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
   try {
     for (const op of fileOperations) {
       await fs.mkdir(path.dirname(op.newPath), { recursive: true });
+      if (op.optional) {
+        try {
+          if (!(await Bun.file(op.oldPath).exists())) continue;
+        } catch {
+          continue;
+        }
+      }
       try {
-        await fs.link(op.oldPath, op.newPath);
-      } catch (_e) {
-        await fs.copyFile(op.oldPath, op.newPath);
+        try {
+          await fs.link(op.oldPath, op.newPath);
+        } catch (_e) {
+          await fs.copyFile(op.oldPath, op.newPath);
+        }
+      } catch (copyErr) {
+        if (op.optional) {
+          logWarn("[chatRepo] Failed to copy optional video audio sidecar during branch", {
+            oldPath: op.oldPath,
+            newPath: op.newPath,
+            error: copyErr instanceof Error ? copyErr.message : String(copyErr),
+          });
+          continue;
+        }
+        throw copyErr;
       }
     }
   } catch (err) {
@@ -1036,23 +1229,33 @@ export async function importChat(jsonContent: string): Promise<string> {
         );
 
         if (Array.isArray(msg.attachments)) {
-          for (const att of msg.attachments) {
-            if (!att.base64Data) continue;
+          const importable = msg.attachments
+            .filter((att) => att.base64Data)
+            .map((att) => ({
+              id: att.id || Bun.randomUUIDv7(),
+              mimeType: att.mimeType,
+              filePath: att.filePath || att.fileName || "file",
+              fileName: att.fileName || "file",
+              base64Data: att.base64Data as string,
+              virBudget: att.virBudget,
+            }));
+          const copiedNames = allocateCopiedAttachmentNames(importable);
+          for (const att of importable) {
             const decodedBytes = base64ToBytes(att.base64Data).byteLength;
-            if (decodedBytes > MAX_ATTACHMENT_SIZE_BYTES) {
+            if (decodedBytes > MAX_ATTACHMENT_SIZE_BYTES && !isExtractedVideoAudioAttachment(att)) {
               throw new Error(
                 `Imported attachment ${att.fileName || "unnamed"} exceeds the 10MB limit.`,
               );
             }
             const attId = Bun.randomUUIDv7();
-            const ext = path.extname(sanitizeFileName(att.fileName)) || "";
-            const safeName = Bun.randomUUIDv7() + ext;
+            const safeName =
+              copiedNames.get(att.id) ||
+              `${Bun.randomUUIDv7()}${path.extname(sanitizeFileName(att.fileName))}`;
             const appData = resolveAppDataPath("attachments", newChatId, newMsgId);
 
             const filePath = path.join(appData, safeName);
             const relPath = path.relative(getAppDataDir(), filePath).split(path.sep).join("/");
 
-            // M3 fix: defer attachment record insertion until file write succeeds
             fileWrites.push({
               filePath,
               base64Data: att.base64Data,

@@ -18,6 +18,7 @@ import {
   logDebug,
   logError,
   logInfo,
+  logVerbose,
   setConfiguredLogLevel,
   setSilent,
 } from "../../src/server/logger";
@@ -109,6 +110,30 @@ describe("wsHub", () => {
       infoSpy.mockRestore();
       debugSpy.mockRestore();
       errorSpy.mockRestore();
+      removeConnection(ws);
+    }
+  });
+
+  it("emits verbose logs only when the configured level is verbose", () => {
+    const send = mock(() => {});
+    const ws = { send } as unknown as ServerWebSocket<unknown>;
+    const debugSpy = spyOn(console, "debug").mockImplementation(() => {});
+
+    try {
+      addConnection(ws);
+      setSilent(false);
+      setConfiguredLogLevel("debug");
+      logVerbose("hidden verbose");
+      expect(send).toHaveBeenCalledTimes(0);
+
+      setConfiguredLogLevel("verbose");
+      logVerbose("visible verbose", { temperature: 0.8 });
+      expect(send).toHaveBeenCalledTimes(1);
+      const sent = JSON.parse(send.mock.calls[0]?.[0] as string);
+      expect(sent.body).toContain("visible verbose");
+      expect(sent.body).toContain("temperature");
+    } finally {
+      debugSpy.mockRestore();
       removeConnection(ws);
     }
   });

@@ -54,6 +54,12 @@ describe("SettingsPanel", () => {
     expect(await screen.findByDisplayValue("/usr/bin/llama-server")).toBeDefined();
     expect(screen.getByDisplayValue("/home/user/models")).toBeDefined();
     expect((screen.getByLabelText("Autoname Chats") as HTMLInputElement).checked).toBe(true);
+    expect(
+      (screen.getByLabelText("Reload Last Used Model Automatically") as HTMLInputElement).checked,
+    ).toBe(false);
+    expect((screen.getByLabelText("Include Audio From Videos") as HTMLInputElement).checked).toBe(
+      false,
+    );
 
     const fontSizeInput = screen.getByRole("slider");
     expect((fontSizeInput as HTMLInputElement).value).toBe("16");
@@ -113,6 +119,26 @@ describe("SettingsPanel", () => {
     });
 
     expect(fetchModelsSpy).not.toHaveBeenCalled();
+  });
+
+  it("saves includeVideoAudio when the video audio toggle is changed", async () => {
+    await act(async () => {
+      render(<SettingsPanel />);
+    });
+
+    const toggle = screen.getByLabelText("Include Audio From Videos") as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(toggle);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+
+    expect(toggle.checked).toBe(true);
+    expect(updateSettingsMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ includeVideoAudio: true }),
+      expect.anything(),
+    );
   });
 
   it("keeps freeform numeric fields local until they become valid numbers", async () => {

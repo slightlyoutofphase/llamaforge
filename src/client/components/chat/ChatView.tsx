@@ -4,6 +4,9 @@
  * Manages message display, input, preset switching, and model interaction state.
  */
 
+import { resolveInferencePreset } from "@shared/inferencePresetResolve.js";
+import { parseToolCallsJson } from "@shared/toolCalls.js";
+import type { ChatMessage } from "@shared/types.js";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Check,
@@ -12,11 +15,12 @@ import {
   Cpu,
   FileText,
   MessageSquare,
+  RefreshCw,
   Settings2,
   Terminal,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { parseToolCallsJson } from "@shared/toolCalls.js";
+import { request } from "../../http";
 import { logError } from "../../logger";
 import {
   useBranchChat,
@@ -28,11 +32,112 @@ import {
   useUpdateChat,
   useUpdateMessage,
 } from "../../queries";
-import { request } from "../../http";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { InputBar } from "./InputBar";
 import { MessageBubble } from "./MessageBubble";
+
+/**
+ * Walks backward past tool-result rows to find a user turn that still has no
+ * assistant reply — for example after the model response was deleted.
+ *
+ * @param messages - Full in-memory transcript for the current chat.
+ * @returns The pending user message, or `undefined` when a reply already exists.
+ */
+export function getPendingPromptMessage(messages: readonly ChatMessage[]): ChatMessage | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message || message.role === "tool") continue;
+    return message.role === "user" ? message : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Whether regenerating from `messageId` must fork a new chat so later user
+ * turns on the current transcript are left intact.
+ *
+ * In-place regenerate is used when this turn is still the latest user prompt,
+ * including the case where its assistant reply was deleted.
+ *
+ * @param messages - Current chat transcript in display order.
+ * @param messageId - Message the user asked to regenerate from.
+ * @returns `true` when a later user turn exists after `messageId`.
+ */
+export function regenerationRequiresBranch(
+  messages: readonly Pick<ChatMessage, "id" | "role">[],
+  messageId: string,
+): boolean {
+  const msgIndex = messages.findIndex((message) => message.id === messageId);
+  if (msgIndex === -1) return false;
+  return messages.slice(msgIndex + 1).some((message) => message.role === "user");
+}
+
+/**
+ * Transcript kept for an in-place regenerate: the target user turn and everything
+ * before it. Later assistant/tool rows are dropped so the replacement reply does
+ * not append underneath the old one.
+ *
+ * Regenerating from an assistant or tool row walks back to that turn's user prompt.
+ *
+ * @param messages - Current chat transcript in display order.
+ * @param messageId - Message the user asked to regenerate from.
+ * @returns Messages through the associated user turn, inclusive.
+ */
+export function messagesKeptForInPlaceRegenerate(
+  messages: readonly ChatMessage[],
+  messageId: string,
+): ChatMessage[] {
+  const msgIndex = messages.findIndex((message) => message.id === messageId);
+  if (msgIndex === -1) return [...messages];
+
+  let keepThrough = msgIndex;
+  const selected = messages[msgIndex];
+  if (selected && selected.role !== "user") {
+    keepThrough = msgIndex;
+    while (keepThrough >= 0) {
+      const current = messages[keepThrough];
+      if (!current || current.role === "user") break;
+      keepThrough--;
+    }
+  }
+  if (keepThrough < 0) return messages.slice(0, msgIndex);
+  return messages.slice(0, keepThrough + 1);
+}
+
+/**
+ * Transcript remaining after deleting a message and every row after it.
+ *
+ * @param messages - Current chat transcript in display order.
+ * @param messageId - Message the user asked to delete.
+ * @returns Messages strictly before `messageId`, or a copy of `messages` when it is missing.
+ */
+export function messagesRemainingAfterDelete(
+  messages: readonly ChatMessage[],
+  messageId: string,
+): ChatMessage[] {
+  const msgIndex = messages.findIndex((message) => message.id === messageId);
+  if (msgIndex === -1) return [...messages];
+  return messages.slice(0, msgIndex);
+}
+
+/**
+ * Adjusts the paginated message total after dropping trailing rows from the
+ * currently loaded window, without pretending older unloaded rows are gone.
+ *
+ * @param totalMessages - Server-reported transcript length.
+ * @param visibleCount - Number of messages currently loaded in the client.
+ * @param remainingVisibleCount - Number of loaded messages kept after the drop.
+ * @returns Updated total that preserves any older messages not in the window.
+ */
+export function totalMessagesAfterDrop(
+  totalMessages: number,
+  visibleCount: number,
+  remainingVisibleCount: number,
+): number {
+  const dropped = Math.max(0, visibleCount - remainingVisibleCount);
+  return Math.max(remainingVisibleCount, totalMessages - dropped);
+}
 
 /**
  * S12 fix: Lightweight inline display for tool execution results.
@@ -42,7 +147,7 @@ import { MessageBubble } from "./MessageBubble";
  * @param props - Wrapper props containing the tool result message to display.
  * @returns Inline tool result card.
  */
-function ToolResultInline({ message }: { message: import("@shared/types.js").ChatMessage }) {
+function ToolResultInline({ message }: { message: ChatMessage }) {
   const [showResult, setShowResult] = useState(false);
   const contentPreview =
     message.content.length > 120 ? `${message.content.slice(0, 120)}...` : message.content;
@@ -120,6 +225,7 @@ export function ChatView() {
     }
     return map;
   }, [messages]);
+  const pendingPrompt = useMemo(() => getPendingPromptMessage(messages), [messages]);
 
   // S10 fix: close dropdowns when clicking outside
   useEffect(() => {
@@ -155,6 +261,7 @@ export function ChatView() {
 
   const branchMutation = useBranchChat();
   const updateMutation = useUpdateChat();
+  const persistChatUpdates = updateMutation.mutate;
   const updateMessageMutation = useUpdateMessage();
   const regenerateMutation = useRegenerateChat();
   const continueMutation = useContinueChat();
@@ -172,15 +279,11 @@ export function ChatView() {
     localStorage.setItem("lf_selectedInfPresets", JSON.stringify(selectedInfPresets));
   }, [selectedInfPresets]);
 
-  const activeInfPreset =
-    infPresets?.find((p) => p.id === currentChatMetadata?.inferencePresetId) ||
-    (loadedModel
-      ? infPresets?.find((p) => p.id === selectedInfPresets[loadedModel.primaryPath])
-      : undefined) ||
-    (loadedModel
-      ? infPresets?.find((p) => p.sourceModelPath === loadedModel.primaryPath)
-      : undefined) ||
-    infPresets?.find((p) => p.isDefault);
+  const activeInfPreset = resolveInferencePreset(infPresets ?? [], {
+    chatPresetId: currentChatMetadata?.inferencePresetId,
+    preferredPresetId: loadedModel ? selectedInfPresets[loadedModel.primaryPath] : undefined,
+    modelPath: loadedModel?.primaryPath,
+  });
   const activeSysPreset = sysPresets?.find((p) => p.id === currentChatMetadata?.systemPresetId);
   const bubbleStyle = settings?.chatBubbleStyle ?? "bubble";
 
@@ -211,7 +314,31 @@ export function ChatView() {
     }
   }, [currentChatId, chatId, navigate]);
 
-  const requestInFlight = isGenerating || isWaitingForToolApproval;
+  const isSyncingHistory = useAppStore((s) => s.isSyncingHistory);
+  const requestInFlight = isGenerating || isWaitingForToolApproval || isSyncingHistory;
+  const activeInfPresetId = activeInfPreset?.id;
+  const persistedInferencePresetId = currentChatMetadata?.inferencePresetId;
+  const hasChatMetadata = Boolean(currentChatMetadata);
+
+  useEffect(() => {
+    if (!currentChatId || !activeInfPresetId || !hasChatMetadata) return;
+    if (persistedInferencePresetId === activeInfPresetId) return;
+
+    const state = useAppStore.getState();
+    if (state.currentChatId !== currentChatId) return;
+
+    // Bind locally first. The mutation object from useMutation changes on every
+    // in-flight PUT, and new chats start with a null preset id — without this,
+    // the effect re-enters and floods PUT /api/chats/:id.
+    state.patchCurrentChatMetadata({ inferencePresetId: activeInfPresetId });
+    persistChatUpdates({ id: currentChatId, updates: { inferencePresetId: activeInfPresetId } });
+  }, [
+    activeInfPresetId,
+    currentChatId,
+    hasChatMetadata,
+    persistChatUpdates,
+    persistedInferencePresetId,
+  ]);
 
   /**
    * Tracks whether the chat scroller is still close enough to the bottom for auto-scroll.
@@ -246,37 +373,53 @@ export function ChatView() {
 
   const handleEdit = useCallback(
     async (messageId: string, newContent: string) => {
-      const { currentChatId, messages, setError, loadChat } = useAppStore.getState();
+      const { currentChatId, messages, setError } = useAppStore.getState();
       if (!currentChatId) {
-        setError("No active chat available for editing.");
-        return;
+        const error = new Error("No active chat available for editing.");
+        setError(error.message);
+        throw error;
       }
       const msgIndex = messages.findIndex((m) => m.id === messageId);
       if (msgIndex === -1) {
-        setError("Message not found for editing.");
-        return;
+        const error = new Error("Message not found for editing.");
+        setError(error.message);
+        throw error;
       }
       const msg = messages[msgIndex];
       if (!msg) {
-        setError("Unable to resolve message for editing.");
-        return;
+        const error = new Error("Unable to resolve message for editing.");
+        setError(error.message);
+        throw error;
       }
 
       try {
         if (msg.role === "user") {
-          const isLast = msgIndex === messages.length - 1;
-          if (isLast) {
-            // Optimize: Overwrite and regenerate in-place without branching
+          if (!regenerationRequiresBranch(messages, messageId)) {
             await updateMessageMutation.mutateAsync({
               chatId: currentChatId,
               messageId,
               content: newContent,
             });
+            const updated = messages.map((message) =>
+              message.id === messageId
+                ? { ...message, content: newContent, rawContent: newContent }
+                : message,
+            );
+            const kept = messagesKeptForInPlaceRegenerate(updated, messageId);
+            useAppStore.setState({
+              messages: kept,
+              totalMessages: totalMessagesAfterDrop(
+                useAppStore.getState().totalMessages,
+                updated.length,
+                kept.length,
+              ),
+              isGenerating: true,
+              generationStats: null,
+            });
             const res = await request(`/api/chats/${currentChatId}/regenerate`, {
               method: "POST",
             });
             if (!res.ok) throw new Error("Regeneration failed");
-            await loadChat(currentChatId);
           } else {
             const res = await request(`/api/chats/${currentChatId}/branch-and-edit`, {
               method: "POST",
@@ -302,12 +445,21 @@ export function ChatView() {
             content: newContent,
             ...(msg.thinkingContent !== undefined ? { thinkingContent: msg.thinkingContent } : {}),
           });
+          useAppStore.getState().patchMessage(messageId, {
+            content: newContent,
+            rawContent: newContent,
+          });
         }
       } catch (e: unknown) {
         logError("Edit failed", e);
+        const { currentChatId: chatId, loadChat } = useAppStore.getState();
+        if (chatId) {
+          await loadChat(chatId);
+        }
         setError(e instanceof Error ? e.message : "Failed to edit message.", "Retry", () =>
           handleEdit(messageId, newContent),
         );
+        throw e;
       }
     },
     [navigate, updateMessageMutation],
@@ -352,7 +504,7 @@ export function ChatView() {
       }
 
       try {
-        if (msgIndex < messages.length - 1) {
+        if (regenerationRequiresBranch(messages, id)) {
           const res = await request(`/api/chats/${currentChatId}/branch-and-regenerate`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -370,10 +522,25 @@ export function ChatView() {
 
           navigate({ to: "/chat/$chatId", params: { chatId: newChatId } });
         } else {
+          const kept = messagesKeptForInPlaceRegenerate(messages, id);
+          useAppStore.setState({
+            messages: kept,
+            totalMessages: totalMessagesAfterDrop(
+              useAppStore.getState().totalMessages,
+              messages.length,
+              kept.length,
+            ),
+            isGenerating: true,
+            generationStats: null,
+          });
           await regenerateMutation.mutateAsync(currentChatId);
         }
       } catch (e: unknown) {
         logError("Regeneration failed", e);
+        const { currentChatId: chatId, loadChat } = useAppStore.getState();
+        if (chatId) {
+          await loadChat(chatId);
+        }
         setError(e instanceof Error ? e.message : "Failed to regenerate chat.", "Retry", () =>
           handleRegenerate(id),
         );
@@ -414,10 +581,15 @@ export function ChatView() {
 
           navigate({ to: "/chat/$chatId", params: { chatId: newChatId } });
         } else {
+          useAppStore.setState({ isGenerating: true, generationStats: null });
           await continueMutation.mutateAsync(currentChatId);
         }
       } catch (e: unknown) {
         logError("Continue failed", e);
+        const { currentChatId: chatId, loadChat } = useAppStore.getState();
+        if (chatId) {
+          await loadChat(chatId);
+        }
         setError(e instanceof Error ? e.message : "Failed to continue chat.", "Retry", () =>
           handleContinue(id),
         );
@@ -427,24 +599,55 @@ export function ChatView() {
   );
 
   const handleDelete = useCallback(async (id: string) => {
-    const { currentChatId, setError, loadChat } = useAppStore.getState();
+    const {
+      currentChatId,
+      messages,
+      setError,
+      loadChat,
+      stopGeneration,
+      discardPendingChatFrames,
+    } = useAppStore.getState();
     if (!currentChatId) {
       setError("No active chat available for deletion.");
       return;
     }
+    if (!id) {
+      setError("Cannot delete an invalid message.");
+      return;
+    }
     if (!confirm("Delete this and all subsequent messages?")) return;
+
+    stopGeneration();
+    discardPendingChatFrames(currentChatId);
+    useAppStore.setState({ isSyncingHistory: true });
 
     try {
       const res = await request(`/api/chats/${currentChatId}/messages/${id}`, {
         method: "DELETE",
       });
+      if (res.status === 404) {
+        await loadChat(currentChatId);
+        return;
+      }
       if (!res.ok) {
         const errorBody = await res.text().catch(() => "");
         throw new Error(`Delete failed: ${res.status}${errorBody ? `: ${errorBody}` : ""}`);
       }
+      const remaining = messagesRemainingAfterDelete(messages, id);
+      useAppStore.setState({
+        messages: remaining,
+        totalMessages: totalMessagesAfterDrop(
+          useAppStore.getState().totalMessages,
+          messages.length,
+          remaining.length,
+        ),
+      });
       await loadChat(currentChatId);
     } catch (e: unknown) {
+      await loadChat(currentChatId);
       setError(e instanceof Error ? e.message : "Failed to delete message.");
+    } finally {
+      useAppStore.setState({ isSyncingHistory: false });
     }
   }, []);
 
@@ -734,7 +937,7 @@ export function ChatView() {
                   </div>
                 );
               })}
-            {isGenerating && messages[messages.length - 1]?.role === "user" && (
+            {requestInFlight && pendingPrompt && (
               <div className="flex px-5 py-4 animate-pulse">
                 <div className="flex gap-1 text-[var(--color-accent)] opacity-70">
                   <span
@@ -747,6 +950,20 @@ export function ChatView() {
                     className="w-2 h-2 bg-current rounded-full animate-bounce"
                     style={{ animationDelay: "300ms" }}></span>
                 </div>
+              </div>
+            )}
+            {!requestInFlight && pendingPrompt && (
+              <div className="flex justify-start px-1 py-2">
+                <button
+                  type="button"
+                  data-testid="generate-response"
+                  disabled={!active}
+                  onClick={() => handleRegenerate(pendingPrompt.id)}
+                  title="Generate a model response to this message"
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-white hover:border-[var(--color-accent)] transition-colors disabled:opacity-50 disabled:pointer-events-none">
+                  <RefreshCw size={14} />
+                  Generate response
+                </button>
               </div>
             )}
             <div ref={bottomRef} className="h-4" />
@@ -768,24 +985,17 @@ export function ChatView() {
                 <Check size={10} /> Tokens Cached: {generationStats.tokensCached}
               </span>
             )}
-            {generationStats.promptTokens !== undefined &&
-              generationStats.contextSize !== undefined && (
-                <span className="flex items-center gap-1">
-                  Context:{" "}
-                  {(
-                    (generationStats.promptTokens || 0) + (generationStats.totalPredicted || 0)
-                  ).toLocaleString()}{" "}
-                  / {generationStats.contextSize.toLocaleString()}
-                </span>
-              )}
             <span>Predicted: {generationStats.totalPredicted} tokens</span>
           </div>
         )}
         <div className="w-full max-w-4xl relative">
           <InputBar
-            onSend={sendMessage}
-            isGenerating={requestInFlight}
+            key={chatId}
+            conversationId={chatId}
+            onSend={(content, files) => sendMessage(content, files, activeInfPreset?.id)}
+            isGenerating={isGenerating || isWaitingForToolApproval}
             isActive={active}
+            historyLocked={isSyncingHistory}
             onStop={stopGeneration}
           />
         </div>

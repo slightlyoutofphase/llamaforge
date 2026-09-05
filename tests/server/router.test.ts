@@ -860,6 +860,40 @@ describe("router", () => {
       );
       expect(res?.status).toBe(200);
       expect(await res?.text()).toBe("attachment-ok");
+      expect(res?.headers.get("Content-Disposition")).toContain("attachment");
+    } finally {
+      await fs.rm(absPath, { force: true });
+    }
+  });
+
+  it("GET /api/attachments serves video with inline disposition and Range slices", async () => {
+    const relative = "attachments/p0-test-chat/p0-test-msg/clip.mp4";
+    const absPath = path.join(getAppDataDir(), ...relative.split("/"));
+    await fs.mkdir(path.dirname(absPath), { recursive: true });
+    const payload = Buffer.from("0123456789abcdef");
+    await Bun.write(absPath, payload);
+
+    try {
+      const router = createRouter();
+      const full = await router.fetch(
+        new Request(`http://localhost/api/attachments/${relative}`),
+        {},
+      );
+      expect(full?.status).toBe(200);
+      expect(full?.headers.get("Content-Disposition")).toContain("inline");
+      expect(full?.headers.get("Accept-Ranges")).toBe("bytes");
+
+      const ranged = await router.fetch(
+        new Request(`http://localhost/api/attachments/${relative}`, {
+          headers: { Range: "bytes=0-3" },
+        }),
+        {},
+      );
+      expect(ranged?.status).toBe(206);
+      expect(ranged?.headers.get("Content-Range")).toBe(`bytes 0-3/${payload.length}`);
+      expect(new Uint8Array((await ranged?.arrayBuffer()) ?? new ArrayBuffer(0))).toEqual(
+        new Uint8Array([48, 49, 50, 51]),
+      );
     } finally {
       await fs.rm(absPath, { force: true });
     }
@@ -917,5 +951,190 @@ describe("router", () => {
     expect(res?.status).toBe(400);
     const body = (await res?.json()) as { error?: string };
     expect(body.error).toContain("Unknown load preset config fields");
+  });
+
+  it("GET /api/runtime/usage reports LlamaForge process memory", async () => {
+    const router = createRouter();
+    const res = await router.fetch(new Request("http://localhost/api/runtime/usage"), {});
+    expect(res?.status).toBe(200);
+    const body = (await res?.json()) as { ramBytes?: number; vramBytes?: number };
+    expect(typeof body.ramBytes).toBe("number");
+    expect(body.ramBytes).toBeGreaterThan(0);
+    expect(typeof body.vramBytes).toBe("number");
+    expect(body.vramBytes).toBeGreaterThanOrEqual(0);
+  });
+
+  it("GET /api/chats/:id/context-usage returns occupancy for the selected chat", async () => {
+    const chat = await createChat("Context usage chat");
+    await addMessage({
+      id: Bun.randomUUIDv7(),
+      chatId: chat.id,
+      role: "user",
+      content: "hello occupancy",
+      rawContent: "hello occupancy",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request(`http://localhost/api/chats/${chat.id}/context-usage`),
+      {},
+    );
+    expect(res?.status).toBe(200);
+    const body = (await res?.json()) as { usedTokens?: number; contextSize?: number | null };
+    expect(body.usedTokens).toBeGreaterThan(0);
+    expect(body.contextSize).toBeNull();
+  });
+
+  it("GET /api/settings exposes autoloadLastModel disabled by default", async () => {
+    const router = createRouter();
+    const res = await router.fetch(new Request("http://localhost/api/settings"), {});
+    expect(res?.status).toBe(200);
+    const body = (await res?.json()) as { autoloadLastModel?: boolean };
+    expect(body.autoloadLastModel).toBe(false);
+  });
+
+  it("GET /api/settings exposes includeVideoAudio disabled by default", async () => {
+    const router = createRouter();
+    const res = await router.fetch(new Request("http://localhost/api/settings"), {});
+    expect(res?.status).toBe(200);
+    const body = (await res?.json()) as { includeVideoAudio?: boolean };
+    expect(body.includeVideoAudio).toBe(false);
+  });
+
+  it("DELETE /api/chats/:id/messages/:msgId removes that message and later ones", async () => {
+    const chat = await createChat("Router Delete Message");
+    const userId = Bun.randomUUIDv7();
+    const assistantId = Bun.randomUUIDv7();
+    await addMessage({
+      id: userId,
+      chatId: chat.id,
+      role: "user",
+      content: "hello",
+      rawContent: "hello",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: assistantId,
+      chatId: chat.id,
+      role: "assistant",
+      content: "hi",
+      rawContent: "hi",
+      position: 1,
+      createdAt: Date.now(),
+    });
+
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request(`http://localhost/api/chats/${chat.id}/messages/${assistantId}`, {
+        method: "DELETE",
+      }),
+      {},
+    );
+    expect(res?.status).toBe(200);
+
+    const remaining = await router.fetch(new Request(`http://localhost/api/chats/${chat.id}`), {});
+    const body = (await remaining?.json()) as { messages?: Array<{ id: string }> };
+    expect(body.messages?.map((message) => message.id)).toEqual([userId]);
+  });
+
+  it("DELETE /api/chats/:id/messages/:msgId returns 404 when the message is gone", async () => {
+    const chat = await createChat("Router Delete Missing");
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request(`http://localhost/api/chats/${chat.id}/messages/missing-message`, {
+        method: "DELETE",
+      }),
+      {},
+    );
+    expect(res?.status).toBe(404);
+  });
+
+  it("POST /api/chats/:id/messages returns 409 when expectedHeadMessageId does not match", async () => {
+    const chat = await createChat("Transcript Mismatch");
+    const userId = Bun.randomUUIDv7();
+    await addMessage({
+      id: userId,
+      chatId: chat.id,
+      role: "user",
+      content: "old turn",
+      rawContent: "old turn",
+      position: 0,
+      createdAt: Date.now(),
+    });
+
+    const router = createRouter();
+    const streamProxyModule = await import("../../src/server/streamProxy.ts");
+    const proxyCompletionSpy = spyOn(streamProxyModule, "proxyCompletion").mockResolvedValue(
+      "should-not-run",
+    );
+    try {
+      const res = await router.fetch(
+        new Request(`http://localhost/api/chats/${chat.id}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: "new turn", expectedHeadMessageId: null }),
+        }),
+        {},
+      );
+      expect(res?.status).toBe(409);
+      const body = (await res?.json()) as { code?: string; lastMessageId?: string };
+      expect(body.code).toBe("TRANSCRIPT_MISMATCH");
+      expect(body.lastMessageId).toBe(userId);
+      expect(proxyCompletionSpy).not.toHaveBeenCalled();
+    } finally {
+      proxyCompletionSpy.mockRestore();
+    }
+  });
+
+  it("POST /api/chats/:id/regenerate deletes later assistant rows before generating", async () => {
+    const chat = await createChat("Router Regenerate");
+    const userId = Bun.randomUUIDv7();
+    const assistantId = Bun.randomUUIDv7();
+    await addMessage({
+      id: userId,
+      chatId: chat.id,
+      role: "user",
+      content: "hello",
+      rawContent: "hello",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: assistantId,
+      chatId: chat.id,
+      role: "assistant",
+      content: "old",
+      rawContent: "old",
+      position: 1,
+      createdAt: Date.now(),
+    });
+
+    const streamProxyModule = await import("../../src/server/streamProxy.ts");
+    const proxyCompletionSpy = spyOn(streamProxyModule, "proxyCompletion").mockImplementation(
+      async () => {
+        const remaining = await import("../../src/server/persistence/chatRepo").then((repo) =>
+          repo.getChat(chat.id),
+        );
+        expect(remaining?.messages?.map((message) => message.id)).toEqual([userId]);
+        return "a-new";
+      },
+    );
+
+    try {
+      const router = createRouter();
+      const res = await router.fetch(
+        new Request(`http://localhost/api/chats/${chat.id}/regenerate`, { method: "POST" }),
+        {},
+      );
+      expect(res?.status).toBe(200);
+      expect(proxyCompletionSpy).toHaveBeenCalledTimes(1);
+      expect(proxyCompletionSpy.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({ chatId: chat.id, isRegenerate: true }),
+      );
+    } finally {
+      proxyCompletionSpy.mockRestore();
+    }
   });
 });

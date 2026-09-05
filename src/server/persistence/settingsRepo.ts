@@ -5,23 +5,13 @@
 
 import os from "node:os";
 import { join } from "node:path";
+import { DEFAULT_APP_SETTINGS } from "../../shared/defaults";
 import type { AppSettings } from "../../shared/types";
 import { getDb, getDbGeneration } from "./db";
 
 const DEFAULT_SETTINGS: AppSettings = {
-  serverPort: 11435,
+  ...DEFAULT_APP_SETTINGS,
   modelsPath: join(os.homedir(), "Models"),
-  theme: "system",
-  accentColor: "#7b6ef6",
-  fontSize: 14,
-  chatBubbleStyle: "bubble",
-  autonameEnabled: true,
-  autoloadLastModel: true,
-  llamaPortRangeMin: 12000,
-  llamaPortRangeMax: 13000,
-  requestTimeoutSeconds: 60,
-  logLevel: "info",
-  showConsoleOnStartup: false,
 };
 
 const MIN_PORT = 1;
@@ -119,6 +109,10 @@ function normalizeSettings(raw: Partial<AppSettings>): AppSettings {
       DEFAULT_SETTINGS.requestTimeoutSeconds,
     ),
     accentColor: normalizeAccentColor(raw.accentColor ?? merged.accentColor),
+    includeVideoAudio:
+      typeof merged.includeVideoAudio === "boolean"
+        ? merged.includeVideoAudio
+        : DEFAULT_SETTINGS.includeVideoAudio,
   };
 
   return normalizedServerPort === undefined

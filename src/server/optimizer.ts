@@ -3,8 +3,12 @@
  * Optimization algorithm for suggesting model load parameters based on hardware capabilities.
  */
 
+import {
+  applyImageTokenBatchFloor,
+  DEFAULT_IMAGE_MAX_TOKENS,
+  DEFAULT_IMAGE_MIN_TOKENS,
+} from "../shared/imageTokens";
 import type { GgufDisplayMetadata, HardwareInfo, ModelLoadConfig } from "../shared/types";
-import { DEFAULT_IMAGE_MAX_TOKENS, applyImageTokenBatchFloor } from "../shared/imageTokens";
 
 type ConfirmedGpuBackend = "cuda" | "rocm" | "metal" | "vulkan";
 
@@ -89,8 +93,14 @@ export function optimizeLoadConfig(
   const imageBudget = metadata.hasVisionEncoder ? DEFAULT_IMAGE_MAX_TOKENS : undefined;
   if (imageBudget !== undefined) {
     suggested.imageMaxTokens = imageBudget;
+    suggested.imageMinTokens = DEFAULT_IMAGE_MIN_TOKENS;
   }
-  const floored = applyImageTokenBatchFloor(batchSize, microBatchSize, imageBudget);
+  const floored = applyImageTokenBatchFloor(
+    batchSize,
+    microBatchSize,
+    imageBudget,
+    metadata.architecture,
+  );
   suggested.batchSize = floored.batchSize;
   suggested.microBatchSize = floored.microBatchSize;
 

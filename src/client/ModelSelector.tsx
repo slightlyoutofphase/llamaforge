@@ -3,11 +3,12 @@
  * Provides an inline model selector for choosing and loading models.
  */
 
-import type { ChatMessage, LoadModelRequest, ModelEntry, ModelLoadConfig } from "../shared/types";
 import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
-import { ChevronDown, Cpu, Database, Loader2, Play, Square } from "lucide-react";
+import { ChevronDown, Cpu, Database, Play, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { createDefaultLoadConfig } from "../shared/defaults";
+import type { ChatMessage, LoadModelRequest, ModelEntry, ModelLoadConfig } from "../shared/types";
 import { MultimodalGuardModal } from "./components/sidebar/MultimodalGuardModal";
 import { logError } from "./logger";
 import { useCreateChat, useLoadPresets, useSettings } from "./queries";
@@ -27,9 +28,6 @@ export function ModelSelector() {
   const loadedModel = useAppStore((s) => s.loadedModel);
   const messages = useAppStore((s) => s.messages);
   const isGenerating = useAppStore((s) => s.isGenerating);
-  const loadProgress = useAppStore((s) => s.loadProgress);
-  const loadProgressPhase = useAppStore((s) => s.loadProgressPhase);
-  const loadProgressDetail = useAppStore((s) => s.loadProgressDetail);
   const { data: loadPresets } = useLoadPresets();
   const { data: settings } = useSettings();
   const createChatMut = useCreateChat();
@@ -77,29 +75,7 @@ export function ModelSelector() {
 
     const config: ModelLoadConfig = preset?.config
       ? { ...preset.config }
-      : {
-          modelPath: model.primaryPath,
-          contextSize: 4096,
-          contextShift: false,
-          gpuLayers: 33,
-          threads: 3,
-          batchSize: 2048,
-          microBatchSize: 512,
-          ropeScaling: "none",
-          ropeFreqBase: 0,
-          ropeFreqScale: 0,
-          kvCacheTypeK: "f16",
-          kvCacheTypeV: "f16",
-          mlock: true,
-          noMmap: false,
-          contBatching: true,
-          flashAttn: "auto",
-          swaFull: false,
-          kvUnified: true,
-          noKvOffload: false,
-          cacheReuse: 0,
-          contextCheckpoints: 32,
-        };
+      : createDefaultLoadConfig(model.primaryPath);
 
     // Always override the path to the selected model
     config.modelPath = model.primaryPath;
@@ -189,60 +165,6 @@ export function ModelSelector() {
   return (
     <div className="flex-1 min-w-0 overflow-y-auto p-6 bg-[var(--color-bg)] relative">
       <div className="w-full max-w-full mx-auto space-y-6">
-        {/* Loading Overlay */}
-        {serverStatus === "loading" && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm animate-in fade-in px-6">
-            <div className="w-full max-w-2xl rounded-2xl border border-white/10 bg-[color:rgba(15,23,42,0.92)] p-6 shadow-2xl shadow-black/40">
-              <div className="flex items-start gap-4">
-                <Loader2
-                  size={32}
-                  className="mt-1 text-[var(--color-accent)] animate-spin shrink-0"
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-lg font-semibold text-white">Loading model</div>
-                      <div className="text-xs uppercase tracking-[0.24em] text-gray-400 mt-1">
-                        {loadProgressPhase === "spawning"
-                          ? "Spawning llama-server"
-                          : loadProgressPhase === "loading_weights"
-                            ? "Loading weights"
-                            : loadProgressPhase === "offloading"
-                              ? "Offloading to GPU"
-                              : loadProgressPhase === "initializing"
-                                ? "Initializing runtime"
-                                : loadProgressPhase === "ready"
-                                  ? "Ready"
-                                  : "Loading"}
-                      </div>
-                    </div>
-                    <div className="text-2xl font-bold text-white tabular-nums">
-                      {loadProgress}%
-                    </div>
-                  </div>
-
-                  <div className="mt-4 h-3 rounded-full bg-white/10 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-300 ease-out"
-                      style={{ width: `${Math.max(0, Math.min(100, loadProgress))}%` }}
-                    />
-                  </div>
-
-                  <div className="mt-4 flex items-center gap-3 text-sm text-gray-200">
-                    <Loader2
-                      size={16}
-                      className="text-[var(--color-accent)] animate-spin shrink-0"
-                    />
-                    <span className="font-mono truncate">
-                      {loadProgressDetail || "Starting model load sequence…"}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
         <div className="flex justify-between items-end pb-4 border-b border-[var(--color-border)]">
           <div>
             <h2 className="text-2xl font-light tracking-tight text-[var(--color-text-primary)]">

@@ -7,7 +7,7 @@ import type { AppSettings } from "../shared/types";
 import { broadcastLog } from "./wsHub";
 
 type LogLevel = AppSettings["logLevel"];
-type EmittedLogLevel = "info" | "warn" | "error" | "debug" | "server";
+type EmittedLogLevel = "info" | "warn" | "error" | "debug" | "verbose" | "server";
 
 const LOG_LEVEL_PRIORITY: Record<LogLevel, number> = {
   off: -1,
@@ -23,6 +23,7 @@ const EMITTED_LEVEL_PRIORITY: Record<EmittedLogLevel, number> = {
   warn: 1,
   info: 2,
   debug: 3,
+  verbose: 4,
   server: 3,
 };
 
@@ -132,6 +133,25 @@ export function logError(message: string, ...args: unknown[]): void {
  */
 export function logDebug(message: string, ...args: unknown[]): void {
   if (!shouldEmitLog("debug")) {
+    return;
+  }
+
+  console.debug(message, ...args);
+  broadcastLog("debug", message + formatArgs(args));
+}
+
+/**
+ * Emits a verbose log message when the configured log level is `verbose`.
+ *
+ * Use this for bulky diagnostic payloads such as the active inference sampling
+ * settings, which should not appear at `debug`.
+ *
+ * @param message - The primary log message.
+ * @param args - Additional structured arguments to append.
+ * @returns Nothing.
+ */
+export function logVerbose(message: string, ...args: unknown[]): void {
+  if (!shouldEmitLog("verbose")) {
     return;
   }
 

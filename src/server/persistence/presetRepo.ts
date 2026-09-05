@@ -3,14 +3,16 @@
  * Preset repository — CRUD operations for load, inference, and system presets.
  */
 
+import { createDefaultInferenceSampling, createDefaultLoadConfig } from "../../shared/defaults";
+import { applyImageTokenBatchFloor } from "../../shared/imageTokens";
+import { analyzeTemplateCapabilities } from "../../shared/templateCapabilities";
+import { detectThinkingConfig } from "../../shared/thinkingTags";
 import type {
   InferencePreset,
   LoadPreset,
   ModelLoadConfig,
   SystemPromptPreset,
 } from "../../shared/types";
-import { DEFAULT_IMAGE_MAX_TOKENS, defaultBatchingForImageTokens } from "../../shared/imageTokens";
-import { detectThinkingConfig } from "../../shared/thinkingTags";
 import { logWarn } from "../logger";
 import { getDb } from "./db";
 
@@ -64,6 +66,7 @@ const LOAD_CONFIG_KEYS = new Set([
   "chatTemplateContent",
   "imageMaxTokens",
   "imageMinTokens",
+  "videoFps",
   "presetId",
 ]);
 
@@ -86,6 +89,7 @@ const NUMA_TYPES = new Set(["distribute", "isolate", "numactl"]);
 type ParsedLoadPresetPayload = {
   config: LoadPreset["config"];
   chatTemplateOverride?: string;
+  preserveThinking?: boolean;
   thinkingTagOverride?: LoadPreset["thinkingTagOverride"];
 };
 
@@ -360,7 +364,7 @@ function normalizeLoadPresetConfig(
   );
   assign(
     "threads",
-    readNumberField(rawConfig["threads"], "threads", { integer: true, min: 1, max: 512, strict }),
+    readNumberField(rawConfig["threads"], "threads", { integer: true, min: -1, max: 512, strict }),
   );
   assign(
     "batchSize",
@@ -384,7 +388,7 @@ function normalizeLoadPresetConfig(
     "threadsBatch",
     readNumberField(rawConfig["threadsBatch"], "threadsBatch", {
       integer: true,
-      min: 1,
+      min: -1,
       max: 512,
       strict,
     }),
@@ -498,6 +502,14 @@ function normalizeLoadPresetConfig(
       strict,
     }),
   );
+  assign(
+    "videoFps",
+    readNumberField(rawConfig["videoFps"], "videoFps", {
+      min: 0.1,
+      max: 30,
+      strict,
+    }),
+  );
   assign("presetId", readStringField(rawConfig["presetId"], "presetId", strict));
 
   return config as unknown as LoadPreset["config"];
@@ -552,11 +564,13 @@ function parseLoadPresetPayload(configJson: string): ParsedLoadPresetPayload {
       ? (parsedConfig as Record<string, unknown>)
       : parsed;
   const chatTemplateOverride = parsed["chatTemplateOverride"];
+  const preserveThinking = parsed["preserveThinking"];
   const thinkingTagOverride = parsed["thinkingTagOverride"];
 
   return {
     config: normalizeLoadPresetConfig(rawConfig),
     ...(typeof chatTemplateOverride === "string" ? { chatTemplateOverride } : {}),
+    ...(typeof preserveThinking === "boolean" ? { preserveThinking } : {}),
     ...(isThinkingTagOverride(thinkingTagOverride) ? { thinkingTagOverride } : {}),
   };
 }
@@ -572,6 +586,9 @@ function serializeLoadPresetPayload(payload: ParsedLoadPresetPayload): string {
     config: normalizeLoadPresetConfig(payload.config as unknown as Record<string, unknown>),
     ...(payload.chatTemplateOverride !== undefined
       ? { chatTemplateOverride: payload.chatTemplateOverride }
+      : {}),
+    ...(payload.preserveThinking !== undefined
+      ? { preserveThinking: payload.preserveThinking }
       : {}),
     ...(payload.thinkingTagOverride !== undefined
       ? { thinkingTagOverride: payload.thinkingTagOverride }
@@ -627,9 +644,15 @@ export async function getLoadPresets(): Promise<LoadPreset[]> {
       modelPath: r.model_path,
       isDefault: Boolean(r.is_default),
       isReadonly: Boolean(r.is_readonly),
-      config: parsed.config,
+      config: {
+        ...createDefaultLoadConfig(parsed.config.modelPath || r.model_path || ""),
+        ...parsed.config,
+      },
       ...(parsed.chatTemplateOverride !== undefined
         ? { chatTemplateOverride: parsed.chatTemplateOverride }
+        : {}),
+      ...(parsed.preserveThinking !== undefined
+        ? { preserveThinking: parsed.preserveThinking }
         : {}),
       ...(parsed.thinkingTagOverride !== undefined
         ? { thinkingTagOverride: parsed.thinkingTagOverride }
@@ -661,13 +684,15 @@ export async function getInferencePresets(): Promise<InferencePreset[]> {
     >("SELECT * FROM inference_presets")
     .all();
   return rows.map((r) => {
-    const config = safeParse<Record<string, unknown>>(r.config_json, {});
+    const parsed = safeParse<Record<string, unknown>>(r.config_json, {});
+    const { preserveThinking: _legacyPreserveThinking, ...config } = parsed;
     return {
+      ...createDefaultInferenceSampling(),
+      ...config,
       id: r.id,
       name: r.name,
       sourceModelPath: r.source_model_path || undefined,
       isDefault: Boolean(r.is_default),
-      ...config,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     } as InferencePreset;
@@ -713,6 +738,7 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
     updatedAt,
     config,
     chatTemplateOverride,
+    preserveThinking,
     thinkingTagOverride,
   } = preset;
   if (!id) id = Bun.randomUUIDv7();
@@ -722,6 +748,7 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
   const configJson = serializeLoadPresetPayload({
     config,
     ...(chatTemplateOverride !== undefined ? { chatTemplateOverride } : {}),
+    ...(preserveThinking !== undefined ? { preserveThinking } : {}),
     ...(thinkingTagOverride !== undefined ? { thinkingTagOverride } : {}),
   });
   db.prepare(
@@ -770,6 +797,16 @@ export async function updateLoadPreset(
             updates.chatTemplateOverride !== undefined
               ? updates.chatTemplateOverride
               : currentConfig.chatTemplateOverride,
+        }
+      : {}),
+    ...((updates.preserveThinking !== undefined
+      ? updates.preserveThinking
+      : currentConfig.preserveThinking) !== undefined
+      ? {
+          preserveThinking:
+            updates.preserveThinking !== undefined
+              ? updates.preserveThinking
+              : currentConfig.preserveThinking,
         }
       : {}),
     ...((updates.thinkingTagOverride !== undefined
@@ -992,6 +1029,7 @@ export async function ensureModelDefaultPresets(
 
     // Default Load Preset
     if (!existingLoadPaths.has(m.primaryPath)) {
+      const baseConfig = createDefaultLoadConfig(m.primaryPath);
       const newLoadPreset: LoadPreset = {
         id: Bun.randomUUIDv7(),
         name: `Default (from GGUF) for ${m.modelName}`,
@@ -999,30 +1037,20 @@ export async function ensureModelDefaultPresets(
         isDefault: !hasDefaultLoad,
         isReadonly: false,
         chatTemplateOverride: m.metadata.chatTemplate ?? undefined,
+        preserveThinking:
+          analyzeTemplateCapabilities(m.metadata.chatTemplate ?? "")?.preserveThinkingDefault ??
+          false,
         thinkingTagOverride: detectThinkingConfig(m.metadata.architecture),
         config: {
-          modelPath: m.primaryPath,
+          ...baseConfig,
           mmProjPath: m.mmProjPath,
           contextSize: m.metadata.contextLength || 4096,
-          contextShift: false,
-          gpuLayers: 0,
-          threads: 4,
-          ...defaultBatchingForImageTokens(DEFAULT_IMAGE_MAX_TOKENS),
-          ropeScaling: "none",
-          ropeFreqBase: 0,
-          ropeFreqScale: 0.0,
-          kvCacheTypeK: "f16",
-          kvCacheTypeV: "f16",
-          mlock: true,
-          noMmap: false,
-          contBatching: true,
-          flashAttn: "auto",
-          swaFull: false,
-          kvUnified: true,
-          noKvOffload: false,
-          cacheReuse: 0,
-          contextCheckpoints: 32,
-          imageMaxTokens: DEFAULT_IMAGE_MAX_TOKENS,
+          ...applyImageTokenBatchFloor(
+            baseConfig.batchSize,
+            baseConfig.microBatchSize,
+            baseConfig.imageMaxTokens,
+            m.metadata.architecture,
+          ),
         },
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -1044,29 +1072,12 @@ export async function ensureModelDefaultPresets(
         name: `Default (from GGUF) for ${m.modelName}`,
         sourceModelPath: m.primaryPath,
         isDefault: !hasDefaultInf,
+        ...createDefaultInferenceSampling(),
         temperature: m.metadata.defaultTemperature ?? 0.8,
         topK: m.metadata.defaultTopK ?? 40,
         topP: m.metadata.defaultTopP ?? 0.95,
         minP: m.metadata.defaultMinP ?? (hasCoreSamplingParams ? 0 : 0.05),
         repeatPenalty: m.metadata.defaultRepeatPenalty ?? (hasCoreSamplingParams ? 1.0 : 1.1),
-        repeatLastN: 64,
-
-        typicalP: 1.0,
-        presencePenalty: 0.0,
-        frequencyPenalty: 0.0,
-        mirostat: 0,
-        mirostatTau: 5.0,
-        mirostatEta: 0.1,
-        dynaTempRange: 0.0,
-        dynaTempExponent: 1.0,
-        seed: -1,
-        maxTokens: -1,
-        stopStrings: [],
-        thinkingEnabled: true,
-        toolCallsEnabled: false,
-        tools: [],
-        structuredOutput: undefined,
-        contextOverflowPolicy: "TruncateMiddle",
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };

@@ -95,30 +95,86 @@ function companionKeysAlign(primaryKey: string, candidateKey: string): boolean {
 }
 
 /**
+ * Warns when more than one mmproj candidate matches a primary GGUF.
+ *
+ * @param primaryPath - Absolute path to the primary model file.
+ * @param matches - Ambiguous companion paths.
+ * @returns Always `undefined`, so the caller leaves `mmProjPath` unset.
+ */
+function ambiguousMmproj(primaryPath: string, matches: string[]): undefined {
+  logWarn(
+    `Ambiguous mmproj companions for ${primaryPath}: ${matches.join(", ")}. Leaving mmProjPath unset.`,
+  );
+  return undefined;
+}
+
+/**
+ * Picks a unique mmproj among candidates using the project-plan rules, then token keys.
+ *
+ * Plan order: mmproj stem starts with the primary stem; otherwise the sole file in the
+ * candidate set. Token-key equality is only used to disambiguate multiple leftovers.
+ *
+ * @param primaryPath - Absolute path to the primary model file.
+ * @param candidates - mmproj paths already scoped (same directory, or global).
+ * @returns The matching mmproj path, or `undefined` when no unique match exists.
+ */
+function pickUniqueMmproj(primaryPath: string, candidates: string[]): string | undefined {
+  if (candidates.length === 0) {
+    return undefined;
+  }
+
+  const primaryStem = path.parse(primaryPath).name.toLowerCase();
+  const stemMatches = candidates.filter((candidate) =>
+    path.parse(candidate).name.toLowerCase().startsWith(primaryStem),
+  );
+  if (stemMatches.length === 1) {
+    return stemMatches[0];
+  }
+  if (stemMatches.length > 1) {
+    return ambiguousMmproj(primaryPath, stemMatches);
+  }
+
+  if (candidates.length === 1) {
+    return candidates[0];
+  }
+
+  const primaryKey = buildCompanionKey(primaryPath);
+  if (!primaryKey) {
+    return ambiguousMmproj(primaryPath, candidates);
+  }
+
+  const keyMatches = candidates.filter((candidate) => buildCompanionKey(candidate) === primaryKey);
+  if (keyMatches.length === 1) {
+    return keyMatches[0];
+  }
+  if (keyMatches.length > 1) {
+    return ambiguousMmproj(primaryPath, keyMatches);
+  }
+
+  return ambiguousMmproj(primaryPath, candidates);
+}
+
+/**
  * Finds the best mmproj companion file for a primary GGUF model.
+ *
+ * Matching is same-directory first (publisher/model folder layout), then a unique
+ * global token-key match when the folder has no mmproj.
  *
  * @param primaryPath - Absolute path to the primary model file.
  * @param mmprojFiles - Candidate multimodal projection files discovered during the scan.
  * @returns The matching mmproj file path, or `undefined` when no unique match exists.
  */
 function findMatchingMmproj(primaryPath: string, mmprojFiles: string[]): string | undefined {
-  const primaryKey = buildCompanionKey(primaryPath);
-  if (!primaryKey) {
-    return undefined;
+  const sameDir = mmprojFiles.filter(
+    (candidate) => path.dirname(candidate) === path.dirname(primaryPath),
+  );
+  const sameDirMatch = pickUniqueMmproj(primaryPath, sameDir);
+  if (sameDirMatch || sameDir.length > 0) {
+    return sameDirMatch;
   }
 
-  const sameDirMatches = mmprojFiles.filter(
-    (candidate) =>
-      path.dirname(candidate) === path.dirname(primaryPath) &&
-      buildCompanionKey(candidate) === primaryKey,
-  );
-  if (sameDirMatches.length === 1) {
-    return sameDirMatches[0];
-  }
-  if (sameDirMatches.length > 1) {
-    logWarn(
-      `Ambiguous mmproj companions for ${primaryPath}: ${sameDirMatches.join(", ")}. Leaving mmProjPath unset.`,
-    );
+  const primaryKey = buildCompanionKey(primaryPath);
+  if (!primaryKey) {
     return undefined;
   }
 
@@ -129,9 +185,7 @@ function findMatchingMmproj(primaryPath: string, mmprojFiles: string[]): string 
     return globalMatches[0];
   }
   if (globalMatches.length > 1) {
-    logWarn(
-      `Ambiguous mmproj companions for ${primaryPath}: ${globalMatches.join(", ")}. Leaving mmProjPath unset.`,
-    );
+    return ambiguousMmproj(primaryPath, globalMatches);
   }
 
   return undefined;

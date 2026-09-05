@@ -7,7 +7,7 @@ import { Database } from "bun:sqlite";
 import fs from "node:fs";
 import os from "node:os";
 import { join, resolve } from "node:path";
-import { DEFAULT_IMAGE_MAX_TOKENS, defaultBatchingForImageTokens } from "../../shared/imageTokens";
+import { createDefaultInferenceSampling, createDefaultLoadConfig } from "../../shared/defaults";
 import { logError, logInfo, logWarn } from "../logger";
 
 let _db: Database | null = null;
@@ -445,18 +445,7 @@ export async function initDb(path?: string): Promise<void> {
       id: Bun.randomUUIDv7(),
       name: "Standard",
       is_default: 1,
-      config_json: JSON.stringify({
-        temperature: 0.8,
-        topP: 0.95,
-        minP: 0.05,
-        topK: 40,
-        repeatPenalty: 1.1,
-        maxTokens: -1,
-        stopStrings: [],
-        toolCallsEnabled: false,
-        structuredOutput: { enabled: false },
-        contextOverflowPolicy: "TruncateMiddle",
-      }),
+      config_json: JSON.stringify(createDefaultInferenceSampling()),
       created_at: Date.now(),
       updated_at: Date.now(),
     };
@@ -501,36 +490,7 @@ export async function initDb(path?: string): Promise<void> {
       is_default: 1,
       is_readonly: 1,
       config_json: JSON.stringify({
-        config: {
-          contextSize: 4096,
-          contextShift: false,
-          gpuLayers: 0,
-          threads: 3,
-          threadsBatch: -1,
-          ...defaultBatchingForImageTokens(DEFAULT_IMAGE_MAX_TOKENS),
-          ropeScaling: "none",
-          ropeFreqBase: 0,
-          ropeFreqScale: 0,
-          kvCacheTypeK: "f16",
-          kvCacheTypeV: "f16",
-          mlock: true,
-          noMmap: false,
-          contBatching: true,
-          flashAttn: "auto",
-          swaFull: false,
-          kvUnified: true,
-          noKvOffload: false,
-          cacheReuse: 0,
-          contextCheckpoints: 32,
-          imageMaxTokens: DEFAULT_IMAGE_MAX_TOKENS,
-          logLevel: 3,
-          seedOverride: -1,
-          specType: "off",
-          specDraftNMax: 8,
-          specDraftNMin: 1,
-          specDraftPMin: 0.75,
-          specDraftModelPath: "",
-        },
+        config: createDefaultLoadConfig(""),
       }),
       created_at: Date.now(),
       updated_at: Date.now(),

@@ -9,7 +9,9 @@ import type { ThinkingTagConfig } from "./types";
  * Configuration specifically for the Gemma 4 architectures regarding their unique formatting.
  */
 export const GEMMA4_THINKING_CONFIG: ThinkingTagConfig = {
-  openTag: "<|channel>thought\n",
+  // llama.cpp's Gemma 4 PEG parser is `literal("<|channel>thought") + space`,
+  // so a required trailing newline misses traces that open with a space.
+  openTag: "<|channel>thought",
   closeTag: "<channel|>",
   enableToken: "<|think|>",
 };

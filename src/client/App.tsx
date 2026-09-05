@@ -9,10 +9,12 @@ import { Link, Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import { MessageSquare, Server, Settings, Terminal } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { ConsoleLog } from "./ConsoleLog";
-import { ChatSidebar } from "./components/sidebar/ChatSidebar";
+import { ModelLoadOverlay } from "./components/ModelLoadOverlay";
 import { InferencePresetEditor } from "./components/preset/InferencePresetEditor";
 import { LoadPresetEditor } from "./components/preset/LoadPresetEditor";
 import { SystemPresetEditor } from "./components/preset/SystemPresetEditor";
+import { StatusBar } from "./components/StatusBar";
+import { ChatSidebar } from "./components/sidebar/ChatSidebar";
 import { ModelLibraryPanel } from "./components/sidebar/ModelLibraryPanel";
 import { HardwareInfo } from "./HardwareInfo";
 import { logError } from "./logger";
@@ -34,6 +36,8 @@ export default function App() {
   const fetchHardware = useAppStore((s) => s.fetchHardware);
   const fetchModels = useAppStore((s) => s.fetchModels);
   const fetchServerStatus = useAppStore((s) => s.fetchServerStatus);
+  const refreshProcessUsage = useAppStore((s) => s.refreshProcessUsage);
+  const refreshContextUsage = useAppStore((s) => s.refreshContextUsage);
   const serverStatus = useAppStore((s) => s.serverStatus);
   const isConnected = useAppStore((s) => s.isConnected);
   const errorMessage = useAppStore((s) => s.errorMessage);
@@ -44,6 +48,9 @@ export default function App() {
   const removeNotification = useAppStore((s) => s.removeNotification);
   const unloadModel = useAppStore((s) => s.unloadModel);
   const currentChatId = useAppStore((s) => s.currentChatId);
+  const isGenerating = useAppStore((s) => s.isGenerating);
+  const isGeneratingRef = useRef(isGenerating);
+  isGeneratingRef.current = isGenerating;
   const { setRightPanelView, rightPanelView, toggleConsole, isConsoleVisible } = useUiStore();
   const { data: settings } = useSettings();
   const createChatMut = useCreateChat();
@@ -90,6 +97,12 @@ export default function App() {
     connectWs();
     fetchHardware();
     fetchModels().then(() => fetchServerStatus());
+    void refreshProcessUsage();
+    const usageTimer = window.setInterval(() => {
+      if (isGeneratingRef.current) return;
+      void refreshProcessUsage();
+    }, 10_000);
+    return () => window.clearInterval(usageTimer);
   }, []);
   /* eslint-enable react-hooks/exhaustive-deps */
 
@@ -153,9 +166,11 @@ export default function App() {
       queryClient.invalidateQueries({ queryKey: queryKeys.presetsLoad() });
       queryClient.invalidateQueries({ queryKey: queryKeys.presetsInference() });
       queryClient.invalidateQueries({ queryKey: queryKeys.presetsSystem() });
+      void refreshContextUsage();
     };
     const handleChatsInvalidate = () => {
       queryClient.invalidateQueries({ queryKey: ["chats"] });
+      void refreshContextUsage();
     };
     window.addEventListener("llamaforge:presets-invalidate", handlePresetsInvalidate);
     window.addEventListener("llamaforge:chats-invalidate", handleChatsInvalidate);
@@ -163,7 +178,7 @@ export default function App() {
       window.removeEventListener("llamaforge:presets-invalidate", handlePresetsInvalidate);
       window.removeEventListener("llamaforge:chats-invalidate", handleChatsInvalidate);
     };
-  }, [queryClient]);
+  }, [queryClient, refreshContextUsage]);
 
   /**
    * Selects the currently active right-side panel content.
@@ -300,6 +315,7 @@ export default function App() {
             <Outlet />
           </div>
           {isConsoleVisible ? <ConsoleLog /> : null}
+          <StatusBar />
 
           <div className="fixed right-4 bottom-4 z-50 flex flex-col gap-3">
             {notifications.map((notification) => {
@@ -351,6 +367,7 @@ export default function App() {
 
       {/* Hardware / Right Panel */}
       {renderRightPanel()}
+      <ModelLoadOverlay />
     </div>
   );
 }

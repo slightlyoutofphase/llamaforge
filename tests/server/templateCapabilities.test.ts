@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { analyzeTemplateCapabilities } from "../../src/shared/templateCapabilities";
+import {
+  analyzeLoadPresetChatTemplate,
+  analyzeTemplateCapabilities,
+  modelPathsMatch,
+  resolveChatTemplateForCapabilities,
+} from "../../src/shared/templateCapabilities";
 
 describe("analyzeTemplateCapabilities", () => {
   it("returns null for empty template", () => {
@@ -131,5 +136,75 @@ describe("analyzeTemplateCapabilities", () => {
     expect(result).not.toBeNull();
     expect(result?.hasPreserveThinking).toBe(true);
     expect(result?.preserveThinkingDefault).toBe(false);
+  });
+});
+
+describe("resolveChatTemplateForCapabilities", () => {
+  it("matches model paths across slash and case differences", () => {
+    expect(modelPathsMatch("D:\\Models\\Qwen.gguf", "d:/Models/Qwen.gguf")).toBe(true);
+    expect(modelPathsMatch("D:\\Models\\A.gguf", "D:\\Models\\B.gguf")).toBe(false);
+  });
+
+  it("prefers a pasted load-preset override that contains preserve_thinking", () => {
+    const resolved = resolveChatTemplateForCapabilities({
+      loadedTemplate: "{{ bos_token }}",
+      ggufTemplate: "{{ bos_token }}",
+      modelPath: "D:\\Models\\qwen.gguf",
+      loadPresets: [
+        {
+          id: "auto",
+          modelPath: "D:/Models/qwen.gguf",
+          chatTemplateOverride: "{{ bos_token }}",
+        },
+        {
+          id: "custom",
+          modelPath: "d:\\models\\qwen.gguf",
+          chatTemplateOverride:
+            "{%- set preserve_thinking = preserve_thinking | default(false) -%}{{ bos_token }}",
+        },
+      ],
+    });
+    expect(resolved?.provenance).toBe("override");
+    expect(resolved?.template).toContain("preserve_thinking");
+    expect(analyzeTemplateCapabilities(resolved?.template ?? "")?.hasPreserveThinking).toBe(true);
+  });
+
+  it("uses the loaded chatTemplateContent when it already supports preserve_thinking", () => {
+    const loaded = "{%- set preserve_thinking = preserve_thinking | default(true) -%}";
+    const resolved = resolveChatTemplateForCapabilities({
+      loadedTemplate: loaded,
+      ggufTemplate: "{{ bos_token }}",
+      modelPath: "/models/a.gguf",
+      loadPresets: [],
+    });
+    expect(resolved).toEqual({ template: loaded, provenance: "loaded" });
+  });
+});
+
+describe("analyzeLoadPresetChatTemplate", () => {
+  it("uses the load-preset override without requiring a loaded model", () => {
+    const result = analyzeLoadPresetChatTemplate(
+      "{%- set preserve_thinking = preserve_thinking | default(true) -%}",
+      "{{ bos_token }}",
+    );
+    expect(result?.hasPreserveThinking).toBe(true);
+    expect(result?.preserveThinkingDefault).toBe(true);
+    expect(result?.provenance).toBe("override");
+  });
+
+  it("falls back to the GGUF template when no override is present", () => {
+    const result = analyzeLoadPresetChatTemplate(
+      undefined,
+      "{%- set preserve_thinking = preserve_thinking | default(false) -%}",
+    );
+    expect(result?.hasPreserveThinking).toBe(true);
+    expect(result?.preserveThinkingDefault).toBe(false);
+    expect(result?.provenance).toBe("gguf");
+  });
+
+  it("does not enable preserve thinking for templates that lack the variable", () => {
+    const result = analyzeLoadPresetChatTemplate("{{ bos_token }}", "{{ bos_token }}");
+    expect(result?.hasPreserveThinking).toBe(false);
+    expect(result?.provenance).toBe("override");
   });
 });

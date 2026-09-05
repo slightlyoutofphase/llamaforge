@@ -10,6 +10,7 @@
     "bunbuild": "bun run build.ts",
     "start": "bun run dist/server/index.js",
     "test": "bun test",
+    "test:e2e": "bun test ./tests/e2e",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit --project tsconfig.json && tsc --noEmit --project tsconfig.server.json",
     "typecheck:tests": "tsc --noEmit --project tsconfig.test.json",

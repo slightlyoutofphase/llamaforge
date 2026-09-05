@@ -112,6 +112,23 @@ describe("modelScanner", () => {
     expect(entries).toHaveLength(0);
   });
 
+  it("links a same-directory mmproj whose filename does not share an exact companion key", async () => {
+    const gemmaRoot = path.join(tmpDir, "FadedRedStar", "gemma-4-E4B-it-qat-q4_0-heretic-GGUF");
+    await fs.mkdir(gemmaRoot, { recursive: true });
+    await Bun.write(path.join(gemmaRoot, "gemma-4-E4B-it-qat-q4_0-heretic-Q4_0_PURE.gguf"), "mock");
+    await Bun.write(
+      path.join(gemmaRoot, "mmproj-gemma-4-E4B-it-qat-q4_0-heretic-BF16.gguf"),
+      "mock",
+    );
+
+    const entries = await scanModels(path.join(tmpDir, "FadedRedStar"));
+    const gemma = entries.find((e) => e.primaryPath.includes("Q4_0_PURE.gguf"));
+    expect(entries).toHaveLength(1);
+    expect(gemma?.mmProjPath?.includes("mmproj-gemma-4-E4B-it-qat-q4_0-heretic-BF16.gguf")).toBe(
+      true,
+    );
+  });
+
   it("leaves mmProjPath unset when multiple mmproj variants match the same primary companion key", async () => {
     const ambiguousRoot = path.join(tmpDir, "AmbiguousPublisher", "Model-7B");
     await fs.mkdir(ambiguousRoot, { recursive: true });

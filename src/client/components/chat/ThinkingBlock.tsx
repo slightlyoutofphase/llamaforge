@@ -9,6 +9,8 @@ import ReactMarkdown from "react-markdown";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
+import { thinkingHeaderLabel } from "../../../shared/generationMetrics";
+import { normalizeThinkingTrace, THINKING_TRACE_BODY_CLASS } from "../../../shared/thinkingDisplay";
 
 /**
  * Properties for the ThinkingBlock component.
@@ -18,6 +20,8 @@ interface ThinkingBlockProps {
   content: string;
   /** Whether the block is currently generating live. */
   isLive?: boolean;
+  /** Wall-clock thinking duration in milliseconds, once known. */
+  durationMs?: number | undefined;
 }
 
 /**
@@ -26,8 +30,9 @@ interface ThinkingBlockProps {
  * @param props - The component properties: {@link ThinkingBlockProps}.
  * @returns The rendered React element.
  */
-export function ThinkingBlock({ content, isLive }: ThinkingBlockProps) {
+export function ThinkingBlock({ content, isLive, durationMs }: ThinkingBlockProps) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const [liveElapsedMs, setLiveElapsedMs] = useState(0);
 
   useEffect(() => {
     if (isLive) {
@@ -35,7 +40,20 @@ export function ThinkingBlock({ content, isLive }: ThinkingBlockProps) {
     }
   }, [isLive]);
 
-  const tokenEstimate = Math.ceil(content.length / 4);
+  useEffect(() => {
+    if (!isLive) {
+      setLiveElapsedMs(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setLiveElapsedMs(0);
+    const timer = window.setInterval(() => {
+      setLiveElapsedMs(Date.now() - startedAt);
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [isLive]);
+
+  const label = thinkingHeaderLabel(!!isLive, liveElapsedMs, durationMs);
 
   return (
     <div className="mb-2 max-w-[85%] border border-[var(--color-border)] rounded-lg bg-[var(--color-surface)]/50 overflow-hidden text-sm animate-in fade-in slide-in-from-left-2 duration-500">
@@ -50,17 +68,17 @@ export function ThinkingBlock({ content, isLive }: ThinkingBlockProps) {
         ) : (
           <ChevronRight size={14} className="mr-2 shrink-0" />
         )}
-        <span className="font-mono text-xs font-semibold uppercase tracking-wider flex items-center gap-2">
-          Thinking trace ({tokenEstimate} tokens)
+        <span className="font-mono text-xs font-semibold tracking-wide flex items-center gap-2">
+          {label}
           {isLive && <Loader2 size={10} className="animate-spin text-[var(--color-accent)]" />}
         </span>
       </button>
 
       {isExpanded && (
         <div className="p-3 pt-1 border-t border-[var(--color-border)] text-[var(--color-text-secondary)] font-mono opacity-80 overflow-auto max-h-[400px]">
-          <div className="whitespace-pre-wrap">
+          <div data-testid="thinking-trace" className={THINKING_TRACE_BODY_CLASS}>
             <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>
-              {content.trim()}
+              {normalizeThinkingTrace(content)}
             </ReactMarkdown>
           </div>
         </div>

@@ -87,8 +87,22 @@ describe("optimizer", () => {
     };
     const config = optimizeLoadConfig(mockHardware, visionMeta);
     expect(config.imageMaxTokens).toBe(560);
-    expect(config.microBatchSize).toBeGreaterThanOrEqual(1120);
+    expect(config.imageMinTokens).toBe(70);
+    expect(config.microBatchSize).toBe(560);
     expect((config.batchSize ?? 0) >= (config.microBatchSize ?? 0)).toBe(true);
+  });
+
+  it("does not raise ubatch for non-Gemma vision models", () => {
+    const visionMeta: GgufDisplayMetadata = {
+      ...mockMeta,
+      architecture: "qwen3vl",
+      hasVisionEncoder: true,
+      hasAudioEncoder: false,
+    };
+    const config = optimizeLoadConfig(mockHardware, visionMeta);
+    expect(config.imageMaxTokens).toBe(560);
+    expect(config.imageMinTokens).toBe(70);
+    expect(config.microBatchSize).toBe(512);
   });
 
   it("handles Grouped Query Attention architectures successfully saving VRAM", () => {

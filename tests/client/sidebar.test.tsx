@@ -429,19 +429,54 @@ describe("ChatSidebar Component", () => {
       </QueryClientProvider>,
     );
 
-    const deleteButton = screen.getAllByTitle("Delete")[0];
+    const deleteButtons = screen.getAllByTitle("Delete");
+    const deleteButton = deleteButtons[0];
     fireEvent.click(deleteButton);
     fireEvent.click(deleteButton);
 
     await waitFor(() => {
       expect(deleteMutateAsync).toHaveBeenCalledTimes(1);
-      expect(deleteMutateAsync).toHaveBeenCalledWith("chat-1");
-      expect(unloadChatSpy).toHaveBeenCalledTimes(1);
-      expect(navigateSpy).toHaveBeenCalledWith({
-        to: "/chat/$chatId",
-        params: { chatId: "chat-2" },
-      });
+      expect(deleteMutateAsync).toHaveBeenCalledWith("chat-2");
+      expect(unloadChatSpy).toHaveBeenCalledTimes(0);
+      expect(navigateSpy).not.toHaveBeenCalled();
     });
+  });
+
+  it("does not allow deleting the chat that is currently open", () => {
+    const deleteMutateAsync = mock(async () => undefined);
+    globalThis.confirm = mock(() => true) as typeof globalThis.confirm;
+
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [
+            [
+              { id: "chat-1", name: "First Chat", createdAt: 3000, updatedAt: 3000 },
+              { id: "chat-2", name: "Second Chat", createdAt: 2000, updatedAt: 4000 },
+            ],
+          ],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutateAsync: mock(async () => undefined), isPending: false }),
+      useDeleteChat: () => ({ mutateAsync: deleteMutateAsync, isPending: false }),
+      useUpdateChat: () => ({ mutateAsync: mock(async () => undefined) }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    const openChatDelete = screen.getByTitle("Cannot delete the open chat");
+    expect((openChatDelete as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(openChatDelete);
+    expect(deleteMutateAsync).not.toHaveBeenCalled();
+    expect(globalThis.confirm).not.toHaveBeenCalled();
   });
 
   it("keeps default date sorting ordered by creation time instead of recent updates", () => {

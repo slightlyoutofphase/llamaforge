@@ -39,6 +39,17 @@ const QUANT_NAMES: Record<number, string> = {
 };
 
 /**
+ * Interprets a GGUF scalar as an enabled boolean flag.
+ * GGUF bools are often encoded as integer `0`/`1` rather than JSON booleans.
+ *
+ * @param value - Raw metadata value from `@huggingface/gguf`.
+ * @returns `true` when the value represents an enabled flag.
+ */
+function ggufFlagEnabled(value: unknown): boolean {
+  return value === true || value === 1 || value === 1n || value === "true" || value === "1";
+}
+
+/**
  * Parses a GGUF file and extracts display metadata.
  *
  * @param fileAbsolutePath - The absolute path to the local GGUF file.
@@ -60,11 +71,11 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
   const ffLen = metadata?.[`${arch}.feed_forward_length`];
 
   const hasVision =
-    metadata?.["clip.has_vision_encoder"] === true ||
+    ggufFlagEnabled(metadata?.["clip.has_vision_encoder"]) ||
     arch === "clip" ||
     metadata?.["clip.projector_type"] !== undefined;
   const hasAudio =
-    metadata?.["clip.has_audio_encoder"] === true ||
+    ggufFlagEnabled(metadata?.["clip.has_audio_encoder"]) ||
     String(metadata?.["clip.projector_type"] ?? "")
       .toLowerCase()
       .includes("audio");

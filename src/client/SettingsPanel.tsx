@@ -3,6 +3,7 @@
  * Right sidebar panel for managing application-wide settings: theme, paths, and advanced flags.
  */
 
+import { DEFAULT_APP_SETTINGS } from "@shared/defaults";
 import type { AppSettings } from "@shared/types";
 import { Loader2, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -16,10 +17,10 @@ type NumericDraftKey =
 type NumericDraftState = Record<NumericDraftKey, string>;
 
 const NUMERIC_DEFAULTS: NumericDraftState = {
-  llamaPortRangeMin: "12000",
-  llamaPortRangeMax: "13000",
-  requestTimeoutSeconds: "60",
-  serverPort: "11435",
+  llamaPortRangeMin: String(DEFAULT_APP_SETTINGS.llamaPortRangeMin),
+  llamaPortRangeMax: String(DEFAULT_APP_SETTINGS.llamaPortRangeMax),
+  requestTimeoutSeconds: String(DEFAULT_APP_SETTINGS.requestTimeoutSeconds),
+  serverPort: String(DEFAULT_APP_SETTINGS.serverPort),
 };
 
 /**
@@ -376,12 +377,12 @@ export function SettingsPanel() {
           </div>
           <div className="flex items-center justify-between py-1">
             <label htmlFor="autoloadToggle" className="text-sm font-medium cursor-pointer">
-              Autoload Last Model
+              Reload Last Used Model Automatically
             </label>
             <input
               id="autoloadToggle"
               type="checkbox"
-              checked={!!localState.autoloadLastModel}
+              checked={localState.autoloadLastModel ?? DEFAULT_APP_SETTINGS.autoloadLastModel}
               onChange={(e) =>
                 setLocalState((prev) => ({ ...prev, autoloadLastModel: e.target.checked }))
               }
@@ -465,6 +466,29 @@ export function SettingsPanel() {
           <h3 className="text-xs font-bold text-[var(--color-text-muted)] uppercase tracking-wider">
             Advanced
           </h3>
+          <div className="flex items-center justify-between py-1 gap-3">
+            <div className="min-w-0">
+              <label
+                htmlFor="includeVideoAudioToggle"
+                className="text-sm font-medium cursor-pointer">
+                Include Audio From Videos
+              </label>
+              <p className="text-[10px] text-[var(--color-text-muted)] leading-snug mt-1">
+                When a video has a soundtrack, also send it as separate audio. llama-server cannot
+                read muxed video+audio as one file. Ignored unless the loaded model has an audio
+                encoder.
+              </p>
+            </div>
+            <input
+              id="includeVideoAudioToggle"
+              type="checkbox"
+              checked={localState.includeVideoAudio ?? DEFAULT_APP_SETTINGS.includeVideoAudio}
+              onChange={(e) =>
+                setLocalState((prev) => ({ ...prev, includeVideoAudio: e.target.checked }))
+              }
+              className="w-4 h-4 accent-[var(--color-accent)] shrink-0"
+            />
+          </div>
           <div className="space-y-2">
             <label htmlFor="logLevel" className="text-sm font-medium">
               Log Level

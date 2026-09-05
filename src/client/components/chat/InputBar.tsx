@@ -7,6 +7,7 @@ import { Paperclip, Plus, Send, X } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
+import { useAppStore } from "../../store";
 
 interface PendingAttachment {
   id: string;
@@ -67,6 +68,16 @@ interface InputBarProps {
   isActive: boolean;
   /** Callback to stop generation. */
   onStop: () => void;
+  /**
+   * True while the transcript is being reconciled with the server.
+   * Blocks sending so a new message cannot land on a different history than the UI.
+   */
+  historyLocked?: boolean;
+  /**
+   * Identity of the conversation this composer belongs to.
+   * Changing it discards unsent text and attachments so drafts cannot leak across chats.
+   */
+  conversationId?: string;
 }
 
 /**
@@ -75,7 +86,14 @@ interface InputBarProps {
  * @param props - The component properties: {@link InputBarProps}.
  * @returns The rendered React element.
  */
-export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarProps) {
+export function InputBar({
+  onSend,
+  isGenerating,
+  isActive,
+  onStop,
+  conversationId,
+  historyLocked = false,
+}: InputBarProps) {
   const [files, setFiles] = useState<PendingAttachment[]>([]);
   const [inputContent, setInputContent] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -93,6 +111,17 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     };
   }, []);
 
+  useEffect(() => {
+    if (conversationId === undefined) return;
+    setInputContent("");
+    setFiles((prev) => {
+      for (const file of prev) {
+        revokePreviewUrl(file.previewUrl);
+      }
+      return [];
+    });
+  }, [conversationId]);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: we want to trigger this when inputContent changes
   useEffect(() => {
     if (textareaRef.current) {
@@ -101,7 +130,13 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     }
   }, [inputContent]);
 
+  const composerLocked = !isActive || isGenerating || historyLocked;
+
   const onDrop = useCallback((acceptedFiles: File[]) => {
+    const oversized = acceptedFiles.filter((file) => file.size > MAX_COMPOSER_FILE_BYTES);
+    if (oversized.length > 0) {
+      useAppStore.getState().setError("Attachments must be 10MB or smaller.");
+    }
     setFiles((prev) => {
       const remainingSlots = Math.max(0, MAX_COMPOSER_FILES - prev.length);
       const accepted = acceptedFiles
@@ -120,7 +155,7 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
     onDrop,
     noClick: true,
     noKeyboard: true,
-    disabled: !isActive || isGenerating,
+    disabled: composerLocked,
     accept: {
       "image/*": [],
       "audio/*": [],
@@ -136,7 +171,8 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
    * @returns A promise that resolves once the send workflow completes.
    */
   const handleSend = async () => {
-    if ((!inputContent.trim() && files.length === 0) || isGenerating) return;
+    if (!isActive || historyLocked || isGenerating) return;
+    if (!inputContent.trim() && files.length === 0) return;
 
     const pendingFiles = [...files];
     const filesToSend = await Promise.all(pendingFiles.map(({ file }) => cloneFile(file)));
@@ -221,7 +257,7 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
         <button
           type="button"
           onClick={open}
-          disabled={!isActive || isGenerating}
+          disabled={composerLocked}
           className="p-2 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-elevated)] rounded-xl transition-all mr-2 shrink-0 mb-1 disabled:opacity-50 disabled:cursor-not-allowed"
           title="Attach files (Images, Audio, Video, PDF, Text)">
           <Plus size={20} />
@@ -236,8 +272,14 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
           value={inputContent}
           onChange={(e) => setInputContent(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={isActive ? "Type your message..." : "Allocate a model to begin..."}
-          disabled={!isActive || isGenerating}
+          placeholder={
+            historyLocked
+              ? "Updating chat history..."
+              : isActive
+                ? "Type your message..."
+                : "Allocate a model to begin..."
+          }
+          disabled={composerLocked}
           className="flex-1 bg-transparent border-none focus:outline-none resize-none py-3 px-1 min-h-[44px] max-h-[200px] text-[var(--color-text-primary)] placeholder-[var(--color-text-muted)] w-full disabled:opacity-50 disabled:cursor-not-allowed"
           rows={1}
         />
@@ -245,7 +287,7 @@ export function InputBar({ onSend, isGenerating, isActive, onStop }: InputBarPro
         <button
           type="button"
           onClick={isGenerating ? onStop : handleSend}
-          disabled={!isActive}
+          disabled={!isActive || historyLocked}
           className={`p-2 ml-2 rounded-xl transition-all shrink-0 mb-1 disabled:opacity-50 disabled:cursor-not-allowed ${
             isGenerating
               ? "bg-[var(--color-error)] text-white shadow-md"

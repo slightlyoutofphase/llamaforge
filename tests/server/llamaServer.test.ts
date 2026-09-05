@@ -7,8 +7,14 @@ import { describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { buildArgs, getServerStatus, loadModel } from "../../src/server/llamaServer";
+import {
+  buildArgs,
+  getServerStatus,
+  loadModel,
+  resolveChatTemplateForSpawn,
+} from "../../src/server/llamaServer";
 import { getAppDataDir } from "../../src/server/persistence/db";
+import { GEMMA4_FOLLOWUP_THOUGHT_MARKER } from "../../src/shared/gemma4ChatTemplate";
 import type { ModelLoadConfig } from "../../src/shared/types";
 
 const baseConfig: ModelLoadConfig = {
@@ -54,8 +60,12 @@ describe("llamaServer", () => {
     expect(args[args.indexOf("--load-mode") + 1]).toBe("mmap+mlock");
     expect(args).not.toContain("--mlock");
     expect(args).not.toContain("--no-mmap");
-    expect(args).not.toContain("--parallel");
+    expect(args).toContain("--parallel");
+    expect(args[args.indexOf("--parallel") + 1]).toBe("1");
+    expect(args).toContain("--no-webui");
+    expect(args).not.toContain("--webui");
     expect(args).not.toContain("--jinja");
+    expect(args).not.toContain("--reasoning");
     expect(args).toContain("--cont-batching");
     expect(args).toContain("--flash-attn");
     expect(args[args.indexOf("--flash-attn") + 1]).toBe("on");
@@ -148,7 +158,7 @@ describe("llamaServer", () => {
     expect(args).not.toContain("--spec-draft-model");
   });
 
-  it("adds image-max-tokens when configured and omits image-min-tokens by default", () => {
+  it("adds image-max-tokens and default image-min-tokens without inflating non-Gemma ubatch", () => {
     const config: ModelLoadConfig = {
       ...baseConfig,
       gpuLayers: 0,
@@ -164,16 +174,58 @@ describe("llamaServer", () => {
       imageMaxTokens: 560,
     };
 
-    const args = buildArgs(config, 8080);
+    const args = buildArgs(config, 8080, "qwen3vl");
 
-    expect(args).not.toContain("--image-min-tokens");
+    expect(args).toContain("--image-min-tokens");
+    expect(args[args.indexOf("--image-min-tokens") + 1]).toBe("70");
     expect(args).toContain("--image-max-tokens");
     expect(args[args.indexOf("--image-max-tokens") + 1]).toBe("560");
-    expect(args[args.indexOf("--ubatch-size") + 1]).toBe("1120");
-    expect(Number(args[args.indexOf("--batch-size") + 1])).toBeGreaterThanOrEqual(1120);
+    expect(args[args.indexOf("--ubatch-size") + 1]).toBe("1");
   });
 
-  it("emits image-min-tokens only when set alongside image-max-tokens", () => {
+  it("raises Gemma 4 ubatch to n_tokens, not a multiple of the image budget", () => {
+    const config: ModelLoadConfig = {
+      ...baseConfig,
+      batchSize: 512,
+      microBatchSize: 128,
+      imageMaxTokens: 560,
+    };
+
+    const args = buildArgs(config, 8080, "gemma4");
+
+    expect(args[args.indexOf("--ubatch-size") + 1]).toBe("560");
+    expect(Number(args[args.indexOf("--batch-size") + 1])).toBeGreaterThanOrEqual(560);
+    expect(args).toContain("--image-min-tokens");
+    expect(args[args.indexOf("--image-min-tokens") + 1]).toBe("70");
+    expect(args).toContain("--reasoning");
+    expect(args[args.indexOf("--reasoning") + 1]).toBe("on");
+  });
+
+  it("patches Gemma 4 load-preset Jinja so follow-up turns open thought", async () => {
+    const template = `{%- set enable_thinking = enable_thinking | default(false) -%}
+{{- '<|think|>' -}}
+{{- '<|channel>thought' -}}
+{%- if add_generation_prompt -%}
+{{- '<|turn>model\\n' -}}
+{%- endif -%}`;
+    const resolved = await resolveChatTemplateForSpawn(
+      { ...baseConfig, chatTemplateContent: template },
+      "gemma4",
+    );
+    expect(resolved).toContain(GEMMA4_FOLLOWUP_THOUGHT_MARKER);
+    expect(resolved).toContain("{%- if enable_thinking -%}");
+  });
+
+  it("does not patch non-Gemma chat template overrides", async () => {
+    const template = "{%- if add_generation_prompt -%}{{ bos_token }}{%- endif -%}";
+    const resolved = await resolveChatTemplateForSpawn(
+      { ...baseConfig, chatTemplateContent: template },
+      "qwen3",
+    );
+    expect(resolved).toBe(template);
+  });
+
+  it("emits an explicit image-min-tokens override alongside image-max-tokens", () => {
     const withBoth: ModelLoadConfig = {
       ...baseConfig,
       imageMaxTokens: 560,
@@ -213,6 +265,15 @@ describe("llamaServer", () => {
     expect(args).not.toContain("--image-min-tokens");
     expect(args).not.toContain("--image-max-tokens");
     expect(args[args.indexOf("--ubatch-size") + 1]).toBe("1");
+  });
+
+  it("emits --video-fps from the load config, defaulting to llama-server's 4 fps", () => {
+    const defaultArgs = buildArgs(baseConfig, 8080);
+    expect(defaultArgs).toContain("--video-fps");
+    expect(defaultArgs[defaultArgs.indexOf("--video-fps") + 1]).toBe("4");
+
+    const customArgs = buildArgs({ ...baseConfig, videoFps: 1.5 }, 8080);
+    expect(customArgs[customArgs.indexOf("--video-fps") + 1]).toBe("1.5");
   });
 
   it("rejects invalid llama-server port ranges before spawning", async () => {

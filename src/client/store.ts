@@ -4,15 +4,19 @@
  * Orchestrates WebSocket communication, chat session management, and server interaction.
  */
 
+import { create } from "zustand";
+import { buildMessageMetrics } from "../shared/generationMetrics";
 import type {
+  AppProcessUsage,
+  ChatContextUsage,
   ChatMessage,
   HardwareInfo,
   LlamaServerStatus,
   LoadModelRequest,
   ModelEntry,
+  ModelLoadConfig,
   WsFrame,
 } from "../shared/types";
-import { create } from "zustand";
 import { request } from "./http";
 import { logDebug, logError, logInfo, logWarn } from "./logger";
 import { useUiStore } from "./uiStore";
@@ -53,6 +57,12 @@ interface AppState {
   models: ModelEntry[];
   /** Reference to the currently loaded model, if any. */
   loadedModel: ModelEntry | null;
+  /** Load configuration of the currently running llama-server, if any. */
+  loadedConfig: ModelLoadConfig | null;
+  /** Token occupancy of the currently selected conversation. */
+  contextUsage: ChatContextUsage | null;
+  /** RAM and VRAM consumed by LlamaForge processes. */
+  processUsage: AppProcessUsage | null;
   /** WebSocket connection status. */
   isConnected: boolean;
   /** Circular buffer of server logs. */
@@ -83,6 +93,8 @@ interface AppState {
     tokensPerSecond?: number;
     promptTokensPerSecond?: number;
     stopReason?: string | undefined;
+    /** Frozen thinking duration once the think block has closed mid-stream. */
+    thinkingDurationMs?: number | undefined;
   } | null;
   /** ID of the active generation session for the current chat. */
   currentGenerationId: string | null;
@@ -92,6 +104,11 @@ interface AppState {
   totalMessages: number;
   /** IDs of chats that have received updates while hidden. */
   unreadChatIds: string[];
+  /**
+   * True while a history mutation is waiting on the server.
+   * Sending during this window would use a different transcript than the UI.
+   */
+  isSyncingHistory: boolean;
   /** Whether the client should attempt reconnects after WebSocket closes. */
   shouldReconnect: boolean;
   /** Global error state for blocking overlays. */
@@ -130,7 +147,7 @@ interface AppState {
   /** Clears unread activity for a chat. */
   clearUnreadChat: (chatId: string) => void;
   /** Sends a message to the active chat via the streamProxy. */
-  sendMessage: (content: string, files?: File[]) => Promise<void>;
+  sendMessage: (content: string, files?: File[], inferencePresetId?: string) => Promise<void>;
   /** Interrupts an ongoing generation. */
   stopGeneration: () => void;
   /** Loads a chat session and its message history from the backend. */
@@ -149,10 +166,19 @@ interface AppState {
   fetchServerStatus: () => Promise<void>;
   /** Fetches prompt cache statistics for a specific chat. */
   fetchPromptCacheStats: (chatId: string) => Promise<void>;
+  /** Refreshes token occupancy for the currently selected conversation. */
+  refreshContextUsage: (chatId?: string | null) => Promise<void>;
+  /** Refreshes RAM and VRAM usage for LlamaForge processes. */
+  refreshProcessUsage: () => Promise<void>;
   /** Spawns the llama-server process with the given configuration. */
   loadModel: (config: LoadModelRequest) => Promise<boolean>;
   /** Loads older messages for the current chat using the oldest loaded position as a cursor. */
   loadMoreMessages: () => Promise<void>;
+  /** Updates fields on a message already present in the open transcript. */
+  patchMessage: (
+    messageId: string,
+    updates: Partial<Pick<ChatMessage, "content" | "rawContent" | "thinkingContent">>,
+  ) => void;
   /** Patches metadata for the currently open chat without refetching the transcript. */
   patchCurrentChatMetadata: (
     updates: Partial<{
@@ -208,6 +234,25 @@ let activeChatLoadController: AbortController | null = null;
  */
 function appendLogLine(logs: string[], line: string): string[] {
   return [...logs.slice(-(MAX_LOG_LINES - 1)), line];
+}
+
+/**
+ * Last non-optimistic message id in the loaded transcript window.
+ *
+ * Used so a send is rejected when the UI has diverged from the server history,
+ * for example after an optimistic delete that never landed in the database.
+ *
+ * @param messages - Currently displayed transcript, oldest to newest.
+ * @returns Persisted head id, or `null` when the client believes the chat is empty.
+ */
+export function persistedTranscriptHeadId(
+  messages: readonly Pick<ChatMessage, "id">[],
+): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const id = messages[i]?.id;
+    if (id && !id.startsWith("temp-")) return id;
+  }
+  return null;
 }
 
 /**
@@ -282,6 +327,18 @@ function applyPendingChatFrames(
         if (frame.thinkingDelta !== undefined) {
           message.thinkingContent = (message.thinkingContent || "") + frame.thinkingDelta;
         }
+        if (frame.thinkingDurationMs !== undefined) {
+          message.metrics = {
+            predictedTokens: message.metrics?.predictedTokens ?? 0,
+            tokensPerSecond: message.metrics?.tokensPerSecond ?? 0,
+            promptTokens: message.metrics?.promptTokens ?? 0,
+            promptTokensPerSecond: message.metrics?.promptTokensPerSecond ?? 0,
+            cachedPromptTokens: message.metrics?.cachedPromptTokens ?? 0,
+            evaluatedPromptTokens: message.metrics?.evaluatedPromptTokens ?? 0,
+            ...message.metrics,
+            thinkingDurationMs: frame.thinkingDurationMs,
+          };
+        }
         nextMessages[idx] = message;
       }
     }
@@ -344,6 +401,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   loadProgressDetail: null,
   models: [],
   loadedModel: null,
+  loadedConfig: null,
+  contextUsage: null,
+  processUsage: null,
   isConnected: false,
   logs: [],
   messages: [],
@@ -356,6 +416,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   promptCacheStats: null,
   totalMessages: 0,
   unreadChatIds: [],
+  isSyncingHistory: false,
   shouldReconnect: true,
   errorMessage: null,
   errorActionLabel: null,
@@ -468,6 +529,8 @@ export const useAppStore = create<AppState>((set, get) => ({
               updates.loadProgress = 0;
               updates.loadProgressPhase = null;
               updates.loadProgressDetail = null;
+              updates.loadedConfig = null;
+              updates.loadedModel = null;
             }
             return updates;
           });
@@ -499,8 +562,24 @@ export const useAppStore = create<AppState>((set, get) => ({
                     : [...new Set([...state.unreadChatIds, frame.chatId])],
               };
             }
+            if (state.isSyncingHistory) return state;
             const messages = [...state.messages];
-            const targetIndex = messages.findIndex((m) => m.id === frame.messageId);
+            let targetIndex = messages.findIndex((m) => m.id === frame.messageId);
+            if (targetIndex < 0) {
+              if (!state.isGenerating || frame.chatId !== state.currentChatId) return state;
+              messages.push({
+                id: frame.messageId,
+                chatId: frame.chatId,
+                role: "assistant",
+                content: "",
+                rawContent: "",
+                position: messages.length,
+                createdAt: Date.now(),
+              });
+              targetIndex = messages.length - 1;
+            }
+            const thinkingDurationMs =
+              frame.thinkingDurationMs ?? state.generationStats?.thinkingDurationMs;
             const stats = {
               tokensCached: frame.tokensCached ?? state.generationStats?.tokensCached ?? 0,
               totalPredicted: (state.generationStats?.totalPredicted ?? 0) + 1,
@@ -508,28 +587,28 @@ export const useAppStore = create<AppState>((set, get) => ({
               promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
               contextSize: frame.contextSize ?? state.generationStats?.contextSize ?? 0,
               stopReason: state.generationStats?.stopReason,
+              ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
             };
 
-            if (targetIndex >= 0) {
-              const nextMsg = { ...messages[targetIndex] } as ChatMessage;
-              nextMsg.content += frame.delta;
-              nextMsg.rawContent += frame.delta;
-              if (frame.thinkingDelta !== undefined) {
-                nextMsg.thinkingContent = (nextMsg.thinkingContent || "") + frame.thinkingDelta;
-              }
-              messages[targetIndex] = nextMsg;
-            } else {
-              messages.push({
-                id: frame.messageId,
-                chatId: frame.chatId,
-                role: "assistant",
-                content: frame.delta,
-                rawContent: frame.delta,
-                thinkingContent: frame.thinkingDelta ?? undefined,
-                position: messages.length,
-                createdAt: Date.now(),
-              });
+            const nextMsg = { ...messages[targetIndex] } as ChatMessage;
+            nextMsg.content += frame.delta;
+            nextMsg.rawContent += frame.delta;
+            if (frame.thinkingDelta !== undefined) {
+              nextMsg.thinkingContent = (nextMsg.thinkingContent || "") + frame.thinkingDelta;
             }
+            if (frame.thinkingDurationMs !== undefined) {
+              nextMsg.metrics = {
+                predictedTokens: nextMsg.metrics?.predictedTokens ?? 0,
+                tokensPerSecond: nextMsg.metrics?.tokensPerSecond ?? 0,
+                promptTokens: nextMsg.metrics?.promptTokens ?? 0,
+                promptTokensPerSecond: nextMsg.metrics?.promptTokensPerSecond ?? 0,
+                cachedPromptTokens: nextMsg.metrics?.cachedPromptTokens ?? 0,
+                evaluatedPromptTokens: nextMsg.metrics?.evaluatedPromptTokens ?? 0,
+                ...nextMsg.metrics,
+                thinkingDurationMs: frame.thinkingDurationMs,
+              };
+            }
+            messages[targetIndex] = nextMsg;
             return {
               messages,
               isGenerating: true,
@@ -550,22 +629,42 @@ export const useAppStore = create<AppState>((set, get) => ({
                     : [...new Set([...state.unreadChatIds, frame.chatId])],
               };
             }
+            if (state.isSyncingHistory) {
+              return {
+                isGenerating: false,
+                isWaitingForToolApproval: false,
+                currentGenerationId: null,
+              };
+            }
             const nextMessages = [...state.messages];
             const targetIndex = nextMessages.findIndex((m) => m.id === frame.messageId);
+            const messageMetrics = buildMessageMetrics(
+              frame.timings,
+              frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
+              {
+                thinkingDurationMs: frame.thinkingDurationMs,
+                stopReason: frame.stopReason,
+              },
+            );
             if (targetIndex >= 0) {
               const nextMsg = { ...nextMessages[targetIndex] } as ChatMessage;
               if (frame.fullContent !== undefined) nextMsg.content = frame.fullContent;
               if (frame.fullRawContent !== undefined) nextMsg.rawContent = frame.fullRawContent;
               if (frame.fullThinking !== undefined) nextMsg.thinkingContent = frame.fullThinking;
-              nextMsg.metrics = {
-                predictedTokens: frame.timings.predicted_n,
-                tokensPerSecond: frame.timings.predicted_per_second,
-                promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
-                promptTokensPerSecond: frame.timings.prompt_per_second,
-                cachedPromptTokens: frame.timings.tokens_cached,
-                evaluatedPromptTokens: frame.timings.tokens_evaluated,
-              };
+              nextMsg.metrics = messageMetrics;
               nextMessages[targetIndex] = nextMsg;
+            } else if (state.isGenerating) {
+              nextMessages.push({
+                id: frame.messageId,
+                chatId: frame.chatId,
+                role: "assistant",
+                content: frame.fullContent ?? "",
+                rawContent: frame.fullRawContent ?? frame.fullContent ?? "",
+                thinkingContent: frame.fullThinking,
+                metrics: messageMetrics,
+                position: nextMessages.length,
+                createdAt: Date.now(),
+              });
             }
             return {
               isGenerating: false,
@@ -578,8 +677,8 @@ export const useAppStore = create<AppState>((set, get) => ({
                 tokensEvaluated: frame.timings.tokens_evaluated,
                 promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
                 contextSize: frame.contextSize ?? state.generationStats?.contextSize ?? 0,
-                tokensPerSecond: frame.timings.predicted_per_second,
-                promptTokensPerSecond: frame.timings.prompt_per_second,
+                tokensPerSecond: messageMetrics.tokensPerSecond,
+                promptTokensPerSecond: messageMetrics.promptTokensPerSecond,
                 stopReason: frame.stopReason,
               },
             };
@@ -587,6 +686,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           const currentChatId = get().currentChatId;
           if (currentChatId) {
             get().fetchPromptCacheStats(currentChatId);
+            void get().refreshContextUsage(currentChatId);
           }
         } else if (frame.type === "tool_call") {
           set((state) => {
@@ -600,12 +700,24 @@ export const useAppStore = create<AppState>((set, get) => ({
                     : [...new Set([...state.unreadChatIds, frame.chatId])],
               };
             }
+            if (state.isSyncingHistory) return state;
             const messages = [...state.messages];
             const targetIndex = messages.findIndex((m) => m.id === frame.messageId);
             if (targetIndex >= 0) {
               const nextMsg = { ...messages[targetIndex] } as ChatMessage;
               nextMsg.toolCallsJson = JSON.stringify(frame.toolCalls);
               messages[targetIndex] = nextMsg;
+            } else if (state.isGenerating) {
+              messages.push({
+                id: frame.messageId,
+                chatId: frame.chatId,
+                role: "assistant",
+                content: "",
+                rawContent: "",
+                toolCallsJson: JSON.stringify(frame.toolCalls),
+                position: messages.length,
+                createdAt: Date.now(),
+              });
             }
             return {
               messages,
@@ -636,6 +748,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         } else if (frame.type === "message") {
           set((state) => {
             if (state.currentChatId === frame.chatId) {
+              if (state.isSyncingHistory) return state;
               // S1 fix: Replace any optimistic temp-* message with the server-confirmed one
               const reconciled = state.messages.filter(
                 (m) => !(m.id.startsWith("temp-") && m.role === frame.message.role),
@@ -693,9 +806,23 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
   },
 
-  sendMessage: async (content: string, files?: File[]) => {
+  sendMessage: async (content: string, files?: File[], inferencePresetId?: string) => {
     const state = get();
     const chatId = state.currentChatId;
+    if (state.isSyncingHistory) {
+      const error = new Error(
+        "Please wait for the chat history to finish updating before sending.",
+      );
+      set({ errorMessage: error.message });
+      throw error;
+    }
+    if (state.isGenerating || state.isWaitingForToolApproval) {
+      const error = new Error(
+        "Wait for the current response to finish before sending another message.",
+      );
+      set({ errorMessage: error.message });
+      throw error;
+    }
     if (latestRequestedChatId && latestRequestedChatId !== chatId) {
       const error = new Error(
         "Please wait for the selected chat to finish loading before sending a message.",
@@ -718,6 +845,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       throw new Error("A message is already being sent.");
     }
     sendInProgress = true;
+    const expectedHeadMessageId = persistedTranscriptHeadId(state.messages);
     logDebug("sendMessage initiated", {
       chatId,
       content: content.slice(0, 50),
@@ -766,6 +894,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (files?.length) {
         const formData = new FormData();
         formData.append("content", content);
+        formData.append("expectedHeadMessageId", expectedHeadMessageId ?? "");
+        if (inferencePresetId) {
+          formData.append("inferencePresetId", inferencePresetId);
+        }
         for (const f of files) {
           formData.append("file", f);
         }
@@ -789,7 +921,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         res = (await request(requestUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content }),
+          body: JSON.stringify({
+            content,
+            expectedHeadMessageId,
+            ...(inferencePresetId ? { inferencePresetId } : {}),
+          }),
           timeoutMs: requestTimeoutMs,
         })) as Response;
       }
@@ -809,6 +945,10 @@ export const useAppStore = create<AppState>((set, get) => ({
           status: res.status,
           bodyLength: errorBody.length,
         });
+        if (res.status === 409) {
+          await get().loadChat(chatId);
+          throw new Error("Chat history was out of date and has been reloaded. Please send again.");
+        }
         throw new Error(`Server returned ${res.status}${errorBody ? `: ${errorBody}` : ""}`);
       }
       set({ errorMessage: null });
@@ -902,6 +1042,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentChatMetadata: null,
         messages: [],
         generationStats: null,
+        contextUsage: null,
         promptCacheStats: null,
         totalMessages: 0,
         currentGenerationId: null,
@@ -941,6 +1082,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           unreadChatIds: state.unreadChatIds.filter((id) => id !== chatId),
           errorMessage: null,
         }));
+        void get().refreshContextUsage(chatId);
       } else {
         // S11 fix: If the default chat is missing, create it automatically.
         // This handles fresh installations or DB resets gracefully.
@@ -1016,9 +1158,11 @@ export const useAppStore = create<AppState>((set, get) => ({
         currentChatMetadata: null,
         messages: [],
         generationStats: null,
+        contextUsage: null,
         totalMessages: 0,
         isWaitingForToolApproval: false,
         errorMessage: null, // Clear errors when unloading/switching chats
+        isSyncingHistory: false,
       });
     })(),
 
@@ -1057,7 +1201,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  patchCurrentChatMetadata: (updates) =>
+  patchMessage: (messageId, updates) => {
+    set((state) => ({
+      messages: state.messages.map((message) =>
+        message.id === messageId ? { ...message, ...updates } : message,
+      ),
+    }));
+  },
+
+  patchCurrentChatMetadata: (updates) => {
     set((state) => {
       if (!state.currentChatMetadata) return state;
       return {
@@ -1066,7 +1218,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           ...updates,
         },
       };
-    }),
+    });
+    if (updates.systemPresetId !== undefined) {
+      void get().refreshContextUsage();
+    }
+  },
 
   fetchHardware: async () => {
     try {
@@ -1177,8 +1333,15 @@ export const useAppStore = create<AppState>((set, get) => ({
               };
             }
           }
-          return { serverStatus: data.status, loadedModel, errorMessage: null };
+          return {
+            serverStatus: data.status,
+            loadedModel,
+            loadedConfig: data.config ?? null,
+            errorMessage: null,
+          };
         });
+        void get().refreshContextUsage();
+        void get().refreshProcessUsage();
       } else if (get().serverStatus !== "idle") {
         const errorBody = await res.text().catch(() => "");
         get().addNotification(
@@ -1194,6 +1357,44 @@ export const useAppStore = create<AppState>((set, get) => ({
           "error",
         );
       }
+    }
+  },
+
+  refreshContextUsage: async (chatId?: string | null) => {
+    const targetChatId = chatId === undefined ? get().currentChatId : chatId;
+    if (!targetChatId) {
+      set({ contextUsage: null });
+      return;
+    }
+    try {
+      const res = await fetch(`/api/chats/${targetChatId}/context-usage`);
+      if (!res.ok) {
+        if (get().currentChatId === targetChatId) {
+          set({
+            contextUsage: {
+              usedTokens: 0,
+              contextSize: get().loadedConfig?.contextSize ?? null,
+            },
+          });
+        }
+        return;
+      }
+      const usage = (await res.json()) as ChatContextUsage;
+      if (get().currentChatId !== targetChatId) return;
+      set({ contextUsage: usage });
+    } catch (e: unknown) {
+      logDebug("Context usage refresh failed", e);
+    }
+  },
+
+  refreshProcessUsage: async () => {
+    try {
+      const res = await fetch("/api/runtime/usage");
+      if (!res.ok) return;
+      const usage = (await res.json()) as AppProcessUsage;
+      set({ processUsage: usage });
+    } catch (e: unknown) {
+      logDebug("Process usage refresh failed", e);
     }
   },
 
@@ -1220,6 +1421,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadModel: async (config: LoadModelRequest): Promise<boolean> => {
+    if (useUiStore.getState().rightPanelView === "modelLibrary") {
+      useUiStore.getState().setRightPanelView(null);
+    }
     set({
       serverStatus: "loading",
       loadProgress: 0,
@@ -1274,7 +1478,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     try {
       const res = await fetch("/api/server/unload", { method: "POST" });
       if (res.ok) {
-        set({ serverStatus: "idle", errorMessage: null });
+        set({ serverStatus: "idle", loadedConfig: null, loadedModel: null, errorMessage: null });
+        void get().refreshProcessUsage();
+        void get().refreshContextUsage();
       } else {
         const errorBody = await res.text().catch(() => "");
         get().addNotification(

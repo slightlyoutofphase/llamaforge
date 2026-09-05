@@ -123,15 +123,22 @@ describe("modelScanner mmproj encoder merge", () => {
     const entries = await scanModels(tmpDir);
     expect(entries).toHaveLength(1);
     const entry = entries[0];
-    expect(entry?.mmProjPath).toContain("mmproj");
+    if (!entry) {
+      throw new Error("Expected scanModels to return a model entry");
+    }
+    const mmProjPath = entry.mmProjPath;
+    if (!mmProjPath) {
+      throw new Error("Expected the scanned entry to include an mmproj path");
+    }
+    expect(mmProjPath).toContain("mmproj");
 
-    const populated = await populateMetadata(entry!);
+    const populated = await populateMetadata(entry);
     expect(populated.metadata?.hasVisionEncoder).toBe(true);
 
-    const stat = await fs.stat(entry!.primaryPath);
-    const mmStat = await fs.stat(entry!.mmProjPath!);
-    const cached = await cachedGgufMetadata(entry!.primaryPath, stat.mtimeMs, {
-      mmprojPath: entry!.mmProjPath,
+    const stat = await fs.stat(entry.primaryPath);
+    const mmStat = await fs.stat(mmProjPath);
+    const cached = await cachedGgufMetadata(entry.primaryPath, stat.mtimeMs, {
+      mmprojPath: mmProjPath,
       mmprojMtime: mmStat.mtimeMs,
     });
     expect(cached?.hasVisionEncoder).toBe(true);

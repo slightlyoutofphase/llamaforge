@@ -124,15 +124,14 @@ describe("Preset Editors Integration", () => {
       </QueryClientProvider>,
     );
 
-    // Verify initial render from fixture
     expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
 
     const tempSlider = screen.getByLabelText(/Temperature/i);
     expect((tempSlider as HTMLInputElement).value).toBe("0.8");
 
-    // Verify change updates local state (the value on screen)
     fireEvent.change(tempSlider, { target: { value: "1.2" } });
     expect(screen.getByText("1.20")).toBeDefined();
+    expect(screen.queryByLabelText(/Preserve Thinking/i)).toBeNull();
   });
 
   it("LoadPresetEditor: renders accordion sections and model config", async () => {
@@ -146,19 +145,21 @@ describe("Preset Editors Integration", () => {
 
     expect(await screen.findByText("Test Load (Default)")).toBeDefined();
 
-    // Verify accordion section content
     expect(screen.getAllByText(/GPU Layers/i)).toBeDefined();
     const gpuInput = screen.getByLabelText(/GPU Layers/i);
     expect((gpuInput as HTMLInputElement).value).toBe("10");
 
     const imageBudgetSelect = screen.getByLabelText(/VIR max tokens/i);
     expect((imageBudgetSelect as HTMLSelectElement).value).toBe("560");
+    const imageMinInput = screen.getByLabelText(/VIR min tokens/i);
+    expect((imageMinInput as HTMLInputElement).value).toBe("70");
+    const videoFpsInput = screen.getByLabelText(/Video FPS/i);
+    expect((videoFpsInput as HTMLInputElement).value).toBe("4");
 
     fireEvent.click(screen.getByRole("button", { name: "Memory & KV Cache" }));
     const flashAttnSelect = screen.getByLabelText(/Flash Attention/i);
     expect((flashAttnSelect as HTMLSelectElement).value).toBe("on");
 
-    // Verify Jinja template override section
     expect(screen.getByText("Jinja Chat Template")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Thinking Tag Override" }));
     expect(screen.getByLabelText("Open Tag")).toBeDefined();
@@ -213,78 +214,76 @@ describe("Preset Editors Integration", () => {
     expect(useUiStore.getState().rightPanelView).toBe("settings");
   });
 
-  it("InferencePresetEditor: preserve thinking checkbox is disabled when template does not support it", async () => {
-    useUiStore.setState({ activePresetId: "test-inf-id" });
+  it("LoadPresetEditor: preserve thinking is disabled when this preset's template does not support it", async () => {
+    useUiStore.setState({ activePresetId: "test-load-id" });
 
     render(
       <QueryClientProvider client={queryClient}>
-        <InferencePresetEditor />
+        <LoadPresetEditor />
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
+    expect(await screen.findByText("Test Load (Default)")).toBeDefined();
 
     const preserveCheckbox = screen.getByLabelText(/Preserve Thinking/i) as HTMLInputElement;
-    expect(preserveCheckbox).toBeDefined();
     expect(preserveCheckbox.disabled).toBe(true);
     expect(screen.getByText(/does not support preserve_thinking/i)).toBeDefined();
   });
 
-  it("InferencePresetEditor: preserve thinking checkbox is enabled when template supports it", async () => {
-    const modelWithPreserveThinking = {
-      primaryPath: "/models/test.gguf",
-      metadata: {
-        name: "test-model",
-        chatTemplate: "{%- set preserve_thinking = preserve_thinking | default(false) -%}",
-      } as any,
-      mmprojPath: undefined,
-      mtime: Date.now(),
-    };
+  it("LoadPresetEditor: preserve thinking is enabled from the GGUF template without loading a model", async () => {
     useAppStore.setState({
-      models: [modelWithPreserveThinking],
-      loadedModel: modelWithPreserveThinking,
+      models: [
+        {
+          primaryPath: "/models/test.gguf",
+          metadata: {
+            name: "test-model",
+            chatTemplate: "{%- set preserve_thinking = preserve_thinking | default(false) -%}",
+          } as any,
+          mmprojPath: undefined,
+          mtime: Date.now(),
+        },
+      ],
+      loadedModel: undefined,
+      loadedConfig: undefined,
     });
-    useUiStore.setState({ activePresetId: "test-inf-id" });
+    useUiStore.setState({ activePresetId: "test-load-id" });
 
     render(
       <QueryClientProvider client={queryClient}>
-        <InferencePresetEditor />
+        <LoadPresetEditor />
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
+    expect(await screen.findByText("Test Load (Default)")).toBeDefined();
 
     const preserveCheckbox = screen.getByLabelText(/Preserve Thinking/i) as HTMLInputElement;
-    expect(preserveCheckbox).toBeDefined();
     expect(preserveCheckbox.disabled).toBe(false);
-    expect(screen.getByText(/preserves reasoning content/i)).toBeDefined();
+    expect(screen.getByText(/Applies on the next generation/i)).toBeDefined();
   });
 
-  it("InferencePresetEditor: preserve thinking checkbox can be toggled when enabled", async () => {
-    const modelWithPreserveThinking = {
-      primaryPath: "/models/test.gguf",
-      metadata: {
-        name: "test-model",
-        chatTemplate: "{%- set preserve_thinking = preserve_thinking | default(false) -%}",
-      } as any,
-      mmprojPath: undefined,
-      mtime: Date.now(),
-    };
+  it("LoadPresetEditor: preserve thinking can be toggled from a pasted jinja override before load", async () => {
+    queryClient.setQueryData(queryKeys.presetsLoad(), [
+      {
+        ...mockLoadPreset,
+        chatTemplateOverride:
+          "{%- set preserve_thinking = preserve_thinking | default(false) -%}{{ bos_token }}",
+      },
+    ]);
     useAppStore.setState({
-      models: [modelWithPreserveThinking],
-      loadedModel: modelWithPreserveThinking,
+      loadedModel: undefined,
+      loadedConfig: undefined,
     });
-    useUiStore.setState({ activePresetId: "test-inf-id" });
+    useUiStore.setState({ activePresetId: "test-load-id" });
 
     render(
       <QueryClientProvider client={queryClient}>
-        <InferencePresetEditor />
+        <LoadPresetEditor />
       </QueryClientProvider>,
     );
 
-    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
-
+    expect(await screen.findByText("Test Load (Default)")).toBeDefined();
     const preserveCheckbox = screen.getByLabelText(/Preserve Thinking/i) as HTMLInputElement;
+    expect(preserveCheckbox.disabled).toBe(false);
     expect(preserveCheckbox.checked).toBe(false);
 
     fireEvent.click(preserveCheckbox);

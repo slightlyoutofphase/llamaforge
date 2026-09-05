@@ -13,6 +13,7 @@ mock.module("@tanstack/react-router", () => ({
 }));
 
 import { ModelSelector } from "../../src/client/ModelSelector";
+import { ModelLoadOverlay } from "../../src/client/components/ModelLoadOverlay";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -297,6 +298,7 @@ describe("ModelSelector Component", () => {
 
     render(
       <QueryClientProvider client={queryClient}>
+        <ModelLoadOverlay />
         <ModelSelector />
       </QueryClientProvider>,
     );

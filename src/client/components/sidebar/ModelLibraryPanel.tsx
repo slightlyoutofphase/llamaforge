@@ -34,6 +34,7 @@ export function ModelLibraryPanel() {
   const models = useAppStore((s) => s.models);
   const loadModel = useAppStore((s) => s.loadModel);
   const loadedModel = useAppStore((s) => s.loadedModel);
+  const serverStatus = useAppStore((s) => s.serverStatus);
   const isGenerating = useAppStore((s) => s.isGenerating);
   const isWaitingForToolApproval = useAppStore((s) => s.isWaitingForToolApproval);
   const messages = useAppStore((s) => s.messages);
@@ -62,7 +63,7 @@ export function ModelLibraryPanel() {
 
   const selectedModel = models.find((m) => m.primaryPath === selectedPath);
   const defaultLoadPreset = loadPresets?.find((p) => p.isDefault) || loadPresets?.[0];
-  const requestInFlight = isGenerating || isWaitingForToolApproval;
+  const requestInFlight = isGenerating || isWaitingForToolApproval || serverStatus === "loading";
 
   /**
    * Loads the selected model using the chosen preset after multimodal compatibility checks.
@@ -71,7 +72,7 @@ export function ModelLibraryPanel() {
    * @returns No return value.
    */
   const handleLoad = (preset: LoadPreset) => {
-    if (!selectedModel || requestInFlight) return;
+    if (!selectedModel || requestInFlight || serverStatus !== "idle") return;
 
     // Check for multimodal incompatibility
     const hasVision = !!selectedModel.metadata?.hasVisionEncoder;
@@ -313,7 +314,7 @@ export function ModelLibraryPanel() {
                             <button
                               key={p.id}
                               type="button"
-                              disabled={requestInFlight}
+                              disabled={requestInFlight || serverStatus !== "idle" || isLoaded}
                               onClick={() => handleLoad(p)}
                               className="bg-[var(--color-bg)] border border-[var(--color-border)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] text-xs px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50">
                               <Settings size={12} />

@@ -20,12 +20,20 @@ describe("settingsRepo", () => {
     const s = await loadSettings();
     expect(s.serverPort).toBe(11435);
     expect(s.modelsPath).toBeDefined();
+    expect(s.autoloadLastModel).toBe(false);
+    expect(s.includeVideoAudio).toBe(false);
   });
 
   it("persists and retrieves settings round-trip", async () => {
     await saveSettings({ serverPort: 12345 });
     const s = await loadSettings();
     expect(s.serverPort).toBe(12345);
+  });
+
+  it("persists includeVideoAudio independently of other defaults", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    const s = await loadSettings();
+    expect(s.includeVideoAudio).toBe(true);
   });
 
   it("rejects NaN numeric settings", async () => {

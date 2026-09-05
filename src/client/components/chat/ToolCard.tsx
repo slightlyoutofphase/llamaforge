@@ -4,7 +4,7 @@
  */
 
 import { Check, ChevronDown, ChevronUp, Edit, Play, Terminal, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "../../store";
 
 /**
@@ -53,6 +53,33 @@ export function ToolCard({ messageId, toolCall, onApprove, onReject }: ToolCardP
   const [isEditing, setIsEditing] = useState(false);
   const [showResult, setShowResult] = useState(false);
   const [args, setArgs] = useState(toolCall.function.arguments);
+  const sourceArgs = toolCall.function.arguments;
+
+  useEffect(() => {
+    if (!isEditing) {
+      setArgs(sourceArgs);
+    }
+  }, [sourceArgs, isEditing]);
+
+  /**
+   * Enters argument-edit mode, seeding the textarea from the latest tool-call payload.
+   *
+   * @returns No return value.
+   */
+  const beginEditing = () => {
+    setArgs(sourceArgs);
+    setIsEditing(true);
+  };
+
+  /**
+   * Leaves argument-edit mode and restores the last server-provided arguments.
+   *
+   * @returns No return value.
+   */
+  const cancelEditing = () => {
+    setArgs(sourceArgs);
+    setIsEditing(false);
+  };
 
   return (
     <div className="mt-4 border border-[var(--color-border)] rounded-2xl bg-[var(--color-surface-elevated)] overflow-hidden shadow-sm animate-in zoom-in-95 duration-200">
@@ -88,7 +115,7 @@ export function ToolCard({ messageId, toolCall, onApprove, onReject }: ToolCardP
             {!isExecuted && !isEditing && canAct && (
               <button
                 type="button"
-                onClick={() => setIsEditing(true)}
+                onClick={beginEditing}
                 className="text-[10px] text-[var(--color-accent)] hover:underline flex items-center gap-1">
                 <Edit size={10} /> EDIT
               </button>
@@ -97,13 +124,17 @@ export function ToolCard({ messageId, toolCall, onApprove, onReject }: ToolCardP
 
           {isEditing ? (
             <textarea
+              data-testid="tool-args-editor"
+              aria-label="Edit tool arguments"
               value={args}
               onChange={(e) => setArgs(e.target.value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-accent)] rounded-xl p-3 font-mono text-xs min-h-[100px] outline-none shadow-inner"
             />
           ) : (
-            <pre className="bg-[var(--color-bg)] p-3 rounded-xl font-mono text-xs overflow-x-auto border border-[var(--color-border)] text-[var(--color-text-secondary)]">
-              {args}
+            <pre
+              data-testid="tool-args-preview"
+              className="bg-[var(--color-bg)] p-3 rounded-xl font-mono text-xs overflow-x-auto border border-[var(--color-border)] text-[var(--color-text-secondary)]">
+              {sourceArgs}
             </pre>
           )}
         </div>
@@ -113,7 +144,7 @@ export function ToolCard({ messageId, toolCall, onApprove, onReject }: ToolCardP
             {isEditing ? (
               <button
                 type="button"
-                onClick={() => setIsEditing(false)}
+                onClick={cancelEditing}
                 className="flex-1 py-2 text-xs font-bold border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-bg)] transition-colors">
                 Cancel Edit
               </button>

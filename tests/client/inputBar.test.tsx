@@ -21,6 +21,7 @@ mock.module("react-dropzone", () => ({
 }));
 
 import { InputBar } from "../../src/client/components/chat/InputBar";
+import { useAppStore } from "../../src/client/store";
 
 describe("InputBar Component", () => {
   beforeEach(() => {
@@ -164,5 +165,89 @@ describe("InputBar Component", () => {
       URL.createObjectURL = originalCreateObjectURL;
       URL.revokeObjectURL = originalRevokeObjectURL;
     }
+  });
+
+  it("discards unsent text and attachments when the conversation identity changes", async () => {
+    const onSend = mock();
+    const onStop = mock();
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    const createObjectURLMock = mock((file: Blob | MediaSource) => `blob:${(file as File).name}`);
+    const revokeObjectURLMock = mock();
+
+    URL.createObjectURL = createObjectURLMock as typeof URL.createObjectURL;
+    URL.revokeObjectURL = revokeObjectURLMock as typeof URL.revokeObjectURL;
+
+    try {
+      const view = render(
+        <InputBar
+          conversationId="chat-a"
+          onSend={onSend}
+          isGenerating={false}
+          isActive={true}
+          onStop={onStop}
+        />,
+      );
+
+      const textarea = screen.getByPlaceholderText("Type your message...");
+      fireEvent.change(textarea, { target: { value: "Draft for chat A" } });
+
+      const file = new File(["img"], "chat-a.png", { type: "image/png" });
+      act(() => {
+        lastOnDrop?.([file]);
+      });
+      expect(screen.getByAltText("chat-a.png")).toBeTruthy();
+
+      view.rerender(
+        <InputBar
+          conversationId="chat-b"
+          onSend={onSend}
+          isGenerating={false}
+          isActive={true}
+          onStop={onStop}
+        />,
+      );
+
+      expect(
+        (screen.getByPlaceholderText("Type your message...") as HTMLTextAreaElement).value,
+      ).toBe("");
+      expect(screen.queryByAltText("chat-a.png")).toBeNull();
+      expect(revokeObjectURLMock).toHaveBeenCalledWith("blob:chat-a.png");
+    } finally {
+      URL.createObjectURL = originalCreateObjectURL;
+      URL.revokeObjectURL = originalRevokeObjectURL;
+    }
+  });
+
+  it("does not send while history is locked", async () => {
+    const onSend = mock();
+    const onStop = mock();
+    render(
+      <InputBar
+        onSend={onSend}
+        isGenerating={false}
+        isActive={true}
+        historyLocked={true}
+        onStop={onStop}
+      />,
+    );
+
+    expect(screen.getByPlaceholderText("Updating chat history...")).toBeTruthy();
+    const sendButton = screen.getAllByRole("button").at(-1);
+    if (!sendButton) throw new Error("expected a send button");
+    fireEvent.click(sendButton);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("reports an error when a dropped file is larger than 10MB", () => {
+    useAppStore.setState({ errorMessage: null });
+    render(<InputBar onSend={mock()} isGenerating={false} isActive={true} onStop={mock()} />);
+    const oversized = new File([new Uint8Array(10 * 1024 * 1024 + 8)], "huge.mp4", {
+      type: "video/mp4",
+    });
+    act(() => {
+      lastOnDrop?.([oversized]);
+    });
+    expect(useAppStore.getState().errorMessage).toBe("Attachments must be 10MB or smaller.");
   });
 });

@@ -4,13 +4,14 @@
  */
 
 import path from "node:path";
+import type { Server, ServerWebSocket } from "bun";
 import type {
   LoadModelRequest,
-  ModelLoadConfig,
   ModelEntry,
+  ModelLoadConfig,
   ThinkingTagConfig,
 } from "../shared/types";
-import type { Server, ServerWebSocket } from "bun";
+import { serveAttachmentFile } from "./attachmentServe";
 import { getHardwareInfo } from "./hardwareProbe";
 import { getServerStatus, loadModel, requestUnloadModel } from "./llamaServer";
 import { logDebug, logError, logInfo, logWarn } from "./logger";
@@ -532,6 +533,11 @@ export function createRouter() {
         return jsonResponse(getServerStatus());
       }
 
+      if (req.method === "GET" && url.pathname === "/api/runtime/usage") {
+        const { getAppProcessUsage } = await import("./processUsage");
+        return jsonResponse(await getAppProcessUsage());
+      }
+
       if (req.method === "GET" && url.pathname === "/api/hardware") {
         const hw = await getHardwareInfoImpl();
         return jsonResponse(hw);
@@ -587,12 +593,22 @@ export function createRouter() {
 
           let content = "";
           const attachments: File[] = [];
+          let requestedInferencePresetId: string | undefined;
+          let expectedHeadSpecified = false;
+          let expectedHeadMessageId: string | null = null;
           const contentType = req.headers.get("content-type")?.toLowerCase() || "";
 
           if (contentType.includes("multipart/form-data")) {
             try {
               const formData = await req.formData();
               content = formData.get("content")?.toString() || "";
+              const formPresetId = formData.get("inferencePresetId")?.toString();
+              if (formPresetId) requestedInferencePresetId = formPresetId;
+              if (formData.has("expectedHeadMessageId")) {
+                expectedHeadSpecified = true;
+                const rawHead = formData.get("expectedHeadMessageId")?.toString() ?? "";
+                expectedHeadMessageId = rawHead.length > 0 ? rawHead : null;
+              }
 
               for (const [key, value] of formData.entries()) {
                 if (key === "file" && isRequestFile(value)) {
@@ -618,6 +634,16 @@ export function createRouter() {
             if (bodyContent !== undefined) {
               content = bodyContent;
             }
+            const bodyPresetId = getStringField(body, "inferencePresetId");
+            if (bodyPresetId) requestedInferencePresetId = bodyPresetId;
+            if (Object.hasOwn(body, "expectedHeadMessageId")) {
+              const rawHead = body["expectedHeadMessageId"];
+              if (rawHead !== null && typeof rawHead !== "string") {
+                return badRequest("expectedHeadMessageId must be a string or null.");
+              }
+              expectedHeadSpecified = true;
+              expectedHeadMessageId = rawHead === null || rawHead === "" ? null : rawHead;
+            }
           }
 
           // C4 fix: allow empty content when attachments are present
@@ -631,8 +657,28 @@ export function createRouter() {
           }
 
           try {
+            if (expectedHeadSpecified) {
+              const { getLastMessageId } = await import("./persistence/chatRepo");
+              const actualHead = getLastMessageId(chatId);
+              if (actualHead !== expectedHeadMessageId) {
+                return jsonResponse(
+                  {
+                    error:
+                      "Chat history on the server does not match this window. Reloading the transcript.",
+                    code: "TRANSCRIPT_MISMATCH",
+                    lastMessageId: actualHead,
+                  },
+                  409,
+                );
+              }
+            }
             const { proxyCompletion } = await import("./streamProxy");
-            const messageId = await proxyCompletion({ chatId, content, attachments });
+            const messageId = await proxyCompletion({
+              chatId,
+              content,
+              attachments,
+              inferencePresetId: requestedInferencePresetId,
+            });
             return jsonResponse({ messageId });
           } catch (e: unknown) {
             return jsonResponse(
@@ -732,6 +778,13 @@ export function createRouter() {
           return jsonResponse(stats || { totalEvaluated: 0, totalCached: 0 });
         }
 
+        if (parts.length === 5 && req.method === "GET" && parts[4] === "context-usage") {
+          const { getChatContextUsage } = await import("./contextUsage");
+          const usage = await getChatContextUsage(id);
+          if (!usage) return new Response("Not Found", { status: 404 });
+          return jsonResponse(usage);
+        }
+
         if (parts.length === 5 && req.method === "POST") {
           const action = parts[4] as string;
           if (action === "branch") {
@@ -792,7 +845,7 @@ export function createRouter() {
               return jsonResponse({ error: "Chat not found" }, 404);
             }
             const lastMsg = chatForContinue.messages?.[chatForContinue.messages.length - 1];
-            if (!lastMsg || lastMsg.role !== "assistant") {
+            if (lastMsg?.role !== "assistant") {
               return badRequest("Continue requires the last message to be an assistant response.");
             }
             const { proxyCompletion } = await import("./streamProxy");
@@ -926,16 +979,19 @@ export function createRouter() {
             if (!content) {
               return badRequest("Message update requires a content string.");
             }
-            await chatRepo.updateMessage(
+            const updated = await chatRepo.updateMessage(
               msgId,
               content,
               content,
               getStringField(body, "thinkingContent"),
+              id,
             );
+            if (!updated) return jsonResponse({ error: "Message not found" }, 404);
             return jsonResponse({ success: true });
           }
           if (req.method === "DELETE") {
-            await chatRepo.deleteMessageAndSubsequent(id, msgId);
+            const deleted = await chatRepo.deleteMessageAndSubsequent(id, msgId);
+            if (!deleted) return jsonResponse({ error: "Message not found" }, 404);
             return jsonResponse({ success: true });
           }
         }
@@ -1088,15 +1144,7 @@ export function createRouter() {
         }
         const file = Bun.file(absPath);
         if (await file.exists()) {
-          const fileName = path.basename(absPath);
-          return new Response(file, {
-            headers: {
-              "Content-Type": file.type || "application/octet-stream",
-              "X-Content-Type-Options": "nosniff",
-              "Content-Security-Policy": "default-src 'none'",
-              "Content-Disposition": `attachment; filename="${fileName.replace(/"/g, "")}"`,
-            },
-          });
+          return serveAttachmentFile(absPath, req);
         }
         return new Response("Not Found", { status: 404 });
       }

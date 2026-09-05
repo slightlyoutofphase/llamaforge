@@ -27,6 +27,8 @@ const defaultAppState = {
   fetchHardware: mock().mockResolvedValue(undefined),
   fetchModels: mock().mockResolvedValue(undefined),
   fetchServerStatus: mock().mockResolvedValue(undefined),
+  refreshProcessUsage: mock().mockResolvedValue(undefined),
+  refreshContextUsage: mock().mockResolvedValue(undefined),
   unloadModel: mock().mockResolvedValue(undefined),
   serverStatus: "idle" as const,
   isConnected: true,
@@ -116,25 +118,32 @@ describe("App shell settings", () => {
     mock.restore();
   });
 
-  it("applies the configured root font size and opens the console on startup", async () => {
+  /**
+   * Renders the app shell and waits for the settings query to settle.
+   *
+   * App applies theme/font/console state from `/api/settings` after mount.
+   * Waiting here keeps those updates inside Testing Library's `act` boundary.
+   *
+   * @returns No return value.
+   */
+  async function renderApp(): Promise<void> {
     render(
       <QueryClientProvider client={queryClient}>
         <App />
       </QueryClientProvider>,
     );
-
     await waitFor(() => {
       expect(document.documentElement.style.fontSize).toBe("17px");
-      expect(useUiStore.getState().isConsoleVisible).toBe(true);
     });
+  }
+
+  it("applies the configured root font size and opens the console on startup", async () => {
+    await renderApp();
+    expect(useUiStore.getState().isConsoleVisible).toBe(true);
   });
 
   it("creates and opens a chat when the chat workspace button is clicked without an active chat", async () => {
-    render(
-      <QueryClientProvider client={queryClient}>
-        <App />
-      </QueryClientProvider>,
-    );
+    await renderApp();
 
     fireEvent.click(screen.getByTitle("Chat Workspace"));
 
@@ -144,5 +153,36 @@ describe("App shell settings", () => {
         params: { chatId: "created-chat" },
       });
     });
+  });
+
+  it("shows the model load overlay over the shell while a model is loading", async () => {
+    useAppStore.setState({
+      ...defaultAppState,
+      serverStatus: "loading",
+      loadProgress: 42,
+      loadProgressPhase: "loading_weights",
+      loadProgressDetail: "Loading tensor blocks",
+    });
+
+    await renderApp();
+
+    expect(screen.getByText("Loading model")).toBeTruthy();
+    expect(screen.getByText("42%")).toBeTruthy();
+    expect(screen.getByText("Loading tensor blocks")).toBeTruthy();
+    expect(screen.getByRole("alertdialog")).toBeTruthy();
+  });
+
+  it("renders the status bar with context and memory meters", async () => {
+    useAppStore.setState({
+      ...defaultAppState,
+      processUsage: { ramBytes: 1024 ** 3, vramBytes: 0, llamaServerPid: null },
+    });
+
+    await renderApp();
+
+    const statusBar = await screen.findByTestId("status-bar");
+    expect(statusBar.textContent).toContain("Context:");
+    expect(statusBar.textContent).toContain("System RAM:");
+    expect(statusBar.textContent).toContain("VRAM:");
   });
 });

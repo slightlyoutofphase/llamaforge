@@ -5,19 +5,27 @@
  */
 
 import { markdown } from "@codemirror/lang-markdown";
-import type { LoadPreset, ModelEntry, ModelLoadConfig } from "../../../shared/types";
-import { detectThinkingConfig } from "../../../shared/thinkingTags";
-import {
-  DEFAULT_IMAGE_MAX_TOKENS,
-  IMAGE_MAX_TOKEN_OPTIONS,
-  applyImageTokenBatchFloor,
-  defaultBatchingForImageTokens,
-  minUbatchForImageTokens,
-} from "../../../shared/imageTokens";
 import CodeMirror from "@uiw/react-codemirror";
 import { ChevronDown, ChevronRight, Copy, Plus, Save, Trash2, X, Zap } from "lucide-react";
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  clampVideoFps,
+  createDefaultLoadConfig,
+  DEFAULT_VIDEO_FPS,
+  MAX_VIDEO_FPS,
+  MIN_VIDEO_FPS,
+} from "../../../shared/defaults";
+import {
+  applyImageTokenBatchFloor,
+  DEFAULT_IMAGE_MAX_TOKENS,
+  DEFAULT_IMAGE_MIN_TOKENS,
+  IMAGE_MAX_TOKEN_OPTIONS,
+  minUbatchForImageTokens,
+} from "../../../shared/imageTokens";
+import { analyzeLoadPresetChatTemplate } from "../../../shared/templateCapabilities";
+import { detectThinkingConfig } from "../../../shared/thinkingTags";
+import type { LoadPreset, ModelEntry, ModelLoadConfig } from "../../../shared/types";
 import {
   useCreateLoadPreset,
   useDeleteLoadPreset,
@@ -139,6 +147,22 @@ export function LoadPresetEditor() {
     );
   }, [localState?.config, localState?.modelPath, models]);
 
+  const templateCapabilities = useMemo(() => {
+    const matching = models.find(
+      (m) =>
+        m.primaryPath === localState?.modelPath || m.primaryPath === localState?.config?.modelPath,
+    );
+    return analyzeLoadPresetChatTemplate(
+      localState?.chatTemplateOverride,
+      matching?.metadata?.chatTemplate,
+    );
+  }, [
+    localState?.chatTemplateOverride,
+    localState?.config?.modelPath,
+    localState?.modelPath,
+    models,
+  ]);
+
   if (!localState?.config)
     return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
 
@@ -186,6 +210,7 @@ export function LoadPresetEditor() {
         merged.batchSize,
         merged.microBatchSize,
         merged.imageMaxTokens,
+        matchingModel?.metadata?.architecture,
       );
       return {
         ...prev,
@@ -205,7 +230,10 @@ export function LoadPresetEditor() {
    */
   const handleSave = () => {
     if (!localState.id) return;
-    updateMut.mutate({ id: localState.id, updates: localState });
+    const preserveThinking = templateCapabilities?.hasPreserveThinking
+      ? (localState.preserveThinking ?? templateCapabilities.preserveThinkingDefault ?? false)
+      : false;
+    updateMut.mutate({ id: localState.id, updates: { ...localState, preserveThinking } });
   };
 
   /**
@@ -240,37 +268,7 @@ export function LoadPresetEditor() {
       modelPath: "",
       isDefault: false,
       isReadonly: false,
-      config: {
-        modelPath: "",
-        contextSize: 4096,
-        contextShift: false,
-        gpuLayers: 0,
-        threads: 3,
-        threadsBatch: -1,
-        ...defaultBatchingForImageTokens(DEFAULT_IMAGE_MAX_TOKENS),
-        ropeScaling: "none",
-        ropeFreqBase: 0,
-        ropeFreqScale: 0,
-        kvCacheTypeK: "f16",
-        kvCacheTypeV: "f16",
-        mlock: true,
-        noMmap: false,
-        contBatching: true,
-        flashAttn: "auto",
-        swaFull: false,
-        kvUnified: true,
-        noKvOffload: false,
-        cacheReuse: 0,
-        contextCheckpoints: 32,
-        imageMaxTokens: DEFAULT_IMAGE_MAX_TOKENS,
-        logLevel: 3,
-        seedOverride: -1,
-        specType: "off",
-        specDraftNMax: 8,
-        specDraftNMin: 1,
-        specDraftPMin: 0.75,
-        specDraftModelPath: "",
-      },
+      config: createDefaultLoadConfig(""),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -471,10 +469,15 @@ export function LoadPresetEditor() {
                     existing.batchSize,
                     existing.microBatchSize,
                     imageMaxTokens,
+                    matchingModel?.metadata?.architecture,
+                  );
+                  const imageMinTokens = Math.min(
+                    existing.imageMinTokens ?? DEFAULT_IMAGE_MIN_TOKENS,
+                    imageMaxTokens,
                   );
                   return {
                     ...prev,
-                    config: { ...existing, imageMaxTokens, ...floored },
+                    config: { ...existing, imageMaxTokens, imageMinTokens, ...floored },
                   };
                 });
               }}
@@ -488,11 +491,58 @@ export function LoadPresetEditor() {
             </select>
             <p className="text-[11px] text-[var(--color-text-muted)]">
               Applied at model load as `--image-max-tokens{" "}
-              {config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS}`. Micro-batch (`--ubatch-size`)
-              and batch size are raised to at least{" "}
-              {minUbatchForImageTokens(config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS)} (2× this
-              budget) so Gemma 4 vision's non-causal attention does not crash. `--image-min-tokens`
-              is omitted unless you set it explicitly.
+              {config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS}` with `--image-min-tokens{" "}
+              {config.imageMinTokens ?? DEFAULT_IMAGE_MIN_TOKENS}`. For Gemma 4 only, micro-batch
+              (`--ubatch-size`) is raised to at least{" "}
+              {minUbatchForImageTokens(config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS)} so
+              non-causal vision attention satisfies {"n_ubatch >= n_tokens"}. Other architectures
+              keep the configured ubatch.
+            </p>
+          </div>
+          <div className="space-y-1">
+            <label htmlFor="imageMinTokens" className="text-xs font-medium flex justify-between">
+              <span>VIR min tokens (--image-min-tokens)</span>
+            </label>
+            <input
+              id="imageMinTokens"
+              type="number"
+              min={1}
+              max={config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS}
+              step="1"
+              value={config.imageMinTokens ?? DEFAULT_IMAGE_MIN_TOKENS}
+              onChange={(e) => {
+                const parsed = parseInt(e.target.value, 10);
+                if (!Number.isFinite(parsed)) return;
+                const maxBudget = config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS;
+                updateConfigField("imageMinTokens", Math.max(1, Math.min(parsed, maxBudget)));
+              }}
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
+            />
+          </div>
+          <div className="space-y-1">
+            <label htmlFor="videoFps" className="text-xs font-medium flex justify-between">
+              <span>Video FPS (--video-fps)</span>
+            </label>
+            <input
+              id="videoFps"
+              type="number"
+              min={MIN_VIDEO_FPS}
+              max={MAX_VIDEO_FPS}
+              step="0.1"
+              value={config.videoFps ?? DEFAULT_VIDEO_FPS}
+              onChange={(e) => {
+                const parsed = Number.parseFloat(e.target.value);
+                if (!Number.isFinite(parsed)) return;
+                updateConfigField("videoFps", clampVideoFps(parsed));
+              }}
+              disabled={isReadonly}
+              className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
+            />
+            <p className="text-[11px] text-[var(--color-text-muted)]">
+              Applied at model load as `--video-fps {config.videoFps ?? DEFAULT_VIDEO_FPS}`.
+              llama.cpp samples video attachments at this rate (default 4). Higher values send more
+              frames and use more context.
             </p>
           </div>
           <div className="space-y-1">
@@ -824,16 +874,16 @@ export function LoadPresetEditor() {
                       className="text-xs font-medium flex justify-between">
                       <span>Min Draft Tokens</span>
                       <span className="text-[var(--color-text-muted)] font-mono">
-                        {config.specDraftNMin ?? 1}
+                        {config.specDraftNMin ?? 0}
                       </span>
                     </label>
                     <input
                       id="specDraftNMin"
                       type="range"
-                      min="1"
+                      min="0"
                       max="16"
                       step="1"
-                      value={config.specDraftNMin ?? 1}
+                      value={config.specDraftNMin ?? 0}
                       onChange={(e) =>
                         updateConfigField("specDraftNMin", parseInt(e.target.value, 10))
                       }
@@ -995,10 +1045,44 @@ export function LoadPresetEditor() {
           </div>
         </div>
 
+        <section className="space-y-2 pt-2">
+          <h3
+            className={`text-xs font-bold uppercase tracking-wider flex items-center justify-between ${
+              templateCapabilities?.hasPreserveThinking
+                ? "text-[var(--color-text-muted)]"
+                : "text-[var(--color-text-muted)] opacity-50"
+            }`}>
+            <label
+              htmlFor="preserveThinking"
+              title="Passes preserve_thinking = true/false to the Jinja chat template">
+              Preserve Thinking
+            </label>
+            <input
+              id="preserveThinking"
+              type="checkbox"
+              disabled={!!isReadonly || !templateCapabilities?.hasPreserveThinking}
+              checked={
+                localState.preserveThinking ??
+                templateCapabilities?.preserveThinkingDefault ??
+                false
+              }
+              onChange={(e) => updatePresetField("preserveThinking", e.target.checked)}
+              className="accent-[var(--color-accent)] disabled:opacity-30"
+            />
+          </h3>
+          <p className="text-xs text-[var(--color-text-muted)]">
+            {templateCapabilities?.hasPreserveThinking
+              ? "Applies on the next generation that uses this load preset. Reloading the model is not required."
+              : "This load preset's chat template does not support preserve_thinking. Paste a current Jinja template into the override above to enable this control."}
+          </p>
+        </section>
+
         <Accordion title="Thinking Tag Override">
           <div className="space-y-2 text-xs">
             <p className="text-[var(--color-text-muted)]">
-              Override how assistant thinking blocks are parsed for the active loaded model.
+              Open and close tags split thinking out of the model stream. Enable Token is sent to
+              the chat template as <code>enable_token</code> when set; thinking on/off is still the
+              inference preset.
             </p>
             <div>
               <label htmlFor="thinkingOpenTag" className="block font-medium mb-1">

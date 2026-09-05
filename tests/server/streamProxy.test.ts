@@ -7,13 +7,26 @@
 
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import fs from "node:fs/promises";
-import { addMessage, createChat, getChat, updateChat } from "../../src/server/persistence/chatRepo";
+import {
+  addMessage,
+  createChat,
+  getChat,
+  updateChat,
+  updateMessage,
+} from "../../src/server/persistence/chatRepo";
+import * as chatRepoModule from "../../src/server/persistence/chatRepo";
 import { getDb, initDb, resetDb } from "../../src/server/persistence/db";
-import { createInferencePreset, createSystemPreset } from "../../src/server/persistence/presetRepo";
+import {
+  createLoadPreset,
+  createInferencePreset,
+  createSystemPreset,
+} from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
 import { abortGeneration, proxyCompletion } from "../../src/server/streamProxy";
 import { cancelPendingApprovals, resolveToolApproval } from "../../src/server/tools";
 import * as llamaServerModule from "../../src/server/llamaServer";
+import { createDefaultInferenceSampling, createDefaultLoadConfig } from "../../src/shared/defaults";
+import { GEMMA4_THINKING_CONFIG } from "../../src/shared/thinkingTags";
 
 let mockPdfText = "PDF text";
 
@@ -50,9 +63,15 @@ function buildSSEStream(events: (object | string)[]): ReadableStream<Uint8Array>
 
 /**
  * Helper: builds a chat completions delta chunk.
+ *
+ * @param content - Visible `delta.content` text, if any.
+ * @param reasoningContent - Native `delta.reasoning_content` text, if any.
+ * @returns One OpenAI-style SSE payload object.
  */
-function chatDelta(content: string): object {
-  return { choices: [{ delta: { content } }] };
+function chatDelta(content: string, reasoningContent?: string): object {
+  const delta: { content?: string; reasoning_content?: string } = { content };
+  if (reasoningContent) delta.reasoning_content = reasoningContent;
+  return { choices: [{ delta }] };
 }
 
 /**
@@ -74,6 +93,32 @@ function chatStop(finishReason: string = "stop"): object {
       tokens_evaluated: 10,
     },
   };
+}
+
+/**
+ * Persists a load preset and points the mocked llama-server status at it.
+ *
+ * @param id - Load preset id stored as `config.presetId`.
+ * @param preserveThinking - Value persisted on the load preset.
+ * @returns No return value.
+ */
+async function seedLoadedLoadPreset(id: string, preserveThinking: boolean): Promise<void> {
+  await createLoadPreset({
+    id,
+    name: `Load ${id}`,
+    modelPath: "test.gguf",
+    isDefault: false,
+    isReadonly: false,
+    config: createDefaultLoadConfig("test.gguf"),
+    preserveThinking,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  spyOn(llamaServerModule, "getServerStatus").mockReturnValue({
+    status: "running",
+    port: 8080,
+    config: { modelPath: "test.gguf", contextSize: 4096, presetId: id },
+  });
 }
 
 describe("streamProxy", () => {
@@ -127,6 +172,29 @@ describe("streamProxy", () => {
     expect(capturedBody.messages).toBeInstanceOf(Array);
   });
 
+  it("logs active inference settings when verbose logging is enabled", async () => {
+    const logger = await import("../../src/server/logger");
+    logger.setSilent(false);
+    logger.setConfiguredLogLevel("verbose");
+    const debugSpy = spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      const stream = buildSSEStream([chatDelta("Hi"), chatStop()]);
+      globalThis.fetch = mock().mockResolvedValue({ ok: true, body: stream } as any);
+      const chat = await createChat("Verbose Settings");
+      await proxyCompletion({ chatId: chat.id, content: "hello", attachments: [] });
+      await new Promise((r) => setTimeout(r, 200));
+      const verboseCall = debugSpy.mock.calls.find((call) =>
+        String(call[0]).includes("Active inference settings"),
+      );
+      expect(verboseCall).toBeDefined();
+      expect(JSON.stringify(verboseCall?.[1])).toContain("temperature");
+    } finally {
+      logger.setSilent(true);
+      logger.setConfiguredLogLevel("off");
+      debugSpy.mockRestore();
+    }
+  });
+
   it("sends a proper messages array with user content for plain text chat", async () => {
     const stream = buildSSEStream([chatDelta("Hello"), chatDelta(" World"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
@@ -177,6 +245,79 @@ describe("streamProxy", () => {
     expect(capturedBody.cache_prompt).toBe(true);
   });
 
+  it("uses the model-bound inference preset instead of the first database row", async () => {
+    const stream = buildSSEStream([chatDelta("OK"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    await createInferencePreset({
+      ...createDefaultInferenceSampling(),
+      id: "unrelated-first",
+      name: "Unrelated First",
+      isDefault: false,
+      sourceModelPath: "/models/other.gguf",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await createInferencePreset({
+      ...createDefaultInferenceSampling(),
+      id: "benqwen",
+      name: "BenQwen",
+      isDefault: false,
+      sourceModelPath: "test.gguf",
+      temperature: 0.21,
+      topK: 17,
+      topP: 0.88,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const chat = await createChat("Model Bound Preset");
+    await proxyCompletion({ chatId: chat.id, content: "test", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(capturedBody.temperature).toBe(0.21);
+    expect(capturedBody.top_k).toBe(17);
+    expect(capturedBody.top_p).toBe(0.88);
+    const stored = await getChat(chat.id);
+    expect(stored?.inferencePresetId).toBe("benqwen");
+  });
+
+  it("uses a client-supplied inference preset id when the chat row has none", async () => {
+    const stream = buildSSEStream([chatDelta("OK"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    await createInferencePreset({
+      ...createDefaultInferenceSampling(),
+      id: "header-selected",
+      name: "BenQwen",
+      isDefault: false,
+      temperature: 1.15,
+      topK: 64,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    const chat = await createChat("Header Selected Preset");
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "test",
+      attachments: [],
+      inferencePresetId: "header-selected",
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(capturedBody.temperature).toBe(1.15);
+    expect(capturedBody.top_k).toBe(64);
+  });
+
   it("includes thinking template kwargs for thinking-enabled models", async () => {
     const stream = buildSSEStream([chatDelta("thinking"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
@@ -190,8 +331,8 @@ describe("streamProxy", () => {
 
     await new Promise((r) => setTimeout(r, 200));
 
-    // Since thinking is enabled by default (infPreset?.thinkingEnabled ?? true),
-    // the request should include chat_template_kwargs and reasoning_format
+    // Thinking stays on via chat_template_kwargs. reasoning_format is always
+    // `none` so llama-server streams tagged tokens in content for live splitting.
     expect(capturedBody.chat_template_kwargs).toEqual({
       enable_thinking: true,
       preserve_thinking: false,
@@ -199,7 +340,50 @@ describe("streamProxy", () => {
     expect(capturedBody.reasoning_format).toBe("none");
   });
 
-  it("includes preserve_thinking in chat_template_kwargs when preset has it enabled", async () => {
+  it("sends enable_thinking false when the inference preset disables thinking", async () => {
+    const stream = buildSSEStream([chatDelta("direct answer"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Thinking Disabled Test");
+    const infPresetId = "thinking-disabled-preset";
+    await createInferencePreset({
+      id: infPresetId,
+      name: "Thinking Disabled Preset",
+      temperature: 0.7,
+      topP: 0.9,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      frequencyPenalty: 0.0,
+      presencePenalty: 0.0,
+      maxTokens: 1024,
+      seed: undefined,
+      stopSequences: [],
+      toolCallsEnabled: false,
+      tools: undefined,
+      structuredOutput: undefined,
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId: infPresetId });
+
+    await proxyCompletion({ chatId: chat.id, content: "answer directly", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(capturedBody.chat_template_kwargs).toEqual({
+      enable_thinking: false,
+      preserve_thinking: false,
+    });
+    expect(capturedBody.reasoning_format).toBe("none");
+  });
+
+  it("includes preserve_thinking in chat_template_kwargs when the load preset has it enabled", async () => {
+    await seedLoadedLoadPreset("lp-preserve-on", true);
     const stream = buildSSEStream([chatDelta("preserved"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
@@ -226,7 +410,6 @@ describe("streamProxy", () => {
       structuredOutput: undefined,
       contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
-      preserveThinking: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -241,7 +424,8 @@ describe("streamProxy", () => {
     });
   });
 
-  it("does not include preserve_thinking when preset has it disabled", async () => {
+  it("does not enable preserve_thinking when the load preset has it disabled", async () => {
+    await seedLoadedLoadPreset("lp-preserve-off", false);
     const stream = buildSSEStream([chatDelta("not preserved"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
@@ -268,7 +452,6 @@ describe("streamProxy", () => {
       structuredOutput: undefined,
       contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
-      preserveThinking: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -283,7 +466,8 @@ describe("streamProxy", () => {
     });
   });
 
-  it("includes reasoning_content on historical assistant messages when preserve_thinking is enabled", async () => {
+  it("preserves historical thinking in tagged content instead of reasoning_content", async () => {
+    await seedLoadedLoadPreset("lp-preserve-history-on", true);
     const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
@@ -330,7 +514,6 @@ describe("streamProxy", () => {
       structuredOutput: undefined,
       contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
-      preserveThinking: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -341,10 +524,220 @@ describe("streamProxy", () => {
 
     const assistantMsg = capturedBody.messages.find((m: any) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
-    expect(assistantMsg.reasoning_content).toBe("I am pondering");
+    expect(assistantMsg.reasoning_content).toBeUndefined();
+    expect(assistantMsg.content).toBe("<think>I am pondering</think>The answer is 42");
+    expect(capturedBody.chat_template_kwargs?.preserve_thinking).toBe(true);
+    expect(capturedBody.chat_template_kwargs?.enable_thinking).toBe(true);
   });
 
-  it("still sends reasoning_content when preserve_thinking is disabled", async () => {
+  it("reconstructs think tags for preserved history stored without tags in rawContent", async () => {
+    await seedLoadedLoadPreset("lp-preserve-native-history", true);
+    const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Preserve Native Thinking History");
+    await addMessage({
+      id: "prev-native-asst",
+      chatId: chat.id,
+      role: "assistant",
+      content: "The answer is 42",
+      rawContent: "The answer is 42",
+      thinkingContent: "I am pondering",
+      position: 0,
+      createdAt: Date.now(),
+    });
+
+    const infPresetId = "preserve-native-history-preset";
+    await createInferencePreset({
+      id: infPresetId,
+      name: "Preserve Native History Preset",
+      temperature: 0.7,
+      topP: 0.9,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      frequencyPenalty: 0.0,
+      presencePenalty: 0.0,
+      maxTokens: 1024,
+      seed: undefined,
+      stopSequences: [],
+      toolCallsEnabled: false,
+      tools: undefined,
+      structuredOutput: undefined,
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId: infPresetId });
+
+    await proxyCompletion({ chatId: chat.id, content: "next question", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const assistantMsg = capturedBody.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg?.reasoning_content).toBeUndefined();
+    expect(assistantMsg?.content).toBe("<think>\nI am pondering\n</think>\nThe answer is 42");
+    expect(capturedBody.chat_template_kwargs?.preserve_thinking).toBe(true);
+    expect(capturedBody.chat_template_kwargs?.enable_thinking).toBe(true);
+  });
+
+  it("does not put Gemma thought channels into preserved historical content", async () => {
+    await seedLoadedLoadPreset("lp-preserve-gemma-history", true);
+    spyOn(llamaServerModule, "getActiveThinkingTagOverride").mockReturnValue(
+      GEMMA4_THINKING_CONFIG,
+    );
+    spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue({
+      architecture: "gemma4",
+      name: "Gemma 4",
+      fileSizeBytes: 1,
+      contextLength: 4096,
+      embeddingLength: undefined,
+      attentionHeadCount: undefined,
+      attentionHeadCountKv: undefined,
+      blockCount: undefined,
+      feedForwardLength: undefined,
+      quantType: undefined,
+      hasVisionEncoder: false,
+      hasAudioEncoder: false,
+      defaultTemperature: undefined,
+      defaultTopK: undefined,
+      defaultTopP: undefined,
+      defaultMinP: undefined,
+      defaultRepeatPenalty: undefined,
+      chatTemplate: undefined,
+    });
+    const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Preserve Gemma Thinking History");
+    await addMessage({
+      id: "prev-gemma-asst",
+      chatId: chat.id,
+      role: "assistant",
+      content: "One.",
+      rawContent: "<|channel>thought plan<channel|>One.",
+      thinkingContent: "plan",
+      position: 0,
+      createdAt: Date.now(),
+    });
+
+    const infPresetId = "preserve-gemma-history-preset";
+    await createInferencePreset({
+      id: infPresetId,
+      name: "Preserve Gemma History Preset",
+      temperature: 0.7,
+      topP: 0.9,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      frequencyPenalty: 0.0,
+      presencePenalty: 0.0,
+      maxTokens: 1024,
+      seed: undefined,
+      stopSequences: [],
+      toolCallsEnabled: false,
+      tools: undefined,
+      structuredOutput: undefined,
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId: infPresetId });
+
+    await proxyCompletion({ chatId: chat.id, content: "2", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const assistantMsg = capturedBody.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg?.reasoning_content).toBeUndefined();
+    expect(assistantMsg?.content).toBe("One.");
+    expect(assistantMsg?.content).not.toContain("<|channel>thought");
+    expect(capturedBody.chat_template_kwargs?.enable_thinking).toBe(true);
+  });
+
+  it("sends reasoning_content on preserved historical assistants that have tool calls", async () => {
+    await seedLoadedLoadPreset("lp-preserve-tool-history", true);
+    const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Preserve Tool Call Thinking History");
+    await addMessage({
+      id: "prev-tool-asst",
+      chatId: chat.id,
+      role: "assistant",
+      content: "I'll calculate",
+      rawContent: "I'll calculate",
+      thinkingContent: "need a tool",
+      position: 0,
+      createdAt: Date.now(),
+      toolCallsJson: JSON.stringify([
+        {
+          id: "tc_preserve",
+          type: "function",
+          function: { name: "calculate", arguments: '{"expression":"2+2"}' },
+        },
+      ]),
+    });
+    await addMessage({
+      id: "prev-tool-result",
+      chatId: chat.id,
+      role: "tool",
+      content: "4",
+      rawContent: "4",
+      position: 1,
+      createdAt: Date.now(),
+      toolCallId: "tc_preserve",
+    });
+
+    const infPresetId = "preserve-tool-history-preset";
+    await createInferencePreset({
+      id: infPresetId,
+      name: "Preserve Tool History Preset",
+      temperature: 0.7,
+      topP: 0.9,
+      minP: 0.05,
+      repeatPenalty: 1.1,
+      frequencyPenalty: 0.0,
+      presencePenalty: 0.0,
+      maxTokens: 1024,
+      seed: undefined,
+      stopSequences: [],
+      toolCallsEnabled: true,
+      tools: undefined,
+      structuredOutput: undefined,
+      contextOverflowPolicy: "TruncateMiddle",
+      thinkingEnabled: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId: infPresetId });
+
+    await proxyCompletion({ chatId: chat.id, content: "what next", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const assistantMsg = capturedBody.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg?.reasoning_content).toBe("need a tool");
+    expect(assistantMsg?.content).toBe("I'll calculate");
+    expect(capturedBody.chat_template_kwargs?.preserve_thinking).toBe(true);
+  });
+
+  it("omits reasoning_content on assistants before the last user when preserve_thinking is off", async () => {
     const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
@@ -391,7 +784,6 @@ describe("streamProxy", () => {
       structuredOutput: undefined,
       contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
-      preserveThinking: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -402,8 +794,196 @@ describe("streamProxy", () => {
 
     const assistantMsg = capturedBody.messages.find((m: any) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
-    expect(assistantMsg.reasoning_content).toBe("I am pondering");
+    expect(assistantMsg.reasoning_content).toBeUndefined();
+    expect(assistantMsg.content).toBe("The answer is 42");
     expect(capturedBody.chat_template_kwargs?.preserve_thinking).toBe(false);
+    expect(capturedBody.chat_template_kwargs?.enable_thinking).toBe(true);
+  });
+
+  it("sends reasoning_content on a continued last assistant when preserve_thinking is off", async () => {
+    const stream = buildSSEStream([chatDelta(" more"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Continue Reasoning Replay");
+    await addMessage({
+      id: "user-cont-r",
+      chatId: chat.id,
+      role: "user",
+      content: "go on",
+      rawContent: "go on",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: "asst-cont-r",
+      chatId: chat.id,
+      role: "assistant",
+      content: "The answer is",
+      rawContent: "The answer is",
+      thinkingContent: "I already planned this",
+      position: 1,
+      createdAt: Date.now(),
+    });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "",
+      attachments: [],
+      isContinue: true,
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const assistantMsg = capturedBody.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg?.reasoning_content).toBe("I already planned this");
+    expect(capturedBody.chat_template_kwargs?.preserve_thinking).toBe(false);
+    expect(capturedBody.chat_template_kwargs?.enable_thinking).toBe(true);
+  });
+
+  it("sends reasoning_content on a continued last assistant when preserve_thinking is on", async () => {
+    await seedLoadedLoadPreset("lp-preserve-continue", true);
+    const stream = buildSSEStream([chatDelta(" more"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Continue Preserve Reasoning Replay");
+    await addMessage({
+      id: "user-cont-p",
+      chatId: chat.id,
+      role: "user",
+      content: "go on",
+      rawContent: "go on",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: "asst-cont-p",
+      chatId: chat.id,
+      role: "assistant",
+      content: "The answer is",
+      rawContent: "The answer is",
+      thinkingContent: "I already planned this",
+      position: 1,
+      createdAt: Date.now(),
+    });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "",
+      attachments: [],
+      isContinue: true,
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const assistantMsg = capturedBody.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg?.reasoning_content).toBe("I already planned this");
+    expect(assistantMsg?.content).toBe("The answer is");
+    expect(capturedBody.chat_template_kwargs?.preserve_thinking).toBe(true);
+    expect(capturedBody.chat_template_kwargs?.enable_thinking).toBe(true);
+  });
+
+  it("keeps thinking enabled after editing the last user turn and on a new chat", async () => {
+    const bodies: unknown[] = [];
+    const fetchMock = mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/tokenize")) {
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 }) as any;
+      }
+      if (init?.body) bodies.push(JSON.parse(init.body as string));
+      return {
+        ok: true,
+        body: buildSSEStream([
+          chatDelta("<|channel>thought plan<channel|>edited answer"),
+          chatStop(),
+        ]),
+      } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Edit User Then Regen");
+    await addMessage({
+      id: "u1-edit",
+      chatId: chat.id,
+      role: "user",
+      content: "first",
+      rawContent: "first",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: "a1-edit",
+      chatId: chat.id,
+      role: "assistant",
+      content: "first answer",
+      rawContent: "first answer",
+      thinkingContent: "first plan",
+      position: 1,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: "u2-edit",
+      chatId: chat.id,
+      role: "user",
+      content: "second",
+      rawContent: "second",
+      position: 2,
+      createdAt: Date.now(),
+    });
+
+    const updated = await updateMessage(
+      "u2-edit",
+      "second edited",
+      "second edited",
+      undefined,
+      chat.id,
+    );
+    expect(updated).toBe(true);
+
+    const regeneratedId = await proxyCompletion({
+      chatId: chat.id,
+      content: "",
+      attachments: [],
+      isRegenerate: true,
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const regenBody = bodies[0] as {
+      chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean };
+      messages: { role: string; content: string; reasoning_content?: string }[];
+    };
+    expect(regenBody.chat_template_kwargs?.enable_thinking).toBe(true);
+    expect(regenBody.chat_template_kwargs?.preserve_thinking).toBe(false);
+    const historicalAssistant = regenBody.messages.find((m) => m.role === "assistant");
+    expect(historicalAssistant?.content).toBe("first answer");
+    expect(historicalAssistant?.reasoning_content).toBeUndefined();
+    const editedUser = regenBody.messages.find(
+      (m) => m.role === "user" && m.content === "second edited",
+    );
+    expect(editedUser).toBeDefined();
+
+    const reloaded = await getChat(chat.id);
+    const regenerated = reloaded?.messages?.find((m) => m.id === regeneratedId);
+    expect(regenerated?.thinkingContent).toBe("plan");
+    expect(regenerated?.content).toBe("edited answer");
+
+    const newChat = await createChat("After Edit Thinking");
+    await proxyCompletion({ chatId: newChat.id, content: "fresh", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const newChatBody = bodies[1] as {
+      chat_template_kwargs?: { enable_thinking?: boolean };
+    };
+    expect(newChatBody.chat_template_kwargs?.enable_thinking).toBe(true);
   });
 
   it("persists the user message and creates an assistant message row", async () => {
@@ -438,6 +1018,42 @@ describe("streamProxy", () => {
     expect(assistantMsg?.content).toBe("Reply!");
     expect(assistantMsg?.metrics?.predictedTokens).toBe(5);
     expect(assistantMsg?.metrics?.tokensPerSecond).toBe(50);
+  });
+
+  it("computes tokens/sec from predicted_n and predicted_ms when the reported rate is zero", async () => {
+    const stream = buildSSEStream([
+      chatDelta("Reply!"),
+      {
+        choices: [{ delta: {}, finish_reason: "stop" }],
+        timings: {
+          predicted_ms: 200,
+          predicted_n: 10,
+          predicted_per_second: 0,
+          predicted_per_token_ms: 20,
+          prompt_ms: 40,
+          prompt_n: 8,
+          prompt_per_second: 0,
+          prompt_per_token_ms: 5,
+          tokens_cached: 0,
+          tokens_evaluated: 8,
+        },
+      },
+    ]);
+    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Tok/sec derivation");
+    const assistantMsgId = await proxyCompletion({
+      chatId: chat.id,
+      content: "Hello there",
+      attachments: [],
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const reloaded = await getChat(chat.id);
+    const assistantMsg = reloaded?.messages?.find((m) => m.id === assistantMsgId);
+    expect(assistantMsg?.metrics?.tokensPerSecond).toBe(50);
+    expect(assistantMsg?.metrics?.promptTokensPerSecond).toBe(200);
+    expect(assistantMsg?.metrics?.generationMs).toBe(200);
   });
 
   it("broadcasts the persisted user message so clients can reconcile optimistic ids", async () => {
@@ -543,6 +1159,205 @@ describe("streamProxy", () => {
     expect(assistantMsg?.rawContent).toContain("I am pondering");
     // Thinking content should be extracted
     expect(assistantMsg?.thinkingContent).toContain("I am pondering");
+    expect(typeof assistantMsg?.metrics?.thinkingDurationMs).toBe("number");
+    expect(assistantMsg?.metrics?.stopReason).toBe("eos");
+  });
+
+  it("broadcasts answer tokens as soon as the thinking close tag arrives", async () => {
+    const stream = buildSSEStream([
+      chatDelta("<think>"),
+      chatDelta("I am pondering"),
+      chatDelta("</think>"),
+      chatDelta("The answer is 42"),
+      chatStop(),
+    ]);
+    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
+    globalThis.fetch = fetchMock;
+
+    const wsHubModule = await import("../../src/server/wsHub");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
+
+    try {
+      const chat = await createChat("Live Answer Stream");
+      const msgId = await proxyCompletion({
+        chatId: chat.id,
+        content: "What is the answer?",
+        attachments: [],
+      });
+      await new Promise((r) => setTimeout(r, 500));
+
+      const frames = broadcastSpy.mock.calls.map((call) => call[0]);
+      const stopIndex = frames.findIndex(
+        (frame) => frame.type === "stop" && frame.messageId === msgId,
+      );
+      expect(stopIndex).toBeGreaterThan(0);
+      const answerToken = frames
+        .slice(0, stopIndex)
+        .find((frame) => frame.type === "token" && frame.delta === "The answer is 42");
+      expect(answerToken).toBeDefined();
+      if (answerToken?.type === "token") {
+        expect(answerToken.thinkingDurationMs).toBeGreaterThanOrEqual(0);
+      }
+    } finally {
+      broadcastSpy.mockRestore();
+    }
+  });
+
+  it("stores llama-server reasoning_content as thinking without scanning content tags", async () => {
+    const stream = buildSSEStream([
+      chatDelta("", "I am pondering"),
+      chatDelta("The answer is 42"),
+      chatStop(),
+    ]);
+    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Native Reasoning Test");
+    const msgId = await proxyCompletion({
+      chatId: chat.id,
+      content: "What is the answer?",
+      attachments: [],
+    });
+
+    await new Promise((r) => setTimeout(r, 500));
+
+    const reloaded = await getChat(chat.id);
+    const assistantMsg = reloaded?.messages?.find((m) => m.id === msgId);
+    expect(assistantMsg?.content).toBe("The answer is 42");
+    expect(assistantMsg?.thinkingContent).toBe("I am pondering");
+    expect(assistantMsg?.rawContent).toBe("The answer is 42");
+  });
+
+  it("broadcasts an empty assistant placeholder before tokens arrive", async () => {
+    const stream = buildSSEStream([chatDelta("Reply!"), chatStop()]);
+    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
+    globalThis.fetch = fetchMock;
+
+    const wsHubModule = await import("../../src/server/wsHub");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
+
+    try {
+      const chat = await createChat("Broadcast Assistant Test");
+      await proxyCompletion({ chatId: chat.id, content: "Hi", attachments: [] });
+      await new Promise((r) => setTimeout(r, 200));
+
+      const frames = broadcastSpy.mock.calls.map((call) => call[0]);
+      const assistantPlaceholder = frames.find(
+        (frame) =>
+          frame.type === "message" &&
+          frame.chatId === chat.id &&
+          frame.message.role === "assistant",
+      );
+      const firstTokenIndex = frames.findIndex((frame) => frame.type === "token");
+      const placeholderIndex = frames.findIndex(
+        (frame) =>
+          frame.type === "message" &&
+          frame.chatId === chat.id &&
+          frame.message.role === "assistant",
+      );
+      expect(assistantPlaceholder).toBeDefined();
+      expect(placeholderIndex).toBeGreaterThanOrEqual(0);
+      expect(placeholderIndex).toBeLessThan(firstTokenIndex);
+    } finally {
+      broadcastSpy.mockRestore();
+    }
+  });
+
+  it("passes a load-preset enableToken override as chat_template_kwargs.enable_token", async () => {
+    spyOn(llamaServerModule, "getActiveThinkingTagOverride").mockReturnValue({
+      openTag: "<think>",
+      closeTag: "</think>",
+      enableToken: "<|think|>",
+    });
+    const stream = buildSSEStream([chatDelta("ok"), chatStop()]);
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      capturedBody = init?.body ? JSON.parse(init.body as string) : null;
+      return { ok: true, body: stream } as any;
+    });
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Enable Token Kwargs");
+    await proxyCompletion({ chatId: chat.id, content: "hi", attachments: [] });
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(capturedBody.chat_template_kwargs.enable_token).toBe("<|think|>");
+  });
+
+  it("extracts Gemma 4 channel tags when the thinking override uses those delimiters", async () => {
+    spyOn(llamaServerModule, "getActiveThinkingTagOverride").mockReturnValue({
+      openTag: "<|channel>thought\n",
+      closeTag: "<channel|>",
+      enableToken: "<|think|>",
+    });
+    const stream = buildSSEStream([
+      chatDelta("<|channel>thought\nplan<channel|>The answer is 42"),
+      chatStop(),
+    ]);
+    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Gemma Tags");
+    const msgId = await proxyCompletion({
+      chatId: chat.id,
+      content: "What is the answer?",
+      attachments: [],
+    });
+    await new Promise((r) => setTimeout(r, 500));
+
+    const reloaded = await getChat(chat.id);
+    const assistantMsg = reloaded?.messages?.find((m) => m.id === msgId);
+    expect(assistantMsg?.content).toBe("The answer is 42");
+    expect(assistantMsg?.thinkingContent).toBe("plan");
+    expect(assistantMsg?.metrics?.thinkingSource).toBe("tags");
+  });
+
+  it("does not tag-scan a continued native-reasoning answer that mentions an open tag", async () => {
+    const stream = buildSSEStream([chatDelta("<think>not a trace</think> more"), chatStop()]);
+    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
+    globalThis.fetch = fetchMock;
+
+    const chat = await createChat("Continue Native");
+    await addMessage({
+      id: "user-n",
+      chatId: chat.id,
+      role: "user",
+      content: "go on",
+      rawContent: "go on",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: "asst-n",
+      chatId: chat.id,
+      role: "assistant",
+      content: "The answer is 42",
+      rawContent: "The answer is 42",
+      thinkingContent: "I already planned this",
+      position: 1,
+      createdAt: Date.now(),
+      metrics: {
+        predictedTokens: 4,
+        tokensPerSecond: 10,
+        promptTokens: 8,
+        promptTokensPerSecond: 20,
+        cachedPromptTokens: 0,
+        evaluatedPromptTokens: 8,
+        thinkingSource: "native",
+      },
+    });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "",
+      attachments: [],
+      isContinue: true,
+    });
+    await new Promise((r) => setTimeout(r, 500));
+
+    const reloaded = await getChat(chat.id);
+    const assistantMsg = reloaded?.messages?.find((m) => m.id === "asst-n");
+    expect(assistantMsg?.thinkingContent).toBe("I already planned this");
+    expect(assistantMsg?.content).toBe("The answer is 42<think>not a trace</think> more");
   });
 
   it("builds image_url multimodal payloads for image attachments", async () => {
@@ -1187,6 +2002,7 @@ describe("streamProxy", () => {
     expect(capturedBody.chat_template_kwargs).toEqual({
       enable_thinking: true,
       preserve_thinking: false,
+      enable_token: "<|think|>",
     });
   });
 

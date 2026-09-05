@@ -45,6 +45,24 @@ describe("db configuration", () => {
     const parsed = JSON.parse(row?.config_json ?? "{}");
     expect(parsed.config?.flashAttn).toBe("auto");
     expect(parsed.config?.flashAttention).toBeUndefined();
+    expect(parsed.config?.threads).toBe(3);
+    expect(parsed.config?.threadsBatch).toBe(-1);
+    expect(parsed.config?.kvUnified).toBe(true);
+  });
+
+  it("seeds the default inference preset with the same sampling the UI shows", () => {
+    const db = getDb(":memory:");
+    const row = db
+      .query<{ config_json: string }, []>("SELECT config_json FROM inference_presets LIMIT 1")
+      .get();
+    const parsed = JSON.parse(row?.config_json ?? "{}");
+    expect(parsed.temperature).toBe(0.8);
+    expect(parsed.topK).toBe(40);
+    expect(parsed.topP).toBe(0.95);
+    expect(parsed.minP).toBe(0.05);
+    expect(parsed.repeatPenalty).toBe(1.1);
+    expect(parsed.contextOverflowPolicy).toBe("TruncateMiddle");
+    expect(parsed.thinkingEnabled).toBe(true);
   });
 
   it("resolves the effective app data dir inside tests/data", () => {

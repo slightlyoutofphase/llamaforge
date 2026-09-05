@@ -1,0 +1,145 @@
+/**
+ * @packageDocumentation
+ * Canonical default values shared by the backend seeders and the client editors.
+ *
+ * Every UI control that displays a fallback MUST read from this module so the
+ * settings the user sees cannot drift from the values the server actually uses.
+ */
+
+import {
+  DEFAULT_IMAGE_MAX_TOKENS,
+  DEFAULT_IMAGE_MIN_TOKENS,
+  defaultBatchingForImageTokens,
+} from "./imageTokens";
+import type { AppSettings, InferencePreset, ModelLoadConfig } from "./types";
+
+/** llama-server `--video-fps` default used when a load preset does not override it. */
+export const DEFAULT_VIDEO_FPS = 4;
+
+/** Lowest `--video-fps` the load-preset editor will persist. */
+export const MIN_VIDEO_FPS = 0.1;
+
+/** Highest `--video-fps` the load-preset editor will persist. */
+export const MAX_VIDEO_FPS = 30;
+
+/**
+ * Clamps a video sampling rate to the range accepted by llama-server `--video-fps`.
+ *
+ * @param value - Candidate frames-per-second value.
+ * @returns A finite rate between {@link MIN_VIDEO_FPS} and {@link MAX_VIDEO_FPS}.
+ */
+export function clampVideoFps(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_VIDEO_FPS;
+  return Math.min(MAX_VIDEO_FPS, Math.max(MIN_VIDEO_FPS, value));
+}
+
+/**
+ * Application settings that do not depend on the host filesystem.
+ * `modelsPath` is resolved to an absolute default by the settings repository.
+ */
+export const DEFAULT_APP_SETTINGS: Omit<AppSettings, "modelsPath"> & { modelsPath: string } = {
+  serverPort: 11435,
+  modelsPath: "Models",
+  theme: "system",
+  accentColor: "#7b6ef6",
+  fontSize: 14,
+  chatBubbleStyle: "bubble",
+  autonameEnabled: true,
+  autoloadLastModel: false,
+  includeVideoAudio: false,
+  llamaPortRangeMin: 12000,
+  llamaPortRangeMax: 13000,
+  requestTimeoutSeconds: 60,
+  logLevel: "info",
+  showConsoleOnStartup: false,
+};
+
+/**
+ * Sampling and overflow fields used when creating inference presets and when
+ * hydrating incomplete rows from persistence.
+ */
+export type DefaultInferenceSampling = Omit<
+  InferencePreset,
+  "id" | "name" | "isDefault" | "createdAt" | "updatedAt" | "sourceModelPath"
+>;
+
+/**
+ * Builds the canonical default inference sampling configuration.
+ *
+ * @returns Default inference fields matching the editor and llama-server request fallbacks.
+ */
+export function createDefaultInferenceSampling(): DefaultInferenceSampling {
+  return {
+    temperature: 0.8,
+    topK: 40,
+    topP: 0.95,
+    minP: 0.05,
+    repeatPenalty: 1.1,
+    repeatLastN: 64,
+    typicalP: 1.0,
+    presencePenalty: 0.0,
+    frequencyPenalty: 0.0,
+    mirostat: 0,
+    mirostatTau: 5.0,
+    mirostatEta: 0.1,
+    dynaTempRange: 0.0,
+    dynaTempExponent: 1.0,
+    dryMultiplier: 0.0,
+    dryBase: 1.75,
+    dryAllowedLength: 2,
+    dryPenaltyLastN: 64,
+    drySequenceBreakers: ["\n", ":", '"', "*"],
+    xtcProbability: 0.0,
+    xtcThreshold: 0.1,
+    seed: -1,
+    maxTokens: -1,
+    stopStrings: [],
+    toolCallsEnabled: false,
+    tools: [],
+    structuredOutput: undefined,
+    contextOverflowPolicy: "TruncateMiddle",
+    thinkingEnabled: true,
+  };
+}
+
+/**
+ * Builds the canonical default llama-server load configuration.
+ *
+ * @param modelPath - Absolute model path to embed in the config, or an empty string for a blank preset.
+ * @returns A complete {@link ModelLoadConfig} matching the load-preset editor defaults.
+ */
+export function createDefaultLoadConfig(modelPath: string = ""): ModelLoadConfig {
+  return {
+    modelPath,
+    contextSize: 4096,
+    contextShift: false,
+    gpuLayers: 0,
+    threads: 3,
+    threadsBatch: -1,
+    ...defaultBatchingForImageTokens(DEFAULT_IMAGE_MAX_TOKENS),
+    ropeScaling: "none",
+    ropeFreqBase: 0,
+    ropeFreqScale: 0,
+    kvCacheTypeK: "f16",
+    kvCacheTypeV: "f16",
+    mlock: true,
+    noMmap: false,
+    contBatching: true,
+    flashAttn: "auto",
+    swaFull: false,
+    kvUnified: true,
+    noKvOffload: false,
+    cacheReuse: 0,
+    contextCheckpoints: 32,
+    imageMaxTokens: DEFAULT_IMAGE_MAX_TOKENS,
+    imageMinTokens: DEFAULT_IMAGE_MIN_TOKENS,
+    videoFps: DEFAULT_VIDEO_FPS,
+    logLevel: 3,
+    seedOverride: -1,
+    specType: "off",
+    specDraftNMax: 8,
+    specDraftNMin: 0,
+    specDraftPMin: 0.75,
+    specDraftModelPath: "",
+  };
+}

@@ -35,8 +35,10 @@ describe("toolCalls", () => {
         },
       ]),
     );
-    expect(parsed).not.toBeNull();
-    const api = toApiToolCalls(parsed!);
+    if (parsed === null) {
+      throw new Error("Expected parseToolCallsJson to return tool calls");
+    }
+    const api = toApiToolCalls(parsed);
     expect(api[0]?.function.arguments).toEqual({ expression: "2+2" });
   });
 

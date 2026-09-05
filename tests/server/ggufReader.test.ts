@@ -10,6 +10,15 @@ mock.module("@huggingface/gguf", () => {
   return {
     gguf: async (path: string) => {
       if (path === "fail.gguf") throw new Error("Parse failed");
+      if (path === "mmproj-flags.gguf") {
+        return {
+          metadata: {
+            "general.architecture": "clip",
+            "clip.has_vision_encoder": true,
+            "clip.has_audio_encoder": 1,
+          },
+        };
+      }
       if (path === "temp_new.gguf") {
         return {
           metadata: {
@@ -50,6 +59,12 @@ describe("ggufReader", () => {
   it("successfully parses general.sampling.temp fallback", async () => {
     const meta = await parseGgufMetadata("temp_new.gguf");
     expect(meta.defaultTemperature).toBe(0.8);
+  });
+
+  it("reads clip.has_vision_encoder and clip.has_audio_encoder from companion mmproj headers", async () => {
+    const meta = await parseGgufMetadata("mmproj-flags.gguf");
+    expect(meta.hasVisionEncoder).toBe(true);
+    expect(meta.hasAudioEncoder).toBe(true);
   });
 
   it("throws on failure", async () => {

@@ -3,11 +3,19 @@
  * Tests for multimodal attachment processing and upload handling.
  */
 
+import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import {
+  __setAllowPipedVideo,
+  __setExtractVideoFrames,
+  __setPreferNativeInputVideo,
+  __setResolveVideoAudioSidecar,
+  buildContentParts,
+  processUpload,
+} from "../../src/server/multimodal";
 import { getAppDataDir, getDb, initDb, resetDb } from "../../src/server/persistence/db";
-import { buildContentParts, processUpload } from "../../src/server/multimodal";
+import { saveSettings } from "../../src/server/persistence/settingsRepo";
 
 const encoder = new TextEncoder();
 let mkdirSpy: ReturnType<typeof spyOn<typeof fs, "mkdir">>;
@@ -41,6 +49,12 @@ describe("multimodal", () => {
   beforeEach(async () => {
     mkdirSpy = spyOn(fs, "mkdir").mockResolvedValue(undefined);
     writeSpy = spyOn(Bun, "write").mockResolvedValue(3);
+    __setExtractVideoFrames(async () => []);
+    __setResolveVideoAudioSidecar(async () => {
+      throw new Error("video audio sidecar resolution should be skipped unless enabled");
+    });
+    __setAllowPipedVideo(true);
+    __setPreferNativeInputVideo(true);
     await initDb(":memory:");
   });
 
@@ -48,6 +62,10 @@ describe("multimodal", () => {
     resetDb();
     mkdirSpy.mockRestore();
     writeSpy.mockRestore();
+    __setExtractVideoFrames(null);
+    __setResolveVideoAudioSidecar(null);
+    __setAllowPipedVideo(null);
+    __setPreferNativeInputVideo(null);
   });
 
   it("returns string when no media attachments", async () => {
@@ -254,6 +272,74 @@ describe("multimodal", () => {
     expect(parts[1].text).toBe("Watch this");
   });
 
+  it("does not sample stills when native input_video is preferred", async () => {
+    __setPreferNativeInputVideo(true);
+    __setExtractVideoFrames(async () => {
+      throw new Error("video still sampling should be skipped");
+    });
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(Array.isArray(res)).toBe(true);
+    expect((res as any[])[0].type).toBe("input_video");
+  });
+
+  it("samples video attachments into image_url frames when ffmpeg extraction succeeds", async () => {
+    __setPreferNativeInputVideo(false);
+    __setExtractVideoFrames(async () => [
+      path.join(getAppDataDir(), "attachments", "video-frame-001.jpg"),
+    ]);
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(Array.isArray(res)).toBe(true);
+    const parts = res as any[];
+    expect(parts[0].type).toBe("image_url");
+    expect(parts[0].image_url.url).toBe("file://attachments/video-frame-001.jpg");
+    expect(parts[1].type).toBe("text");
+    expect(parts[1].text).toBe("Watch this");
+  });
+
+  it("skips piped input_video when frame extraction fails and piping is disabled", async () => {
+    __setPreferNativeInputVideo(false);
+    __setExtractVideoFrames(async () => []);
+    __setAllowPipedVideo(false);
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(res).toBe("Watch this");
+  });
+
   it("skips video if model has no vision encoder", async () => {
     const attachments = [
       {
@@ -270,6 +356,265 @@ describe("multimodal", () => {
     const res = await buildContentParts("Watch this", attachments, metadata);
     expect(typeof res).toBe("string");
     expect(res).toBe("Watch this");
+  });
+
+  it("does not extract video audio when the global toggle is off", async () => {
+    await saveSettings({ includeVideoAudio: false });
+    let resolved = 0;
+    __setResolveVideoAudioSidecar(async () => {
+      resolved += 1;
+      return path.join(getAppDataDir(), "attachments", "clip.extracted-audio.wav");
+    });
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(resolved).toBe(0);
+    expect(Array.isArray(res)).toBe(true);
+    expect((res as any[]).map((part) => part.type)).toEqual(["input_video", "text"]);
+  });
+
+  it("does not extract video audio when the model has no audio encoder", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    let resolved = 0;
+    __setResolveVideoAudioSidecar(async () => {
+      resolved += 1;
+      return path.join(getAppDataDir(), "attachments", "clip.extracted-audio.wav");
+    });
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: false } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(resolved).toBe(0);
+    expect((res as any[]).map((part) => part.type)).toEqual(["input_video", "text"]);
+  });
+
+  it("sends extracted video audio as a sibling input_audio part", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    __setResolveVideoAudioSidecar(async () =>
+      path.join(getAppDataDir(), "attachments", "video.extracted-audio.wav"),
+    );
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(Array.isArray(res)).toBe(true);
+    const parts = res as any[];
+    expect(parts[0].type).toBe("input_video");
+    expect(parts[0].input_video.url).toBe("file://attachments/video.mp4");
+    expect(parts[1].type).toBe("input_audio");
+    expect(parts[1].input_audio.url).toBe("file://attachments/video.extracted-audio.wav");
+    expect(parts[2].type).toBe("text");
+    expect(parts[2].text).toBe("Watch this");
+  });
+
+  it("persists a soundtrack attachment once and reuses it on later sends", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    const db = getDb();
+    db.prepare("INSERT INTO chats (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)").run(
+      "chat-audio",
+      "Audio Chat",
+      1,
+      1,
+    );
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, role, content, raw_content, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run("msg-audio", "chat-audio", "user", "Watch this", "Watch this", 0, 1);
+
+    let resolved = 0;
+    __setResolveVideoAudioSidecar(async () => {
+      resolved += 1;
+      return path.join(getAppDataDir(), "attachments", "video.extracted-audio.wav");
+    });
+    const video = {
+      id: "vid-1",
+      messageId: "msg-audio",
+      mimeType: "video/mp4",
+      fileName: "video.mp4",
+      filePath: "attachments/video.mp4",
+      createdAt: 0,
+    };
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
+
+    await buildContentParts("Watch this", [video as any], metadata);
+    expect(resolved).toBe(1);
+    const stored = db
+      .query<{ file_path: string; mime_type: string; file_name: string }, [string]>(
+        "SELECT file_path, mime_type, file_name FROM attachments WHERE message_id = ?",
+      )
+      .all("msg-audio");
+    expect(stored).toEqual([
+      {
+        file_path: "attachments/video.extracted-audio.wav",
+        mime_type: "audio/wav",
+        file_name: "video.extracted-audio.wav",
+      },
+    ]);
+
+    const soundtrack = {
+      id: "aud-1",
+      messageId: "msg-audio",
+      mimeType: "audio/wav",
+      fileName: "video.extracted-audio.wav",
+      filePath: "attachments/video.extracted-audio.wav",
+      createdAt: 1,
+    };
+    const second = await buildContentParts(
+      "Watch this",
+      [video as any, soundtrack as any],
+      metadata,
+    );
+    expect(resolved).toBe(1);
+    expect((second as any[]).map((part) => part.type)).toEqual([
+      "input_video",
+      "input_audio",
+      "text",
+    ]);
+    expect(
+      db
+        .query<{ count: number }, [string]>(
+          "SELECT COUNT(*) as count FROM attachments WHERE message_id = ?",
+        )
+        .get("msg-audio")?.count,
+    ).toBe(1);
+  });
+
+  it("sends an already-persisted soundtrack without extracting again", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    let resolved = 0;
+    __setResolveVideoAudioSidecar(async () => {
+      resolved += 1;
+      return path.join(getAppDataDir(), "attachments", "video.extracted-audio.wav");
+    });
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      },
+      {
+        id: "2",
+        messageId: "2",
+        mimeType: "audio/wav",
+        fileName: "video.extracted-audio.wav",
+        filePath: "attachments/video.extracted-audio.wav",
+        createdAt: 1,
+      },
+    ] as any;
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(resolved).toBe(0);
+    expect((res as any[]).map((part) => part.type)).toEqual(["input_video", "input_audio", "text"]);
+  });
+
+  it("does not send a persisted soundtrack when the global toggle is off", async () => {
+    await saveSettings({ includeVideoAudio: false });
+    let resolved = 0;
+    __setResolveVideoAudioSidecar(async () => {
+      resolved += 1;
+      return path.join(getAppDataDir(), "attachments", "video.extracted-audio.wav");
+    });
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      },
+      {
+        id: "2",
+        messageId: "2",
+        mimeType: "audio/wav",
+        fileName: "video.extracted-audio.wav",
+        filePath: "attachments/video.extracted-audio.wav",
+        createdAt: 1,
+      },
+    ] as any;
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(resolved).toBe(0);
+    expect((res as any[]).map((part) => part.type)).toEqual(["input_video", "text"]);
+  });
+
+  it("keeps input_video only when the video has no audio stream", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    __setResolveVideoAudioSidecar(async () => null);
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect((res as any[]).map((part) => part.type)).toEqual(["input_video", "text"]);
+  });
+
+  it("does not extract video audio when still frames are used instead of input_video", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    __setPreferNativeInputVideo(false);
+    __setExtractVideoFrames(async () => [
+      path.join(getAppDataDir(), "attachments", "video-frame-001.jpg"),
+    ]);
+    let resolved = 0;
+    __setResolveVideoAudioSidecar(async () => {
+      resolved += 1;
+      return path.join(getAppDataDir(), "attachments", "video.extracted-audio.wav");
+    });
+    const attachments = [
+      {
+        id: "1",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 0,
+      } as any,
+    ];
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
+
+    const res = await buildContentParts("Watch this", attachments, metadata);
+    expect(resolved).toBe(0);
+    expect((res as any[])[0].type).toBe("image_url");
   });
 
   it("builds gemma4 image_url payloads without per-attachment budget fields", async () => {
@@ -289,6 +634,52 @@ describe("multimodal", () => {
     const parts = res as any[];
     expect(parts[0].type).toBe("image_url");
     expect(parts[0].resolution).toBeUndefined();
+  });
+
+  it("does not reuse another video's soundtrack on the same message", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    const resolved: string[] = [];
+    __setResolveVideoAudioSidecar(async (videoAbs: string) => {
+      resolved.push(videoAbs);
+      return `${videoAbs}.extracted-audio.wav`;
+    });
+    const attachments = [
+      {
+        id: "v1",
+        messageId: "m1",
+        mimeType: "video/mp4",
+        fileName: "one.mp4",
+        filePath: "attachments/one.mp4",
+        createdAt: 0,
+      },
+      {
+        id: "a1",
+        messageId: "m1",
+        mimeType: "audio/wav",
+        fileName: "one.extracted-audio.wav",
+        filePath: "attachments/one.extracted-audio.wav",
+        createdAt: 1,
+      },
+      {
+        id: "v2",
+        messageId: "m1",
+        mimeType: "video/mp4",
+        fileName: "two.mp4",
+        filePath: "attachments/two.mp4",
+        createdAt: 2,
+      },
+    ] as any;
+
+    const parts = (await buildContentParts("two clips", attachments, {
+      hasVisionEncoder: true,
+      hasAudioEncoder: true,
+    } as any)) as any[];
+
+    expect(resolved.some((videoAbs) => videoAbs.replaceAll("\\", "/").endsWith("two.mp4"))).toBe(
+      true,
+    );
+    expect(parts.filter((part) => part.type === "input_video")).toHaveLength(2);
+    expect(parts.filter((part) => part.type === "input_audio")).toHaveLength(2);
   });
 
   afterAll(() => {

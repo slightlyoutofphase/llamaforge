@@ -98,6 +98,40 @@ describe("presetRepo", () => {
     expect(presets.find((p) => p.id === "lp1")).toBeUndefined();
   });
 
+  it("persists preserveThinking on load presets independently of inference presets", async () => {
+    await createLoadPreset({
+      id: "lp-preserve",
+      name: "Preserve Load",
+      isDefault: false,
+      isReadonly: false,
+      modelPath: "path-preserve",
+      config: {
+        contextSize: 2048,
+        gpuLayers: 1,
+        threads: 1,
+        batchSize: 1,
+        microBatchSize: 1,
+        ropeScaling: "none",
+        ropeFreqBase: 1,
+        ropeFreqScale: 1,
+        kvCacheTypeK: "f16",
+        kvCacheTypeV: "f16",
+        mlock: false,
+        noMmap: false,
+        flashAttn: "auto",
+      },
+      preserveThinking: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    let stored = (await getLoadPresets()).find((p) => p.id === "lp-preserve");
+    expect(stored?.preserveThinking).toBe(true);
+
+    await updateLoadPreset("lp-preserve", { preserveThinking: false });
+    stored = (await getLoadPresets()).find((p) => p.id === "lp-preserve");
+    expect(stored?.preserveThinking).toBe(false);
+  });
+
   it("strips unknown load preset config keys and rejects them on the write validator", async () => {
     await createLoadPreset({
       id: "lp-unknown",
@@ -263,7 +297,9 @@ describe("presetRepo", () => {
     expect(loadPreset?.chatTemplateOverride).toBe("gguf-template");
     expect(loadPreset?.thinkingTagOverride?.enableToken).toBe("<|think|>");
     expect(loadPreset?.config.imageMaxTokens).toBe(560);
-    expect(loadPreset?.config.microBatchSize).toBeGreaterThanOrEqual(1120);
+    expect(loadPreset?.config.imageMinTokens).toBe(70);
+    expect(loadPreset?.config.videoFps).toBe(4);
+    expect(loadPreset?.config.microBatchSize).toBe(560);
     expect(loadPreset?.config.batchSize).toBeGreaterThanOrEqual(
       loadPreset?.config.microBatchSize ?? 0,
     );

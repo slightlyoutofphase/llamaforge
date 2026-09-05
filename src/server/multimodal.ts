@@ -8,10 +8,92 @@ import path from "node:path";
 import type { Attachment, GgufDisplayMetadata } from "../shared/types";
 import { logInfo, logWarn } from "./logger";
 import { getAppDataDir, getDb, resolveAppDataPath } from "./persistence/db";
+import { loadSettings } from "./persistence/settingsRepo";
+import {
+  EXTRACTED_AUDIO_SUFFIX,
+  isExtractedVideoAudioAttachment,
+  resolveVideoAudioSidecar,
+  videoAudioSidecarPaths,
+} from "./videoAudio";
+import { extractVideoFrames } from "./videoFrames";
+
 const MAX_EXTRACTED_TEXT_CHARS_PER_ATTACHMENT = 12_000;
 const MAX_EXTRACTED_TEXT_CHARS_PER_MESSAGE = 24_000;
 const ATTACHMENT_TEXT_BUDGET_EXHAUSTED_NOTICE =
   "[Attachment text omitted: message attachment text budget exhausted.]";
+
+let extractVideoFramesImpl: typeof extractVideoFrames = extractVideoFrames;
+let resolveVideoAudioSidecarImpl: typeof resolveVideoAudioSidecar = resolveVideoAudioSidecar;
+let allowPipedVideoOverride: boolean | null = null;
+/**
+ * When true, video attachments are sent as llama.cpp `input_video` parts,
+ * matching `input_audio` / `image_url`. Set false to restore JPEG still
+ * sampling (workaround for an older Windows mtmd ffmpeg-stdin deadlock).
+ */
+let preferNativeInputVideo = true;
+
+/**
+ * Overrides video-frame extraction for tests.
+ *
+ * @param impl - Replacement extractor, or `null` to restore the default.
+ * @returns No return value.
+ * @internal
+ */
+export function __setExtractVideoFrames(impl: typeof extractVideoFrames | null): void {
+  extractVideoFramesImpl = impl ?? extractVideoFrames;
+}
+
+/**
+ * Overrides video-soundtrack sidecar resolution for tests.
+ *
+ * @param impl - Replacement resolver, or `null` to restore the default.
+ * @returns No return value.
+ * @internal
+ */
+export function __setResolveVideoAudioSidecar(impl: typeof resolveVideoAudioSidecar | null): void {
+  resolveVideoAudioSidecarImpl = impl ?? resolveVideoAudioSidecar;
+}
+
+/**
+ * Overrides whether `input_video` piped-ffmpeg fallback is allowed.
+ *
+ * @param allow - Replacement flag, or `null` to restore the platform default.
+ * @returns No return value.
+ * @internal
+ */
+export function __setAllowPipedVideo(allow: boolean | null): void {
+  allowPipedVideoOverride = allow;
+}
+
+/**
+ * Overrides whether video attachments use native `input_video` instead of stills.
+ *
+ * @param value - Replacement flag, or `null` to restore the default (`true`).
+ * @returns No return value.
+ * @internal
+ */
+export function __setPreferNativeInputVideo(value: boolean | null): void {
+  preferNativeInputVideo = value ?? true;
+}
+
+/**
+ * Returns whether llama.cpp `input_video` may be used as a stills-path fallback.
+ *
+ * @returns `true` when a raw `input_video` part is a safe fallback.
+ */
+export function allowPipedVideoInput(): boolean {
+  if (allowPipedVideoOverride !== null) return allowPipedVideoOverride;
+  return process.platform !== "win32";
+}
+
+/**
+ * Returns whether video attachments should be forwarded as `input_video` parts.
+ *
+ * @returns `true` when still-frame sampling is skipped.
+ */
+export function prefersNativeInputVideo(): boolean {
+  return preferNativeInputVideo;
+}
 
 // S8 fix: in-memory cache for extracted PDF text to avoid re-parsing on every generation
 type ResolvedAttachmentText = {
@@ -132,6 +214,20 @@ function resolveStoredAttachmentPath(relativePath: string): string | null {
 function toLocalMediaUrl(relativePath: string): string | null {
   const normalized = normalizeStoredAttachmentPath(relativePath);
   return normalized ? `file://${normalized}` : null;
+}
+
+/**
+ * Converts an absolute path under the app data root into a `file://` URL relative
+ * to llama-server's `--media-path`.
+ *
+ * @param absPath - Absolute filesystem path.
+ * @returns Relative `file://` URL, or `null` when the path escapes the app root.
+ */
+function toMediaPathUrlFromAbsolute(absPath: string): string | null {
+  const appRoot = getAppDataDir();
+  const relative = path.relative(appRoot, absPath).split(path.sep).join("/");
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return toLocalMediaUrl(relative);
 }
 
 /**
@@ -363,6 +459,117 @@ export async function processUpload(
 }
 
 /**
+ * Relative soundtrack path that sits beside a stored video attachment.
+ *
+ * @param videoRelativePath - Video `filePath` stored on the attachment row.
+ * @returns Relative WAV path, or `null` when the video path is unsafe.
+ */
+function expectedSoundtrackRelativePath(videoRelativePath: string): string | null {
+  const abs = resolveStoredAttachmentPath(videoRelativePath);
+  if (!abs) return null;
+  const audioAbs = videoAudioSidecarPaths(abs).audioPath;
+  const rel = path.relative(getAppDataDir(), audioAbs).split(path.sep).join("/");
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  return rel;
+}
+
+/**
+ * Finds a soundtrack attachment that already belongs to a video on the same message.
+ *
+ * @param attachments - Attachments currently associated with the message.
+ * @param video - Video whose soundtrack should be located.
+ * @returns Matching audio attachment, or `undefined` when none exists yet.
+ */
+function findExistingSoundtrack(
+  attachments: readonly Attachment[],
+  video: Attachment,
+): Attachment | undefined {
+  const expectedRel = expectedSoundtrackRelativePath(video.filePath);
+  if (!expectedRel) return undefined;
+  return attachments.find((attachment) => attachment.filePath === expectedRel);
+}
+
+/**
+ * Inserts a cached video soundtrack as a real `attachments` row when missing.
+ * The WAV file is not copied; the row points at the existing sidecar path.
+ *
+ * @param video - Parent video attachment.
+ * @param audioAbs - Absolute path of the cached WAV.
+ * @returns Attachment metadata for the soundtrack.
+ */
+function persistVideoSoundtrackAttachment(video: Attachment, audioAbs: string): Attachment {
+  const relPath = path.relative(getAppDataDir(), audioAbs).split(path.sep).join("/");
+  if (!relPath || relPath.startsWith("..") || path.isAbsolute(relPath)) {
+    throw new Error(`Soundtrack path escaped the app data directory: ${audioAbs}`);
+  }
+
+  const videoStem = path.parse(video.fileName).name || path.parse(video.filePath).name;
+  const fileName = `${videoStem}${EXTRACTED_AUDIO_SUFFIX}`;
+  const db = getDb();
+  const existing = db
+    .query<
+      {
+        id: string;
+        messageId: string;
+        mimeType: string;
+        filePath: string;
+        fileName: string;
+        virBudget: number | null;
+        createdAt: number;
+      },
+      [string, string]
+    >(
+      "SELECT id, message_id as messageId, mime_type as mimeType, file_path as filePath, file_name as fileName, vir_budget as virBudget, created_at as createdAt FROM attachments WHERE message_id = ? AND file_path = ?",
+    )
+    .get(video.messageId, relPath);
+  if (existing) {
+    return {
+      id: existing.id,
+      messageId: existing.messageId,
+      mimeType: existing.mimeType,
+      filePath: existing.filePath,
+      fileName: existing.fileName,
+      createdAt: existing.createdAt,
+      ...(existing.virBudget != null ? { virBudget: existing.virBudget } : {}),
+    };
+  }
+
+  const attachment: Attachment = {
+    id: Bun.randomUUIDv7(),
+    messageId: video.messageId,
+    mimeType: "audio/wav",
+    filePath: relPath,
+    fileName,
+    createdAt: Date.now(),
+  };
+
+  const messageExists = db
+    .query<{ id: string }, [string]>("SELECT id FROM messages WHERE id = ?")
+    .get(video.messageId);
+  if (!messageExists) {
+    logWarn("Skipping soundtrack attachment persist because the parent message is missing", {
+      messageId: video.messageId,
+      filePath: relPath,
+    });
+    return attachment;
+  }
+
+  db.prepare(
+    "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(
+    attachment.id,
+    attachment.messageId,
+    attachment.mimeType,
+    attachment.filePath,
+    attachment.fileName,
+    null,
+    attachment.createdAt,
+  );
+  logInfo(`Persisted extracted video soundtrack attachment ${relPath}`);
+  return attachment;
+}
+
+/**
  * Builds the content parts array for a multimodal LLM API request.
  * Converts mixed text and attachment objects into the appropriate nested JSON objects required by completions.
  *
@@ -387,6 +594,24 @@ export async function buildContentParts(
   let finalString = "";
   const parts: ChatContentPart[] = [];
   const extractedTextAttachments: ProcessedAttachment[] = [];
+  let includeVideoAudio: boolean | undefined;
+
+  /**
+   * Resolves whether extracted video soundtracks should be sent with `input_video`.
+   * Skips settings I/O when the loaded model has no audio encoder.
+   *
+   * @returns `true` when the global toggle is on and the model can consume audio.
+   */
+  async function shouldIncludeVideoAudio(): Promise<boolean> {
+    if (includeVideoAudio !== undefined) return includeVideoAudio;
+    if (metadata && !metadata.hasAudioEncoder) {
+      includeVideoAudio = false;
+      return false;
+    }
+    const settings = await loadSettings();
+    includeVideoAudio = settings.includeVideoAudio === true;
+    return includeVideoAudio;
+  }
 
   /**
    * Checks whether attachment text has already been embedded into the stored message body.
@@ -508,6 +733,7 @@ export async function buildContentParts(
         if (a.mimeType.startsWith("image/") && metadata && !metadata.hasVisionEncoder) continue;
         if (a.mimeType.startsWith("audio/") && metadata && !metadata.hasAudioEncoder) continue;
         if (a.mimeType.startsWith("video/") && metadata && !metadata.hasVisionEncoder) continue;
+        if (isExtractedVideoAudioAttachment(a) && !(await shouldIncludeVideoAudio())) continue;
 
         const url = toLocalMediaUrl(a.filePath);
         if (!url) {
@@ -516,6 +742,24 @@ export async function buildContentParts(
         }
         const isAudio = a.mimeType.startsWith("audio/");
         const isVideo = a.mimeType.startsWith("video/");
+        if (isVideo && !preferNativeInputVideo) {
+          const frames = await extractVideoFramesImpl(absPath, path.dirname(absPath));
+          if (frames.length > 0) {
+            for (const framePath of frames) {
+              const frameUrl = toMediaPathUrlFromAbsolute(framePath);
+              if (!frameUrl) continue;
+              parts.push({ type: "image_url", image_url: { url: frameUrl } });
+            }
+            logInfo(`Sampled ${frames.length} video frames from ${url}`);
+            continue;
+          }
+          if (!allowPipedVideoInput()) {
+            logWarn(
+              `Skipping piped input_video for ${a.filePath} because ffmpeg frame extraction failed. Installing ffmpeg and retrying avoids a llama.cpp video-probe deadlock on Windows.`,
+            );
+            continue;
+          }
+        }
         const mediaPart: ChatContentPart = isAudio
           ? { type: "input_audio", input_audio: { url } }
           : isVideo
@@ -523,6 +767,25 @@ export async function buildContentParts(
             : { type: "image_url", image_url: { url } };
         logInfo(`Pushing media URL path: ${url}`);
         parts.push(mediaPart);
+        if (mediaPart.type === "input_video" && (await shouldIncludeVideoAudio())) {
+          try {
+            if (!findExistingSoundtrack(attachments, a)) {
+              const audioAbs = await resolveVideoAudioSidecarImpl(absPath);
+              if (audioAbs) {
+                const soundtrack = persistVideoSoundtrackAttachment(a, audioAbs);
+                const audioUrl = toLocalMediaUrl(soundtrack.filePath);
+                if (!audioUrl) {
+                  logWarn(`Invalid extracted video audio path: ${soundtrack.filePath}`);
+                } else {
+                  logInfo(`Pushing extracted video audio URL path: ${audioUrl}`);
+                  parts.push({ type: "input_audio", input_audio: { url: audioUrl } });
+                }
+              }
+            }
+          } catch (audioError) {
+            logWarn(`Failed resolving extracted audio for video: ${a.filePath}`, audioError);
+          }
+        }
       } catch (e) {
         logWarn(`Failed resolving attachment file: ${a.filePath}`, e);
       }

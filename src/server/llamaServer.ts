@@ -6,15 +6,21 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { LlamaServerStatus, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
-import { applyImageTokenBatchFloor } from "../shared/imageTokens";
 import { type Subprocess, spawn } from "bun";
+import { clampVideoFps, DEFAULT_VIDEO_FPS } from "../shared/defaults";
+import { ensureGemma4GenerationOpensThought } from "../shared/gemma4ChatTemplate";
+import { applyImageTokenBatchFloor, resolveImageMinTokens } from "../shared/imageTokens";
+import { isGemma4Architecture } from "../shared/thinkingTags";
+import type { LlamaServerStatus, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
+import { parseGgufMetadata } from "./ggufReader";
 import { logDebug, logError, logInfo, logWarn, shouldEmitLog } from "./logger";
 import { getAppDataDir } from "./persistence/db";
 import { findFreePort } from "./utils/network";
 import { broadcastLoadProgress, broadcastLog, broadcastStatus } from "./wsHub";
 
 let proc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
+/** PID of the spawned llama-server, kept until the process tree is confirmed dead. */
+let activeServerPid: number | null = null;
 let activePort: number | null = null;
 let currentConfig: ModelLoadConfig | null = null;
 let currentThinkingTagOverride: ThinkingTagConfig | undefined;
@@ -173,12 +179,91 @@ function cancelActiveLogReaders(): void {
 }
 
 /**
+ * Terminates a llama-server PID and its child processes.
+ * Windows does not honor POSIX signals on `llama-server.exe`, so the process
+ * tree is killed with `taskkill`.
+ *
+ * @param pid - OS process id of the spawned llama-server, or `null` when unknown.
+ * @param force - When true, use SIGKILL / `taskkill /F`.
+ * @returns No return value.
+ */
+function killProcessTree(pid: number | null, force: boolean): void {
+  if (pid === null) {
+    return;
+  }
+  if (process.platform === "win32") {
+    const cmd = force
+      ? ["taskkill", "/PID", String(pid), "/T", "/F"]
+      : ["taskkill", "/PID", String(pid), "/T"];
+    Bun.spawnSync({
+      cmd,
+      stdout: "ignore",
+      stderr: "ignore",
+      windowsHide: true,
+    });
+    return;
+  }
+  try {
+    process.kill(pid, force ? "SIGKILL" : "SIGTERM");
+  } catch {
+    // Process already exited.
+  }
+}
+
+/**
+ * Synchronously kills any still-tracked llama-server process tree.
+ * Used from process-exit hooks where async unload cannot run.
+ *
+ * @returns No return value.
+ */
+function killSpawnedServerSync(): void {
+  if (activeServerPid === null) {
+    return;
+  }
+  killProcessTree(activeServerPid, true);
+  activeServerPid = null;
+}
+
+let exitHooksInstalled = false;
+
+/**
+ * Registers process-exit hooks so a crashed or interrupted test run cannot leave
+ * llama-server.exe (or its children) listening on a local port.
+ *
+ * @returns No return value.
+ */
+function installProcessExitHooks(): void {
+  if (exitHooksInstalled) {
+    return;
+  }
+  exitHooksInstalled = true;
+  process.on("exit", () => {
+    killSpawnedServerSync();
+  });
+}
+
+installProcessExitHooks();
+
+/**
  * Retrieves the raw Bun subprocess instance.
  *
  * @returns The current {@link Subprocess} or null if no model is loaded.
  */
 export function getProc() {
   return proc;
+}
+
+/**
+ * Returns the OS PID of the active llama-server process.
+ *
+ * Prefers the live Bun subprocess PID and falls back to the PID retained until
+ * the process tree is confirmed dead, so memory sampling still works if the
+ * Subprocess handle has already been cleared.
+ *
+ * @returns llama-server PID, or `null` when no model process is tracked.
+ */
+export function getActiveServerPid(): number | null {
+  return proc?.pid ?? activeServerPid;
 }
 
 /**
@@ -227,23 +312,35 @@ export function getActiveThinkingTagOverride(): ThinkingTagConfig | undefined {
 
 /**
  * Builds the CLI argument array for llama-server from a ModelLoadConfig.
- * Flags are emitted from documented llama-server options; optional fields such as
- * `--image-min-tokens` are included only when the user sets them.
+ * Flags are emitted from documented llama-server options.
+ * `--image-min-tokens` is always emitted alongside `--image-max-tokens` (default 70).
+ * `--video-fps` is always emitted (default 4).
+ * Gemma 4 receives an `n_ubatch >= n_tokens` floor; other architectures keep the
+ * configured `--ubatch-size`. Gemma 4 also gets `--reasoning on` because this
+ * process never passes `--reasoning`, and llama-server's implicit default is
+ * `auto`. `--parallel 1` and `--no-webui` are hardcoded: this
+ * app is a single-slot CLI wrapper and never serves llama-server's built-in Web UI.
  *
  * @param config - The load configuration.
  * @param port - The port to bind to.
+ * @param architecture - GGUF architecture used to apply the Gemma 4 ubatch floor.
  * @returns Ordered array of CLI arguments.
  * @example
  * ```typescript
  * const args = buildArgs({ modelPath: "/path/to/model", contextSize: 2048 }, 8080);
  * ```
  */
-export function buildArgs(config: ModelLoadConfig, port: number): readonly string[] {
+export function buildArgs(
+  config: ModelLoadConfig,
+  port: number,
+  architecture?: string,
+): readonly string[] {
   const appRoot = getAppDataDir();
   const { batchSize, microBatchSize } = applyImageTokenBatchFloor(
     config.batchSize,
     config.microBatchSize,
     config.imageMaxTokens,
+    architecture,
   );
   const args: string[] = [
     "--model",
@@ -252,6 +349,10 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
     String(port),
     "--host",
     "127.0.0.1",
+    "--parallel",
+    "1",
+    "--no-webui",
+    ...(isGemma4Architecture(architecture) ? (["--reasoning", "on"] as const) : []),
     "--ctx-size",
     String(config.contextSize),
     ...(config.contextShift ? ["--context-shift"] : ["--no-context-shift"]),
@@ -324,10 +425,13 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
 
   if (config.imageMaxTokens !== undefined) {
     args.push("--image-max-tokens", String(config.imageMaxTokens));
-    if (config.imageMinTokens !== undefined) {
-      args.push("--image-min-tokens", String(config.imageMinTokens));
-    }
+    args.push(
+      "--image-min-tokens",
+      String(resolveImageMinTokens(config.imageMaxTokens, config.imageMinTokens)),
+    );
   }
+
+  args.push("--video-fps", String(clampVideoFps(config.videoFps ?? DEFAULT_VIDEO_FPS)));
 
   if (config.kvUnified !== undefined) {
     args.push(config.kvUnified ? "--kv-unified" : "--no-kv-unified");
@@ -354,6 +458,57 @@ export function buildArgs(config: ModelLoadConfig, port: number): readonly strin
   args.push("--media-path", appRoot);
 
   return args;
+}
+
+/**
+ * Reads `general.architecture` from a GGUF header without failing the load sequence.
+ *
+ * @param modelPath - Absolute path to the model being spawned.
+ * @returns Architecture string when the header is readable, otherwise `undefined`.
+ */
+async function readModelArchitecture(modelPath: string): Promise<string | undefined> {
+  try {
+    const metadata = await parseGgufMetadata(modelPath);
+    return metadata.architecture;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logDebug("Could not read GGUF architecture before spawn", { modelPath, message });
+    return undefined;
+  }
+}
+
+/**
+ * Resolves the Jinja body written to `--chat-template-file` for this spawn.
+ *
+ * Load-preset overrides win. Gemma 4 also reads the GGUF template when no
+ * override is set so {@link ensureGemma4GenerationOpensThought} can open a
+ * thought channel on follow-up turns.
+ *
+ * @param config - Load configuration for this spawn.
+ * @param architecture - GGUF `general.architecture`, when readable.
+ * @returns Template source to write, or `undefined` to use llama-server's GGUF default.
+ */
+export async function resolveChatTemplateForSpawn(
+  config: ModelLoadConfig,
+  architecture?: string,
+): Promise<string | undefined> {
+  let template = config.chatTemplateContent;
+  if (template === undefined && isGemma4Architecture(architecture)) {
+    try {
+      template = (await parseGgufMetadata(config.modelPath)).chatTemplate;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      logWarn("Could not read Gemma 4 GGUF chat template for follow-up thinking patch", {
+        modelPath: config.modelPath,
+        message,
+      });
+    }
+  }
+  if (template === undefined) return undefined;
+  if (isGemma4Architecture(architecture)) {
+    return ensureGemma4GenerationOpensThought(template);
+  }
+  return template;
 }
 
 /**
@@ -442,18 +597,17 @@ export async function loadModel(
 
     const persistedConfig: ModelLoadConfig = { ...config };
 
-    if (config.chatTemplateContent !== undefined) {
-      tempJinjaPath = path.join(os.tmpdir(), `llamaforge-chat-template-${Date.now()}.jinja`);
-      await Bun.write(tempJinjaPath, config.chatTemplateContent);
-    }
-
     currentConfig = persistedConfig;
-    activeTempJinjaPath = tempJinjaPath;
     currentThinkingTagOverride = thinkingTagOverride;
-    const args = [...buildArgs(persistedConfig, port)];
-    if (tempJinjaPath) {
+    const architecture = await readModelArchitecture(persistedConfig.modelPath);
+    const args = [...buildArgs(persistedConfig, port, architecture)];
+    const templateToLoad = await resolveChatTemplateForSpawn(persistedConfig, architecture);
+    if (templateToLoad !== undefined) {
+      tempJinjaPath = path.join(os.tmpdir(), `llamaforge-chat-template-${Date.now()}.jinja`);
+      await Bun.write(tempJinjaPath, templateToLoad);
       args.push("--chat-template-file", tempJinjaPath);
     }
+    activeTempJinjaPath = tempJinjaPath;
     logInfo("Spawning llama-server", { command: llamaServerBin });
 
     const fullCmd = [llamaServerBin, ...args];
@@ -466,6 +620,7 @@ export async function loadModel(
       stdin: "ignore",
     });
     const targetProc = proc;
+    activeServerPid = targetProc.pid ?? null;
 
     activePort = port;
 
@@ -557,25 +712,82 @@ async function waitForHealthCheck(
 }
 
 /**
- * Performs a quiet HTTP health probe without using fetch so expected startup
- * connection refusals and 503 responses do not leak noisy console output.
+ * Performs a quiet HTTP health probe over a raw TCP socket so expected startup
+ * connection refusals and 503 responses do not leak noisy console output and so
+ * the probe cannot be intercepted by tests that replace `globalThis.fetch`.
  *
  * @param port - Localhost port exposed by the candidate llama-server process.
  * @returns `true` when the health endpoint responds with a 2xx status.
  */
 function probeHealthEndpoint(port: number): Promise<boolean> {
-  return fetch(`http://127.0.0.1:${port}/health`, {
-    signal: AbortSignal.timeout(1000),
-    keepalive: false,
-    headers: {
-      Connection: "close",
-    },
-  })
-    .then((response) => {
-      void response.body?.cancel();
-      return response.ok;
-    })
-    .catch(() => false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resolve(ok);
+    };
+
+    let received = "";
+    const request = `GET /health HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`;
+    const timeout = setTimeout(() => {
+      finish(false);
+    }, 1000);
+
+    void Bun.connect({
+      hostname: "127.0.0.1",
+      port,
+      socket: {
+        open(socket) {
+          socket.write(request);
+        },
+        data(_socket, data) {
+          received += new TextDecoder().decode(data);
+        },
+        end() {
+          clearTimeout(timeout);
+          finish(httpStatusIsSuccess(received));
+        },
+        close() {
+          clearTimeout(timeout);
+          finish(httpStatusIsSuccess(received));
+        },
+        error() {
+          clearTimeout(timeout);
+          finish(false);
+        },
+        connectError() {
+          clearTimeout(timeout);
+          finish(false);
+        },
+        timeout() {
+          clearTimeout(timeout);
+          finish(false);
+        },
+      },
+    }).catch(() => {
+      clearTimeout(timeout);
+      finish(false);
+    });
+  });
+}
+
+/**
+ * Reads the HTTP status code from a raw response buffer and reports success.
+ *
+ * @param raw - Bytes received from llama-server as UTF-8 text.
+ * @returns `true` when the status is in the 2xx range.
+ */
+function httpStatusIsSuccess(raw: string): boolean {
+  const statusLine = raw.split("\r\n")[0] ?? "";
+  const match = /HTTP\/\d(?:\.\d)?\s+(\d{3})/.exec(statusLine);
+  if (!match) {
+    return false;
+  }
+  const code = Number(match[1]);
+  return code >= 200 && code < 300;
 }
 
 /**
@@ -691,30 +903,29 @@ export function requestUnloadModel(): Promise<void> {
     }
 
     const target = proc;
+    const pid = activeServerPid ?? target.pid ?? null;
     resetLoadedModelState();
     cancelActiveLogReaders();
 
     try {
-      try {
-        target.kill(15); // SIGTERM
-      } catch (_e) {
-        // Ignore error if process is already dead
-      }
-
-      // Wait up to 15s for graceful shutdown
-      for (let i = 0; i < 60; i++) {
-        if (target.exitCode !== null) break;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-      if (target.exitCode === null) {
-        logWarn("Forcing server termination (SIGKILL)");
-        try {
-          target.kill(9); // SIGKILL
-        } catch (_e) {
-          // Ignore
+      if (process.platform === "win32") {
+        killProcessTree(pid, true);
+        for (let i = 0; i < 40 && target.exitCode === null; i++) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      } else {
+        killProcessTree(pid, false);
+        for (let i = 0; i < 60; i++) {
+          if (target.exitCode !== null) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        if (target.exitCode === null) {
+          logWarn("Forcing server termination");
+          killProcessTree(pid, true);
         }
       }
     } finally {
+      activeServerPid = null;
       const tempPath = activeTempJinjaPath;
       activeTempJinjaPath = undefined;
       if (tempPath) {
