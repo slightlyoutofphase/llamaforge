@@ -1315,6 +1315,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                   fileSizeBytes: 0,
                   hasVisionEncoder: false,
                   hasAudioEncoder: false,
+                  hasToolCalling: false,
                   isDraftModel: false,
                   contextLength: undefined,
                   embeddingLength: undefined,

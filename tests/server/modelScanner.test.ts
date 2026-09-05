@@ -23,6 +23,7 @@ const baseMockMetadata = {
   quantType: "q4_0",
   hasVisionEncoder: false,
   hasAudioEncoder: false,
+  hasToolCalling: false,
   defaultTemperature: 0.8,
   defaultTopK: 40,
   defaultTopP: 0.95,

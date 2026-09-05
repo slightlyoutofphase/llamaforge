@@ -5,6 +5,7 @@
  */
 
 import { resolveInferencePreset } from "@shared/inferencePresetResolve.js";
+import { chatTemplateSupportsToolCalling } from "@shared/templateCapabilities.js";
 import { parseToolCallsJson } from "@shared/toolCalls.js";
 import type { ChatMessage } from "@shared/types.js";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -201,6 +202,20 @@ export function ChatView() {
   const sendMessage = useAppStore((s) => s.sendMessage);
   const stopGeneration = useAppStore((s) => s.stopGeneration);
   const loadedModel = useAppStore((s) => s.loadedModel);
+  const loadedConfig = useAppStore((s) => s.loadedConfig);
+  const toolsCapable = useMemo(
+    () =>
+      chatTemplateSupportsToolCalling(
+        loadedConfig?.chatTemplateContent,
+        loadedModel?.metadata?.chatTemplate,
+        loadedModel?.metadata?.hasToolCalling,
+      ),
+    [
+      loadedConfig?.chatTemplateContent,
+      loadedModel?.metadata?.chatTemplate,
+      loadedModel?.metadata?.hasToolCalling,
+    ],
+  );
   const setError = useAppStore((s) => s.setError);
   const errorMessage = useAppStore((s) => s.errorMessage);
   const isConnected = useAppStore((s) => s.isConnected);
@@ -758,6 +773,12 @@ export function ChatView() {
                 <div
                   className="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse"
                   title="Audio Capable"
+                />
+              )}
+              {toolsCapable && (
+                <div
+                  className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"
+                  title="Tool Calling Capable"
                 />
               )}
             </div>

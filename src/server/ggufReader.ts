@@ -3,6 +3,7 @@
  * GGUF metadata parsing using @huggingface/gguf.
  */
 import { gguf } from "@huggingface/gguf";
+import { templateSupportsToolCalling } from "../shared/templateCapabilities";
 import type { GgufDisplayMetadata } from "../shared/types";
 
 const QUANT_NAMES: Record<number, string> = {
@@ -80,6 +81,11 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
       .toLowerCase()
       .includes("audio");
 
+  const chatTemplate =
+    typeof metadata?.["tokenizer.chat_template"] === "string"
+      ? (metadata["tokenizer.chat_template"] as string)
+      : undefined;
+
   return {
     architecture: arch,
     name: String(metadata?.["general.name"] || "Unknown"),
@@ -107,6 +113,7 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
         : undefined,
     hasVisionEncoder: hasVision,
     hasAudioEncoder: hasAudio,
+    hasToolCalling: templateSupportsToolCalling(chatTemplate),
     isDraftModel: false,
     defaultTemperature:
       typeof metadata?.["tokenizer.ggml.sampling.temperature"] === "number"
@@ -140,9 +147,6 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
         : typeof metadata?.["general.sampling.penalty_repeat"] === "number"
           ? (metadata["general.sampling.penalty_repeat"] as number)
           : undefined,
-    chatTemplate:
-      typeof metadata?.["tokenizer.chat_template"] === "string"
-        ? (metadata["tokenizer.chat_template"] as string)
-        : undefined,
+    chatTemplate,
   };
 }

@@ -27,6 +27,16 @@ mock.module("@huggingface/gguf", () => {
           },
         };
       }
+      if (path === "tools-template.gguf") {
+        return {
+          metadata: {
+            "general.architecture": "gemma4",
+            "general.name": "Tool Model",
+            "tokenizer.chat_template":
+              "{%- if tools %}{% for tool in tools %}{{ tool.function.name }}{% endfor %}{% endif %}{% for message in messages %}{% if message.tool_calls %}{{ message.tool_calls }}{% endif %}{{ message.content }}{% endfor %}",
+          },
+        };
+      }
       return {
         metadata: {
           "general.architecture": "llama",
@@ -54,6 +64,12 @@ describe("ggufReader", () => {
     expect(meta.blockCount).toBe(24);
     expect(meta.defaultTemperature).toBe(0.7);
     expect(meta.chatTemplate).toContain("message.role");
+    expect(meta.hasToolCalling).toBe(false);
+  });
+
+  it("sets hasToolCalling from a Jinja template that describes tools and tool_calls", async () => {
+    const meta = await parseGgufMetadata("tools-template.gguf");
+    expect(meta.hasToolCalling).toBe(true);
   });
 
   it("successfully parses general.sampling.temp fallback", async () => {

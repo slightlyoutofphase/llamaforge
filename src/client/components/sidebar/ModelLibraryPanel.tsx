@@ -3,6 +3,7 @@
  * Provides the model library panel for browsing and loading GGUF models.
  */
 
+import { metadataHasToolCalling } from "../../../shared/templateCapabilities";
 import type { ChatMessage, LoadModelRequest, LoadPreset } from "../../../shared/types";
 import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
@@ -253,6 +254,11 @@ export function ModelLibraryPanel() {
                           {model.metadata?.hasAudioEncoder && (
                             <span className="bg-purple-500/10 text-purple-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-purple-500/20 uppercase tracking-wider max-w-full break-words">
                               Audio
+                            </span>
+                          )}
+                          {metadataHasToolCalling(model.metadata) && (
+                            <span className="bg-amber-500/10 text-amber-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-amber-500/20 uppercase tracking-wider max-w-full break-words">
+                              Tools
                             </span>
                           )}
                           {model.modelName.toLowerCase().includes("mtp") && (

@@ -129,6 +129,8 @@ describe("ModelSelector Component", () => {
             quantType: "q4_0",
             hasVisionEncoder: true,
             hasAudioEncoder: false,
+            hasToolCalling: true,
+            isDraftModel: false,
             defaultTemperature: 0.8,
             defaultTopK: 40,
             defaultTopP: 0.95,
@@ -156,6 +158,7 @@ describe("ModelSelector Component", () => {
     expect(screen.getByText("gemma4")).toBeTruthy();
     expect(screen.getByText("0.11 GB")).toBeTruthy();
     expect(screen.getByText("VISION ENABLED")).toBeTruthy();
+    expect(screen.getByText("TOOLS ENABLED")).toBeTruthy();
     expect(screen.queryByText("Unknown Architecture")).toBeNull();
     expect(screen.queryByText("Unknown Size")).toBeNull();
   });
@@ -182,6 +185,8 @@ describe("ModelSelector Component", () => {
             quantType: "q4_0",
             hasVisionEncoder: false,
             hasAudioEncoder: false,
+            hasToolCalling: false,
+            isDraftModel: false,
             defaultTemperature: 0.8,
             defaultTopK: 40,
             defaultTopP: 0.95,

@@ -7,24 +7,8 @@
  * Converts JSON Schema to GBNF (Grammar-Based Network Format) using json2gbnf.
  */
 import json2gbnf from "json2gbnf";
-import { all, create } from "mathjs";
 import { logError } from "./logger";
-
-if (!all) {
-  throw new Error("mathjs factory map is unavailable.");
-}
-const math = create(all);
-math.import(
-  {
-    import: () => {
-      throw new Error("Function import is disabled");
-    },
-    createUnit: () => {
-      throw new Error("Function createUnit is disabled");
-    },
-  },
-  { override: true },
-);
+import { getExecutableTool } from "./toolRegistry";
 
 /**
  * Converts a JSON Schema object into a GBNF grammar string for constrained model output.
@@ -153,7 +137,27 @@ export function resolveToolApproval(
 }
 
 /**
- * Executes a built-in tool function.
+ * Serializes a tool `execute` return value into the string stored on a tool message.
+ *
+ * @param result - Value returned by a tool module's `execute` function.
+ * @returns JSON string payload for the tool role message.
+ */
+function serializeToolResult(result: unknown): string {
+  if (typeof result === "string") {
+    return result;
+  }
+  if (result === undefined) {
+    return JSON.stringify({ result: null });
+  }
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return JSON.stringify({ error: "Tool result could not be serialized." });
+  }
+}
+
+/**
+ * Executes a discovered built-in or user TypeScript tool.
  *
  * @param name - The name of the tool to execute.
  * @param args - The JSON stringified arguments for the tool.
@@ -171,19 +175,14 @@ export async function executeTool(name: string, args: string): Promise<string> {
     return JSON.stringify({ error: "Malformed tool arguments: invalid JSON." });
   }
 
-  if (name === "get_datetime") {
-    return JSON.stringify({ result: new Date().toISOString() });
+  const tool = await getExecutableTool(name);
+  if (!tool) {
+    return JSON.stringify({ error: `Tool ${name} not found.` });
   }
 
-  if (name === "calculate") {
-    try {
-      const expression = String(parsedArgs["expression"]);
-      const result = math.evaluate(expression);
-      return JSON.stringify({ result });
-    } catch (e) {
-      return JSON.stringify({ error: String(e) });
-    }
+  try {
+    return serializeToolResult(await tool.execute(parsedArgs));
+  } catch (error: unknown) {
+    return JSON.stringify({ error: error instanceof Error ? error.message : String(error) });
   }
-
-  return JSON.stringify({ error: `Tool ${name} not found.` });
 }

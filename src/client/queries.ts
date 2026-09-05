@@ -13,6 +13,7 @@ export const queryKeys = {
   presetsLoad: () => ["presets", "load"] as const,
   presetsInference: () => ["presets", "inference"] as const,
   presetsSystem: () => ["presets", "system"] as const,
+  tools: () => ["tools"] as const,
   chats: (q?: string) => ["chats", { q }] as const,
   chat: (id: string) => ["chat", id] as const,
   settings: () => ["settings"] as const,
@@ -190,6 +191,18 @@ export function useInferencePresets() {
   return useQuery({
     queryKey: queryKeys.presetsInference(),
     queryFn: api.fetchInferencePresets,
+  });
+}
+
+/**
+ * Hook to retrieve built-in and user TypeScript tools the server can execute.
+ *
+ * @returns A query object containing the tool catalog and search directories.
+ */
+export function useAvailableTools() {
+  return useQuery({
+    queryKey: queryKeys.tools(),
+    queryFn: api.fetchAvailableTools,
   });
 }
 

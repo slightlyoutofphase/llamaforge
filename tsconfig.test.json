@@ -4,10 +4,7 @@
     "rootDir": ".",
     "noEmit": true,
     "types": ["bun-types"],
-    "lib": ["ESNext", "DOM", "DOM.Iterable"],
-    "exactOptionalPropertyTypes": false,
-    "noUncheckedIndexedAccess": false,
-    "noPropertyAccessFromIndexSignature": false
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
   },
   "include": ["tests/**/*.ts", "tests/**/*.tsx"],
   "exclude": ["node_modules", "dist"]

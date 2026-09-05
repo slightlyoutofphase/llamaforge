@@ -119,6 +119,26 @@ describe("router", () => {
     expect(body).toBeDefined();
   });
 
+  it("GET /api/tools lists built-in and user TypeScript tools", async () => {
+    const router = createRouter();
+    const res = await router.fetch(new Request("http://localhost/api/tools"), {});
+    expect(res?.status).toBe(200);
+    const body = (await res?.json()) as {
+      tools?: Array<{ name?: string; source?: string; execute?: unknown }>;
+      directories?: string[];
+    };
+    const names = (body.tools ?? []).map((tool) => tool.name);
+    expect(names).toContain("get_datetime");
+    expect(names).toContain("calculate");
+    expect(names).toContain("echo_text");
+    expect(body.tools?.some((tool) => tool.name === "echo_text" && tool.source === "user")).toBe(
+      true,
+    );
+    expect(body.tools?.some((tool) => "execute" in tool && tool.execute !== undefined)).toBe(false);
+    expect(Array.isArray(body.directories)).toBe(true);
+    expect(body.directories?.some((directory) => directory.endsWith("tools"))).toBe(true);
+  });
+
   it("JSON API responses close the connection for direct browser clients", async () => {
     const router = createRouter();
 
@@ -200,6 +220,7 @@ describe("router", () => {
       quantType: undefined,
       hasVisionEncoder: false,
       hasAudioEncoder: false,
+      hasToolCalling: false,
       defaultTemperature: undefined,
       defaultTopK: undefined,
       defaultTopP: undefined,
@@ -262,6 +283,7 @@ describe("router", () => {
         quantType: undefined,
         hasVisionEncoder: false,
         hasAudioEncoder: false,
+        hasToolCalling: false,
         defaultTemperature: undefined,
         defaultTopK: undefined,
         defaultTopP: undefined,

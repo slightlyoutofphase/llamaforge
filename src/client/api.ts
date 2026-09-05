@@ -4,7 +4,13 @@
  * All functions return promises and throw Errors on non-OK responses.
  */
 
-import type { AppSettings, InferencePreset, LoadPreset, SystemPromptPreset } from "../shared/types";
+import type {
+  AppSettings,
+  AvailableTool,
+  InferencePreset,
+  LoadPreset,
+  SystemPromptPreset,
+} from "../shared/types";
 import { request } from "./http";
 
 /**
@@ -70,6 +76,28 @@ export async function deleteLoadPreset(id: string): Promise<void> {
 export async function fetchInferencePresets(): Promise<InferencePreset[]> {
   const res = await fetch("/api/presets/inference");
   if (!res.ok) throw new Error("Failed to fetch inference presets");
+  return res.json();
+}
+
+/**
+ * Catalog of executable TypeScript tools discovered by the server.
+ */
+export interface AvailableToolsResponse {
+  /** Built-in and user tools the server can execute. */
+  tools: AvailableTool[];
+  /** Absolute directories scanned for user `*.ts` tool modules. */
+  directories: string[];
+}
+
+/**
+ * Fetches built-in and user TypeScript tools the server can execute.
+ *
+ * @returns A promise resolving to the tool catalog and search directories.
+ * @throws {Error} If the fetch fails.
+ */
+export async function fetchAvailableTools(): Promise<AvailableToolsResponse> {
+  const res = await fetch("/api/tools");
+  if (!res.ok) throw new Error("Failed to fetch tools");
   return res.json();
 }
 

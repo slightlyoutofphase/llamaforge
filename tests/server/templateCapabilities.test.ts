@@ -2,8 +2,13 @@ import { describe, expect, it } from "bun:test";
 import {
   analyzeLoadPresetChatTemplate,
   analyzeTemplateCapabilities,
+  analyzeToolCallingCapabilities,
+  chatTemplateSupportsToolCalling,
+  metadataHasToolCalling,
   modelPathsMatch,
   resolveChatTemplateForCapabilities,
+  templateSupportsToolCalling,
+  withToolCallingMetadata,
 } from "../../src/shared/templateCapabilities";
 
 describe("analyzeTemplateCapabilities", () => {
@@ -206,5 +211,120 @@ describe("analyzeLoadPresetChatTemplate", () => {
     const result = analyzeLoadPresetChatTemplate("{{ bos_token }}", "{{ bos_token }}");
     expect(result?.hasPreserveThinking).toBe(false);
     expect(result?.provenance).toBe("override");
+  });
+});
+
+const TOOL_CALLING_TEMPLATE = `
+{%- set tools = tools | default(none) -%}
+{%- if tools is not none -%}
+  {%- for tool in tools -%}
+    {{- tool.function.name }}
+  {%- endfor -%}
+{%- endif -%}
+{%- for message in messages -%}
+  {%- if message.tool_calls -%}
+    {%- for tool_call in message.tool_calls -%}
+      {{- tool_call.function.name }}
+    {%- endfor -%}
+  {%- endif -%}
+  {{- message.content }}
+{%- endfor -%}
+`;
+
+describe("analyzeToolCallingCapabilities", () => {
+  it("returns no support for empty or missing templates", () => {
+    expect(analyzeToolCallingCapabilities("")).toEqual({
+      supportsTools: false,
+      supportsToolCalls: false,
+    });
+    expect(analyzeToolCallingCapabilities(undefined)).toEqual({
+      supportsTools: false,
+      supportsToolCalls: false,
+    });
+    expect(templateSupportsToolCalling("")).toBe(false);
+  });
+
+  it("ignores a tools default binding that never describes functions", () => {
+    const template =
+      "{%- set tools = tools | default(none) -%}{{ bos_token }}{{ message.content }}";
+    expect(analyzeToolCallingCapabilities(template)).toEqual({
+      supportsTools: false,
+      supportsToolCalls: false,
+    });
+  });
+
+  it("ignores tools mentioned only in a Jinja comment", () => {
+    const template = "{# tools and tool_calls are unused here #}{{ bos_token }}";
+    expect(templateSupportsToolCalling(template)).toBe(false);
+  });
+
+  it("requires both a live tools input and tool_calls replay", () => {
+    expect(templateSupportsToolCalling("{%- if tools %}{{ tools }}{%- endif -%}")).toBe(false);
+    expect(
+      templateSupportsToolCalling("{%- if message.tool_calls %}{{ message.content }}{%- endif -%}"),
+    ).toBe(false);
+    expect(templateSupportsToolCalling(TOOL_CALLING_TEMPLATE)).toBe(true);
+  });
+
+  it("does not treat tool_calls as a tools description", () => {
+    expect(analyzeToolCallingCapabilities("{%- if message.tool_calls -%}x{%- endif -%}")).toEqual({
+      supportsTools: false,
+      supportsToolCalls: true,
+    });
+  });
+});
+
+describe("chatTemplateSupportsToolCalling", () => {
+  it("prefers the loaded override over the GGUF template and cached flag", () => {
+    expect(chatTemplateSupportsToolCalling(TOOL_CALLING_TEMPLATE, "{{ bos_token }}", false)).toBe(
+      true,
+    );
+    expect(chatTemplateSupportsToolCalling("{{ bos_token }}", TOOL_CALLING_TEMPLATE, true)).toBe(
+      false,
+    );
+  });
+
+  it("falls back to the GGUF template, then the cached flag", () => {
+    expect(chatTemplateSupportsToolCalling(undefined, TOOL_CALLING_TEMPLATE, false)).toBe(true);
+    expect(chatTemplateSupportsToolCalling(undefined, undefined, true)).toBe(true);
+    expect(chatTemplateSupportsToolCalling(undefined, undefined, false)).toBe(false);
+  });
+});
+
+describe("metadataHasToolCalling", () => {
+  it("trusts the stored flag when present", () => {
+    expect(metadataHasToolCalling({ hasToolCalling: true, chatTemplate: "{{ bos_token }}" })).toBe(
+      true,
+    );
+    expect(
+      metadataHasToolCalling({ hasToolCalling: false, chatTemplate: TOOL_CALLING_TEMPLATE }),
+    ).toBe(false);
+  });
+
+  it("derives the flag from a cache row that omitted it", () => {
+    expect(metadataHasToolCalling({ chatTemplate: TOOL_CALLING_TEMPLATE })).toBe(true);
+    expect(
+      withToolCallingMetadata({
+        architecture: "llama",
+        name: "cached",
+        fileSizeBytes: 1,
+        contextLength: undefined,
+        embeddingLength: undefined,
+        attentionHeadCount: undefined,
+        attentionHeadCountKv: undefined,
+        blockCount: undefined,
+        feedForwardLength: undefined,
+        quantType: undefined,
+        hasVisionEncoder: false,
+        hasAudioEncoder: false,
+        isDraftModel: false,
+        defaultTemperature: undefined,
+        defaultTopK: undefined,
+        defaultTopP: undefined,
+        defaultMinP: undefined,
+        defaultRepeatPenalty: undefined,
+        chatTemplate: TOOL_CALLING_TEMPLATE,
+      }).hasToolCalling,
+    ).toBe(true);
   });
 });

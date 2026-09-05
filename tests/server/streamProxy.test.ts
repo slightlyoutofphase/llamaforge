@@ -604,6 +604,7 @@ describe("streamProxy", () => {
       quantType: undefined,
       hasVisionEncoder: false,
       hasAudioEncoder: false,
+      hasToolCalling: false,
       defaultTemperature: undefined,
       defaultTopK: undefined,
       defaultTopP: undefined,

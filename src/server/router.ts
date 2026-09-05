@@ -19,6 +19,7 @@ import { populateMetadata, scanModels } from "./modelScanner";
 import { isAllowedMutationOrigin, isAllowedWebSocketOrigin, isMutatingMethod } from "./origin";
 import { getAppDataDir } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
+import { getUserToolDirectories, listAvailableTools } from "./toolRegistry";
 import { addConnection, getConnectionCount, recordPong, removeConnection } from "./wsHub";
 
 /**
@@ -564,6 +565,13 @@ export function createRouter() {
       if (req.method === "GET" && url.pathname === "/api/settings") {
         const s = await loadSettings();
         return jsonResponse(s);
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/tools") {
+        return jsonResponse({
+          tools: await listAvailableTools(),
+          directories: getUserToolDirectories(),
+        });
       }
 
       if (req.method === "PUT" && url.pathname === "/api/settings") {

@@ -10,6 +10,7 @@ import {
   isExtractedVideoAudioAttachment,
   videoAudioSidecarOwnerStem,
 } from "../../shared/extractedAudio";
+import { withToolCallingMetadata } from "../../shared/templateCapabilities";
 import { sanitizeToolCallsJson } from "../../shared/toolCalls";
 import type {
   Attachment,
@@ -851,7 +852,9 @@ export async function cachedGgufMetadata(
         "SELECT metadata_json FROM model_cache WHERE file_path = ? AND mtime = ? AND mmproj_path = ? AND mmproj_mtime = ?",
       )
       .get(filePath, mtime, mmprojPath, mmprojMtime);
-    return row ? JSON.parse(row.metadata_json) : null;
+    return row
+      ? withToolCallingMetadata(JSON.parse(row.metadata_json) as GgufDisplayMetadata)
+      : null;
   }
 
   const row = getDb()
@@ -859,7 +862,7 @@ export async function cachedGgufMetadata(
       "SELECT metadata_json FROM model_cache WHERE file_path = ? AND mtime = ?",
     )
     .get(filePath, mtime);
-  return row ? JSON.parse(row.metadata_json) : null;
+  return row ? withToolCallingMetadata(JSON.parse(row.metadata_json) as GgufDisplayMetadata) : null;
 }
 
 /**
@@ -874,7 +877,7 @@ export async function getMetadataForPath(filePath: string): Promise<GgufDisplayM
       "SELECT metadata_json FROM model_cache WHERE file_path = ? ORDER BY mtime DESC LIMIT 1",
     )
     .get(filePath);
-  return row ? JSON.parse(row.metadata_json) : null;
+  return row ? withToolCallingMetadata(JSON.parse(row.metadata_json) as GgufDisplayMetadata) : null;
 }
 
 /**

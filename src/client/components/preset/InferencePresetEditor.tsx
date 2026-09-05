@@ -7,26 +7,61 @@ import { json } from "@codemirror/lang-json";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import { BUILT_IN_TOOLS, isBuiltInToolName } from "../../../shared/builtInTools";
 import { createDefaultInferenceSampling } from "../../../shared/defaults";
-import type { InferencePreset, ToolDefinition } from "../../../shared/types";
+import { chatTemplateSupportsToolCalling } from "../../../shared/templateCapabilities";
+import { toStoredToolDefinition } from "../../../shared/toolModule";
+import type { AvailableTool, InferencePreset, ToolDefinition } from "../../../shared/types";
 import {
+  useAvailableTools,
   useCreateInferencePreset,
   useDeleteInferencePreset,
   useInferencePresets,
   useUpdateInferencePreset,
 } from "../../queries";
+import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
+
+type CatalogTool = ToolDefinition & {
+  source?: AvailableTool["source"];
+};
+
+/**
+ * Merges the live tool catalog with tools already stored on the inference preset.
+ * Discovered tools win so descriptions stay current; preset-only entries remain listed.
+ *
+ * @param available - Tools reported by the server, if loaded.
+ * @param presetTools - Tools currently enabled on the edited preset.
+ * @returns Unique tools in catalog order, then leftover preset tools.
+ */
+function catalogTools(
+  available: AvailableTool[] | undefined,
+  presetTools: ToolDefinition[],
+): CatalogTool[] {
+  const byName = new Map<string, CatalogTool>();
+  for (const tool of available ?? []) {
+    byName.set(tool.name, tool);
+  }
+  for (const tool of presetTools) {
+    if (!byName.has(tool.name)) {
+      byName.set(tool.name, tool);
+    }
+  }
+  return [...byName.values()];
+}
 
 /**
  * Component for managing and editing inference presets.
- * Includes sliders for sampling params, JSON editors for tools/schema, and lifecycle actions (new, duplicate, delete).
+ * Includes sliders for sampling params, a JSON editor for structured output, tool toggles, and lifecycle actions (new, duplicate, delete).
  *
  * @returns React functional component.
  */
 export function InferencePresetEditor() {
   const { setRightPanelView, activePresetId } = useUiStore();
   const { data: presets } = useInferencePresets();
+  const { data: toolsCatalog, isPending: toolsPending, isError: toolsError } = useAvailableTools();
+  const loadedModel = useAppStore((s) => s.loadedModel);
+  const loadedConfig = useAppStore((s) => s.loadedConfig);
+  const serverStatus = useAppStore((s) => s.serverStatus);
   const [schemaDraft, setSchemaDraft] = useState("{}");
   const createMut = useCreateInferencePreset();
   const updateMut = useUpdateInferencePreset();
@@ -52,6 +87,16 @@ export function InferencePresetEditor() {
 
   if (!localState) return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
 
+  const toolsSupported =
+    serverStatus !== "running" ||
+    !loadedModel ||
+    chatTemplateSupportsToolCalling(
+      loadedConfig?.chatTemplateContent,
+      loadedModel.metadata?.chatTemplate,
+      loadedModel.metadata?.hasToolCalling,
+    );
+  const toolsEnableLocked = !toolsSupported && !localState.toolCallsEnabled;
+
   /**
    * Updates a single inference preset field within local editor state.
    *
@@ -64,22 +109,22 @@ export function InferencePresetEditor() {
   };
 
   /**
-   * Enables or disables a built-in tool on the current inference preset.
-   * Unknown custom tools already stored on the preset are left untouched.
+   * Enables or disables a discovered tool on the current inference preset.
    *
-   * @param tool - Built-in tool definition to toggle.
+   * @param tool - Tool definition to toggle.
    * @param enabled - Whether the tool should be present in the preset.
    * @returns No return value.
    */
-  const toggleBuiltInTool = (tool: ToolDefinition, enabled: boolean) => {
+  const toggleTool = (tool: ToolDefinition, enabled: boolean) => {
     setLocalState((prev) => {
       if (!prev) return prev;
       const current = prev.tools ?? [];
+      const stored = toStoredToolDefinition(tool);
       if (enabled) {
-        if (current.some((entry) => entry.name === tool.name)) return prev;
-        return { ...prev, tools: [...current, tool] };
+        if (current.some((entry) => entry.name === stored.name)) return prev;
+        return { ...prev, tools: [...current, stored] };
       }
-      return { ...prev, tools: current.filter((entry) => entry.name !== tool.name) };
+      return { ...prev, tools: current.filter((entry) => entry.name !== stored.name) };
     });
   };
 
@@ -758,26 +803,58 @@ export function InferencePresetEditor() {
         </section>
 
         <section className="space-y-4">
-          <h3 className="text-xs font-bold text-[var(--color-text-muted)] uppercase tracking-wider flex items-center justify-between">
-            <label htmlFor="toolsEnabled">Tools (Function Calling)</label>
+          <h3
+            className={`text-xs font-bold uppercase tracking-wider flex items-center justify-between ${
+              toolsSupported
+                ? "text-[var(--color-text-muted)]"
+                : "text-[var(--color-text-muted)] opacity-50"
+            }`}>
+            <label
+              htmlFor="toolsEnabled"
+              title={
+                toolsSupported
+                  ? "Send selected tools on /v1/chat/completions when this preset is used"
+                  : "The loaded model's chat template does not describe tools or replay tool_calls"
+              }>
+              Tools (Function Calling)
+            </label>
             <input
               id="toolsEnabled"
               type="checkbox"
               checked={!!localState.toolCallsEnabled}
+              disabled={toolsEnableLocked}
               onChange={(e) => updateField("toolCallsEnabled", e.target.checked)}
-              className="accent-[var(--color-accent)]"
+              className="accent-[var(--color-accent)] disabled:cursor-not-allowed"
             />
           </h3>
+          {!toolsSupported && (
+            <p className="text-xs text-[var(--color-text-muted)] leading-tight">
+              The loaded model's Jinja chat template does not describe tools, so llama-server will
+              not show them to the model. Load a tool-capable model, or paste a tool-calling
+              template on the load preset.
+            </p>
+          )}
 
           {localState.toolCallsEnabled && (
             <div className="space-y-3">
               <p className="text-xs text-[var(--color-text-muted)] leading-tight">
-                Only built-in tools are executed. Custom JSON tools are kept if already present but
-                cannot be invoked.
+                Tools are TypeScript modules executed by the LlamaForge server. Built-ins ship with
+                the app. User tools are loaded from the project tools folder and
+                ~/.llamaforge/tools. Each file must default-export an object with name, description,
+                parameters, and execute.
               </p>
-              {BUILT_IN_TOOLS.map((tool) => {
+              {toolsPending && (
+                <p className="text-xs text-[var(--color-text-muted)]">Loading tools…</p>
+              )}
+              {toolsError && (
+                <p className="text-xs text-red-400">
+                  Could not load the tool catalog. Tools already saved on this preset are still
+                  listed below.
+                </p>
+              )}
+              {catalogTools(toolsCatalog?.tools, localState.tools ?? []).map((tool) => {
                 const enabled = (localState.tools ?? []).some((entry) => entry.name === tool.name);
-                const inputId = `builtin-tool-${tool.name}`;
+                const inputId = `tool-${tool.name}`;
                 return (
                   <label
                     key={tool.name}
@@ -787,11 +864,18 @@ export function InferencePresetEditor() {
                       id={inputId}
                       type="checkbox"
                       checked={enabled}
-                      onChange={(e) => toggleBuiltInTool(tool, e.target.checked)}
+                      onChange={(e) => toggleTool(tool, e.target.checked)}
                       className="mt-1 accent-[var(--color-accent)]"
                     />
                     <span>
                       <span className="font-medium">{tool.name}</span>
+                      <span className="ml-2 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+                        {tool.source === "user"
+                          ? "User"
+                          : tool.source === "builtin"
+                            ? "Built-in"
+                            : "Saved"}
+                      </span>
                       <span className="block text-xs text-[var(--color-text-muted)]">
                         {tool.description}
                       </span>
@@ -799,33 +883,6 @@ export function InferencePresetEditor() {
                   </label>
                 );
               })}
-              {(localState.tools ?? []).some((entry) => !isBuiltInToolName(entry.name)) && (
-                <div className="space-y-2">
-                  <p className="text-xs font-medium text-[var(--color-text-muted)] uppercase tracking-wider">
-                    Custom tools (not executed)
-                  </p>
-                  {(localState.tools ?? [])
-                    .filter((entry) => !isBuiltInToolName(entry.name))
-                    .map((entry) => (
-                      <div
-                        key={entry.name}
-                        className="flex items-center justify-between gap-2 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs">
-                        <span className="truncate">{entry.name}</span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            updateField(
-                              "tools",
-                              (localState.tools ?? []).filter((tool) => tool.name !== entry.name),
-                            )
-                          }
-                          className="text-[var(--color-text-muted)] hover:text-red-400">
-                          Remove
-                        </button>
-                      </div>
-                    ))}
-                </div>
-              )}
             </div>
           )}
         </section>

@@ -130,6 +130,11 @@ export interface GgufDisplayMetadata {
   hasVisionEncoder: boolean;
   /** Whether the model contains an audio encoder. */
   hasAudioEncoder: boolean;
+  /**
+   * Whether the GGUF-embedded Jinja chat template can describe tools and replay
+   * `tool_calls`. Derived at scan time; not a GGUF boolean like vision/audio.
+   */
+  hasToolCalling: boolean;
   /** Whether the model is a draft/assistant model for speculative decoding. */
   isDraftModel: boolean;
   /** Recommended temperature default from the model metadata. */
@@ -513,6 +518,38 @@ export interface ToolDefinition {
   description: string;
   /** JSON schema parameters for the tool payload. */
   parameters: Record<string, unknown>;
+}
+
+/**
+ * Executable tool module shape used by built-in and user TypeScript tools.
+ *
+ * Every tool file must default-export an object matching this interface:
+ * `{ name, description, parameters, execute }`.
+ */
+export interface LlamaForgeTool extends ToolDefinition {
+  /**
+   * Runs the tool with the model's parsed JSON arguments after user approval.
+   *
+   * @param args - Object decoded from the tool-call arguments JSON string.
+   * @returns A JSON-serializable result, or a pre-serialized JSON string.
+   */
+  execute(args: Record<string, unknown>): Promise<unknown> | unknown;
+}
+
+/**
+ * Whether a discovered tool ships with LlamaForge or was loaded from a user tools folder.
+ */
+export type ToolSource = "builtin" | "user";
+
+/**
+ * Tool metadata returned to the client for inference-preset toggles.
+ * The `execute` implementation is never serialized over the API.
+ */
+export interface AvailableTool extends ToolDefinition {
+  /** Origin of the tool module. */
+  source: ToolSource;
+  /** Basename of the TypeScript file that exported the tool. */
+  fileName: string;
 }
 
 /**

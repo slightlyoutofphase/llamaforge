@@ -60,6 +60,36 @@ describe("tools", () => {
     expect(parsed.error).toContain("invalid JSON");
   });
 
+  it("returns a tool error for non-object JSON arguments", async () => {
+    const result = await executeTool("calculate", "[]");
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toContain("JSON object");
+  });
+
+  it("returns a tool error when calculate is missing an expression", async () => {
+    const result = await executeTool("calculate", "{}");
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toContain("expression");
+  });
+
+  it("executes the in-repo echo_text user tool", async () => {
+    const result = await executeTool("echo_text", JSON.stringify({ text: "hello from bun" }));
+    const parsed = JSON.parse(result);
+    expect(parsed.result).toBe("hello from bun");
+  });
+
+  it("returns a tool error for unknown tool names", async () => {
+    const result = await executeTool("not_a_real_tool", "{}");
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toContain("not found");
+  });
+
+  it("surfaces thrown errors from user tools as JSON instead of rejecting", async () => {
+    const result = await executeTool("echo_text", JSON.stringify({ text: 12 }));
+    const parsed = JSON.parse(result);
+    expect(parsed.error).toContain("string text");
+  });
+
   const {
     __setToolApprovalTimeoutMs,
     waitForToolApproval,

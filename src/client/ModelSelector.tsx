@@ -8,6 +8,7 @@ import { clsx } from "clsx";
 import { ChevronDown, Cpu, Database, Play, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createDefaultLoadConfig } from "../shared/defaults";
+import { metadataHasToolCalling } from "../shared/templateCapabilities";
 import type { ChatMessage, LoadModelRequest, ModelEntry, ModelLoadConfig } from "../shared/types";
 import { MultimodalGuardModal } from "./components/sidebar/MultimodalGuardModal";
 import { logError } from "./logger";
@@ -255,6 +256,11 @@ export function ModelSelector() {
                           {model.metadata?.hasAudioEncoder && (
                             <span className="text-purple-400 truncate max-w-full">
                               AUDIO ENABLED
+                            </span>
+                          )}
+                          {metadataHasToolCalling(model.metadata) && (
+                            <span className="text-amber-400 truncate max-w-full">
+                              TOOLS ENABLED
                             </span>
                           )}
                           {model.modelName.toLowerCase().includes("mtp") && (

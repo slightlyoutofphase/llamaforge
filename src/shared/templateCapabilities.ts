@@ -3,6 +3,8 @@
  * Shared template capability analysis utilities used by both client and server.
  */
 
+import type { GgufDisplayMetadata } from "./types";
+
 /**
  * Result of analyzing a Jinja template for capability flags.
  */
@@ -11,6 +13,22 @@ export interface TemplateCapabilityInfo {
   hasPreserveThinking: boolean;
   /** The template's default value for `preserve_thinking` when not explicitly provided. */
   preserveThinkingDefault?: boolean | undefined;
+}
+
+/**
+ * Whether a Jinja chat template can drive OpenAI-style function calling.
+ *
+ * This matches llama.cpp `chat_template_caps` (`supports_tools` plus
+ * `supports_tool_calls`): the template must consume the `tools` input so the
+ * model is told which functions exist, and consume `tool_calls` so history can
+ * replay prior function calls. It is a template heuristic, not a GGUF flag, and
+ * cannot prove the weights were trained for tool use.
+ */
+export interface ToolCallingCapabilityInfo {
+  /** Template consumes the `tools` input (describes available functions). */
+  supportsTools: boolean;
+  /** Template consumes `message.tool_calls` (replays function calls in history). */
+  supportsToolCalls: boolean;
 }
 
 /**
@@ -117,6 +135,128 @@ export function resolveChatTemplateForCapabilities(options: {
   }
 
   return null;
+}
+
+/**
+ * Strips Jinja comments so capability scans ignore documented-but-unused names.
+ *
+ * @param template - Raw Jinja source.
+ * @returns Source with `{# ... #}` regions removed.
+ */
+function stripJinjaComments(template: string): string {
+  return template.replace(/\{#[\s\S]*?#\}/g, "");
+}
+
+/**
+ * Removes `{% set tools = tools | default(...) %}` bindings.
+ *
+ * Those lines mention `tools` without describing functions to the model, which
+ * would otherwise count as tool support.
+ *
+ * @param template - Jinja source, typically after comments are stripped.
+ * @returns Source with default-`tools` assignments removed.
+ */
+function stripToolsDefaultBindings(template: string): string {
+  return template.replace(
+    /\{%-?\s*set\s+tools\s*=\s*tools\s*\|\s*default\s*\(\s*[^)]*\s*\)\s*-?%\}/gi,
+    "",
+  );
+}
+
+/**
+ * Analyzes a Jinja chat template for OpenAI-style function-calling support.
+ *
+ * llama.cpp decides this by executing the template and checking whether
+ * `tools[0].function.name` and `messages[n].tool_calls` were accessed. This
+ * scan uses the same signals from source: a live `tools` reference beyond a
+ * default binding, plus a `tool_calls` reference.
+ *
+ * @param templateStr - Raw Jinja template string.
+ * @returns Tool-calling capability flags. Both are false when the template is empty.
+ */
+export function analyzeToolCallingCapabilities(
+  templateStr: string | undefined | null,
+): ToolCallingCapabilityInfo {
+  if (!templateStr || typeof templateStr !== "string") {
+    return { supportsTools: false, supportsToolCalls: false };
+  }
+
+  const source = stripToolsDefaultBindings(stripJinjaComments(templateStr));
+  return {
+    supportsTools: /\btools\b/.test(source),
+    supportsToolCalls: /\btool_calls\b/.test(source),
+  };
+}
+
+/**
+ * Whether a Jinja chat template can both describe tools and replay tool calls.
+ *
+ * @param templateStr - Raw Jinja template string.
+ * @returns `true` when both {@link ToolCallingCapabilityInfo} flags are set.
+ */
+export function templateSupportsToolCalling(templateStr: string | undefined | null): boolean {
+  const caps = analyzeToolCallingCapabilities(templateStr);
+  return caps.supportsTools && caps.supportsToolCalls;
+}
+
+/**
+ * Resolves whether the running (or GGUF-default) chat template supports tools.
+ *
+ * Preference order matches llama-server: an explicit loaded override, then the
+ * GGUF-embedded template, then a previously computed metadata flag.
+ *
+ * @param loadedTemplate - Jinja actually written for `--chat-template-file`.
+ * @param ggufTemplate - `tokenizer.chat_template` from the GGUF.
+ * @param cachedFlag - Stored {@link GgufDisplayMetadata.hasToolCalling}, if any.
+ * @returns `true` when the effective template supports function calling.
+ */
+export function chatTemplateSupportsToolCalling(
+  loadedTemplate?: string | undefined | null,
+  ggufTemplate?: string | undefined | null,
+  cachedFlag?: boolean | undefined,
+): boolean {
+  const loaded = loadedTemplate?.trim();
+  if (loaded) return templateSupportsToolCalling(loaded);
+  const gguf = ggufTemplate?.trim();
+  if (gguf) return templateSupportsToolCalling(gguf);
+  return Boolean(cachedFlag);
+}
+
+/**
+ * Reads tool-calling support from scanned GGUF metadata, recomputing from the
+ * embedded chat template when a cache row predates {@link GgufDisplayMetadata.hasToolCalling}.
+ *
+ * @param metadata - Scanned model metadata, if present.
+ * @returns `true` when the GGUF chat template supports function calling.
+ */
+export function metadataHasToolCalling(
+  metadata:
+    Partial<Pick<GgufDisplayMetadata, "hasToolCalling" | "chatTemplate">> | null | undefined,
+): boolean {
+  if (!metadata) return false;
+  if (typeof metadata.hasToolCalling === "boolean") return metadata.hasToolCalling;
+  return templateSupportsToolCalling(metadata.chatTemplate);
+}
+
+/**
+ * Fills {@link GgufDisplayMetadata.hasToolCalling} when a cache row omitted it.
+ *
+ * @param metadata - Metadata parsed from GGUF or loaded from `model_cache`.
+ * @returns The same object, or a copy with `hasToolCalling` derived from the template.
+ */
+export function withToolCallingMetadata<
+  T extends {
+    hasToolCalling?: boolean | undefined;
+    chatTemplate?: string | undefined;
+  },
+>(metadata: T): T & { hasToolCalling: boolean } {
+  if (typeof metadata.hasToolCalling === "boolean") {
+    return metadata as T & { hasToolCalling: boolean };
+  }
+  return {
+    ...metadata,
+    hasToolCalling: templateSupportsToolCalling(metadata.chatTemplate),
+  };
 }
 
 /**

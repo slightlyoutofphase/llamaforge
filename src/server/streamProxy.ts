@@ -9,6 +9,7 @@ import { isExtractedVideoAudioAttachment } from "../shared/extractedAudio";
 import { buildMessageMetrics } from "../shared/generationMetrics";
 import { resolveInferencePreset } from "../shared/inferencePresetResolve";
 import { parseToolCallsJson, toApiToolCalls } from "../shared/toolCalls";
+import { toStoredToolDefinition } from "../shared/toolModule";
 import type { ChatMessage } from "../shared/types";
 import { triggerAutoname } from "./autoname";
 import {
@@ -39,6 +40,7 @@ import { getDb } from "./persistence/db";
 import { getInferencePresets, getLoadPresets, getSystemPresets } from "./persistence/presetRepo";
 import { loadSettings } from "./persistence/settingsRepo";
 import { updatePromptCacheStats } from "./promptCache";
+import { listAvailableTools } from "./toolRegistry";
 import { cancelPendingApprovals } from "./tools";
 import { broadcast } from "./wsHub";
 
@@ -501,10 +503,17 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const overflowPolicy = safeInfPreset.contextOverflowPolicy ?? "TruncateMiddle";
   const ctxSize = server.config?.contextSize || 4096;
   const useTools = infPreset?.toolCallsEnabled && infPreset.tools && infPreset.tools.length > 0;
+  const liveTools = useTools
+    ? new Map(
+        (await listAvailableTools()).map(
+          (tool) => [tool.name, toStoredToolDefinition(tool)] as const,
+        ),
+      )
+    : undefined;
   const requestTools = useTools
     ? infPreset.tools.map((t) => ({
         type: "function" as const,
-        function: t,
+        function: liveTools?.get(t.name) ?? t,
       }))
     : undefined;
   const requestResponseFormat =
@@ -561,7 +570,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         ? await buildContentParts(m.content, m.attachments || [], modelMeta || undefined)
         : m.content;
 
-      let finalContent = contentParts;
+      let finalContent: unknown = contentParts;
 
       const parsedToolCalls = parseToolCallsJson(m.toolCallsJson);
       const sendReasoningContent =
@@ -619,7 +628,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       }
 
       const apiMsg: ChatCompletionMessage = { role: m.role, content: finalContent };
-      if (sendReasoningContent) {
+      if (sendReasoningContent && m.thinkingContent) {
         apiMsg.reasoning_content = m.thinkingContent;
       }
       if (parsedToolCalls) {

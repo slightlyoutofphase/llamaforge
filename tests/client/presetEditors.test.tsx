@@ -91,6 +91,40 @@ describe("Preset Editors Integration", () => {
     queryClient.setQueryData(queryKeys.presetsInference(), [mockInferencePreset]);
     queryClient.setQueryData(queryKeys.presetsLoad(), [mockLoadPreset]);
     queryClient.setQueryData(queryKeys.presetsSystem(), [mockSystemPreset]);
+    queryClient.setQueryData(queryKeys.tools(), {
+      tools: [
+        {
+          name: "get_datetime",
+          description: "Get the current date and time in ISO format.",
+          parameters: { type: "object", properties: {} },
+          source: "builtin",
+          fileName: "get_datetime.ts",
+        },
+        {
+          name: "calculate",
+          description: "Perform basic mathematical calculations.",
+          parameters: {
+            type: "object",
+            properties: { expression: { type: "string" } },
+            required: ["expression"],
+          },
+          source: "builtin",
+          fileName: "calculate.ts",
+        },
+        {
+          name: "echo_text",
+          description: "Return the provided text unchanged.",
+          parameters: {
+            type: "object",
+            properties: { text: { type: "string" } },
+            required: ["text"],
+          },
+          source: "user",
+          fileName: "echo_text.ts",
+        },
+      ],
+      directories: ["/repo/tools"],
+    });
 
     useUiStore.setState({
       rightPanelView: null,
@@ -107,6 +141,9 @@ describe("Preset Editors Integration", () => {
           mtime: Date.now(),
         },
       ],
+      loadedModel: null,
+      loadedConfig: null,
+      serverStatus: "idle",
     });
   });
 
@@ -132,6 +169,77 @@ describe("Preset Editors Integration", () => {
     fireEvent.change(tempSlider, { target: { value: "1.2" } });
     expect(screen.getByText("1.20")).toBeDefined();
     expect(screen.queryByLabelText(/Preserve Thinking/i)).toBeNull();
+  });
+
+  it("InferencePresetEditor: lists built-in and user TypeScript tools for execution", async () => {
+    useUiStore.setState({ activePresetId: "test-inf-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InferencePresetEditor />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
+
+    fireEvent.click(screen.getByLabelText("Tools (Function Calling)"));
+    expect(screen.getByText("echo_text")).toBeDefined();
+    expect(screen.getByText("get_datetime")).toBeDefined();
+    expect(screen.getByText("User")).toBeDefined();
+    expect(screen.queryByText(/not executed/i)).toBeNull();
+    expect(screen.queryByText(/Only built-in tools are executed/i)).toBeNull();
+
+    fireEvent.click(screen.getByLabelText(/echo_text/i));
+    expect((screen.getByLabelText(/echo_text/i) as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("InferencePresetEditor: greys out tools when the loaded chat template cannot call them", async () => {
+    useUiStore.setState({ activePresetId: "test-inf-id" });
+    useAppStore.setState({
+      serverStatus: "running",
+      loadedModel: {
+        publisher: "test",
+        modelName: "plain",
+        primaryPath: "/models/plain.gguf",
+        metadata: {
+          architecture: "llama",
+          name: "plain",
+          fileSizeBytes: 1,
+          contextLength: 4096,
+          embeddingLength: undefined,
+          attentionHeadCount: undefined,
+          attentionHeadCountKv: undefined,
+          blockCount: undefined,
+          feedForwardLength: undefined,
+          quantType: undefined,
+          hasVisionEncoder: false,
+          hasAudioEncoder: false,
+          hasToolCalling: false,
+          isDraftModel: false,
+          defaultTemperature: undefined,
+          defaultTopK: undefined,
+          defaultTopP: undefined,
+          defaultMinP: undefined,
+          defaultRepeatPenalty: undefined,
+          chatTemplate: "{{ bos_token }}{{ message.content }}",
+        },
+      },
+      loadedConfig: {
+        modelPath: "/models/plain.gguf",
+        contextSize: 4096,
+      } as any,
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InferencePresetEditor />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
+    const toggle = screen.getByLabelText("Tools (Function Calling)") as HTMLInputElement;
+    expect(toggle.disabled).toBe(true);
+    expect(screen.getByText(/does not describe tools/i)).toBeDefined();
   });
 
   it("LoadPresetEditor: renders accordion sections and model config", async () => {
