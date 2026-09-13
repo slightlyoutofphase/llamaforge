@@ -829,6 +829,19 @@ export type GgufCacheCompanion = {
 };
 
 /**
+ * Truncates a filesystem mtime to the integer milliseconds stored in `model_cache`.
+ *
+ * SQLite `INTEGER` columns drop the fractional part of `stat.mtimeMs`. Lookups must
+ * use the same truncation or a rewrite in the same millisecond keeps stale encoder flags.
+ *
+ * @param mtimeMs - Filesystem modified time in milliseconds.
+ * @returns A finite integer millisecond timestamp, or `0` when the input is not finite.
+ */
+function cacheMtime(mtimeMs: number): number {
+  return Number.isFinite(mtimeMs) ? Math.trunc(mtimeMs) : 0;
+}
+
+/**
  * Retrieves cached GGUF metadata for a specific file version.
  *
  * When `companion` is provided, the mmproj path and mtime must also match so a
@@ -846,12 +859,12 @@ export async function cachedGgufMetadata(
 ): Promise<GgufDisplayMetadata | null> {
   if (companion !== undefined) {
     const mmprojPath = companion.mmprojPath ?? "";
-    const mmprojMtime = companion.mmprojMtime ?? 0;
+    const mmprojMtime = cacheMtime(companion.mmprojMtime ?? 0);
     const row = getDb()
       .query<{ metadata_json: string }, [string, number, string, number]>(
         "SELECT metadata_json FROM model_cache WHERE file_path = ? AND mtime = ? AND mmproj_path = ? AND mmproj_mtime = ?",
       )
-      .get(filePath, mtime, mmprojPath, mmprojMtime);
+      .get(filePath, cacheMtime(mtime), mmprojPath, mmprojMtime);
     return row
       ? withToolCallingMetadata(JSON.parse(row.metadata_json) as GgufDisplayMetadata)
       : null;
@@ -861,7 +874,7 @@ export async function cachedGgufMetadata(
     .query<{ metadata_json: string }, [string, number]>(
       "SELECT metadata_json FROM model_cache WHERE file_path = ? AND mtime = ?",
     )
-    .get(filePath, mtime);
+    .get(filePath, cacheMtime(mtime));
   return row ? withToolCallingMetadata(JSON.parse(row.metadata_json) as GgufDisplayMetadata) : null;
 }
 
@@ -896,13 +909,13 @@ export async function setCachedGgufMetadata(
   companion?: GgufCacheCompanion,
 ): Promise<void> {
   const mmprojPath = companion?.mmprojPath ?? "";
-  const mmprojMtime = companion?.mmprojMtime ?? 0;
+  const mmprojMtime = cacheMtime(companion?.mmprojMtime ?? 0);
   getDb().prepare("DELETE FROM model_cache WHERE file_path = ?").run(filePath);
   getDb()
     .prepare(
       "INSERT INTO model_cache (file_path, mtime, mmproj_path, mmproj_mtime, metadata_json) VALUES (?, ?, ?, ?, ?)",
     )
-    .run(filePath, mtime, mmprojPath, mmprojMtime, JSON.stringify(metadata));
+    .run(filePath, cacheMtime(mtime), mmprojPath, mmprojMtime, JSON.stringify(metadata));
 }
 
 /**

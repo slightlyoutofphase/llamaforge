@@ -161,7 +161,13 @@ describe("modelScanner mmproj encoder merge", () => {
     const first = await populateMetadata(entry);
     expect(first.metadata?.hasVisionEncoder).toBe(true);
 
+    const previousMmStat = await fs.stat(mmProjPath);
     await Bun.write(mmProjPath, "mmproj-changed");
+    // SQLite stores mmproj_mtime as INTEGER milliseconds. A rewrite in the same
+    // millisecond would keep the old cache row, so bump mtime by two seconds.
+    const bumped = new Date(Math.trunc(previousMmStat.mtimeMs) + 2000);
+    await fs.utimes(mmProjPath, bumped, bumped);
+    expect((await fs.stat(mmProjPath)).mtimeMs).toBeGreaterThan(previousMmStat.mtimeMs);
     parseSpy.mockImplementation(async (filePath: string) => {
       const isMmproj = path.basename(filePath).toUpperCase().includes("MMPROJ");
       return {
