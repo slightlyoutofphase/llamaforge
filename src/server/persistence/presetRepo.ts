@@ -7,11 +7,12 @@ import { createDefaultInferenceSampling, createDefaultLoadConfig } from "../../s
 import { applyImageTokenBatchFloor } from "../../shared/imageTokens";
 import { analyzeTemplateCapabilities } from "../../shared/templateCapabilities";
 import { detectThinkingConfig } from "../../shared/thinkingTags";
-import type {
-  InferencePreset,
-  LoadPreset,
-  ModelLoadConfig,
-  SystemPromptPreset,
+import {
+  SPECULATIVE_DECODE_TYPES,
+  type InferencePreset,
+  type LoadPreset,
+  type ModelLoadConfig,
+  type SystemPromptPreset,
 } from "../../shared/types";
 import { logWarn } from "../logger";
 import { getDb } from "./db";
@@ -83,7 +84,7 @@ const KV_CACHE_TYPES = new Set([
 ]);
 const ROPE_SCALING_TYPES = new Set(["none", "linear", "yarn"]);
 const FLASH_ATTN_TYPES = new Set(["on", "off", "auto"]);
-const SPEC_TYPES = new Set(["off", "draft-mtp", "draft-simple", "draft-eagle3"]);
+const SPEC_TYPES = new Set<string>(SPECULATIVE_DECODE_TYPES);
 const NUMA_TYPES = new Set(["distribute", "isolate", "numactl"]);
 
 type ParsedLoadPresetPayload = {

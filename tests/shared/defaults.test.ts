@@ -9,6 +9,8 @@ import {
   createDefaultInferenceSampling,
   createDefaultLoadConfig,
   DEFAULT_APP_SETTINGS,
+  isDraftSpecType,
+  isSpecializedDraftSpecType,
   resolveSpecDraftModelPath,
 } from "../../src/shared/defaults";
 
@@ -81,5 +83,31 @@ describe("shared defaults", () => {
     expect(
       resolveSpecDraftModelPath("off", "/models/auto-assistant.gguf", undefined),
     ).toBeUndefined();
+    expect(
+      resolveSpecDraftModelPath("draft-dflash", "", "/models/auto-dflash.gguf", "draft-dflash"),
+    ).toBe("/models/auto-dflash.gguf");
+    expect(
+      resolveSpecDraftModelPath("draft-dspark", "", "/models/auto-dspark.gguf", "draft-dspark"),
+    ).toBe("/models/auto-dspark.gguf");
+    expect(
+      resolveSpecDraftModelPath("draft-eagle3", "", "/models/auto-eagle3.gguf", "draft-eagle3"),
+    ).toBe("/models/auto-eagle3.gguf");
+    expect(
+      resolveSpecDraftModelPath("draft-simple", "", "/models/auto-dflash.gguf", "draft-dflash"),
+    ).toBeUndefined();
+    expect(
+      resolveSpecDraftModelPath("draft-dflash", "", "/models/auto-dspark.gguf", "draft-dspark"),
+    ).toBeUndefined();
+  });
+
+  it("identifies sidecar draft modes that cannot be loaded as draft-simple", () => {
+    expect(isDraftSpecType("draft-dflash")).toBe(true);
+    expect(isDraftSpecType("draft-dspark")).toBe(true);
+    expect(isDraftSpecType("draft-eagle3")).toBe(true);
+    expect(isDraftSpecType("off")).toBe(false);
+    expect(isSpecializedDraftSpecType("draft-mtp")).toBe(true);
+    expect(isSpecializedDraftSpecType("draft-dflash")).toBe(true);
+    expect(isSpecializedDraftSpecType("draft-simple")).toBe(false);
+    expect(isSpecializedDraftSpecType("off")).toBe(false);
   });
 });

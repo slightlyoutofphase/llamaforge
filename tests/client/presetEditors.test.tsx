@@ -440,6 +440,100 @@ describe("Preset Editors Integration", () => {
     expect((screen.getByLabelText(/Draft Model Path/i) as HTMLInputElement).value).toBe(
       "/models/gemma-4-12b-qat-it-assistant-Q4_0_Q4emb.gguf",
     );
+
+    fireEvent.change(specType, { target: { value: "draft-simple" } });
+    expect(specType.value).toBe("draft-simple");
+    expect(
+      screen.getByText(
+        /The auto-detected companion is a Gemma MTP assistant and must be loaded with MTP, not Draft Model/i,
+      ),
+    ).toBeDefined();
+  });
+
+  it("LoadPresetEditor: enables DFlash, DSpark, and Eagle3 for matching scanned companions", async () => {
+    const cases = [
+      {
+        specType: "draft-dflash" as const,
+        label: "DFlash",
+        draftPath: "/models/model-dflash.gguf",
+        optionName: /DFlash \(companion found\)/,
+        warning:
+          /The auto-detected companion is a DFlash and must be loaded with DFlash, not Draft Model/i,
+        autoDetected: /Auto-detected DFlash companion/i,
+      },
+      {
+        specType: "draft-dspark" as const,
+        label: "DSpark",
+        draftPath: "/models/model-dspark.gguf",
+        optionName: /DSpark \(companion found\)/,
+        warning:
+          /The auto-detected companion is a DSpark and must be loaded with DSpark, not Draft Model/i,
+        autoDetected: /Auto-detected DSpark companion/i,
+      },
+      {
+        specType: "draft-eagle3" as const,
+        label: "Eagle3",
+        draftPath: "/models/model-eagle3.gguf",
+        optionName: /Eagle3 \(companion found\)/,
+        warning:
+          /The auto-detected companion is an Eagle3 and must be loaded with Eagle3, not Draft Model/i,
+        autoDetected: /Auto-detected Eagle3 companion/i,
+      },
+    ];
+
+    for (const testCase of cases) {
+      cleanup();
+      queryClient.setQueryData(queryKeys.presetsLoad(), [mockLoadPreset]);
+      useAppStore.setState({
+        models: [
+          {
+            publisher: "test",
+            modelName: "test-model",
+            primaryPath: "/models/test.gguf",
+            draftModelPath: testCase.draftPath,
+            draftSpecType: testCase.specType,
+            metadata: ggufDisplayMetadata({ name: "test-model", architecture: "llama" }),
+          },
+        ],
+      });
+      useUiStore.setState({ activePresetId: "test-load-id" });
+
+      render(
+        <QueryClientProvider client={queryClient}>
+          <LoadPresetEditor />
+        </QueryClientProvider>,
+      );
+
+      expect(await screen.findByText("Test Load (Default)")).toBeDefined();
+      fireEvent.click(screen.getByRole("button", { name: "Speculative Decoding" }));
+
+      const specType = screen.getByLabelText(/^Mode$/) as HTMLSelectElement;
+      const specializedOption = screen.getByRole("option", {
+        name: testCase.optionName,
+      }) as HTMLOptionElement;
+      expect(specializedOption.disabled).toBe(false);
+      expect(screen.getByText(testCase.autoDetected)).toBeDefined();
+      for (const other of cases) {
+        if (other.specType === testCase.specType) continue;
+        expect(
+          (
+            screen.getByRole("option", {
+              name: new RegExp(`${other.label} \\(no ${other.label} model found\\)`),
+            }) as HTMLOptionElement
+          ).disabled,
+        ).toBe(true);
+      }
+
+      fireEvent.change(specType, { target: { value: testCase.specType } });
+      expect(specType.value).toBe(testCase.specType);
+      expect((screen.getByLabelText(/Draft Model Path/i) as HTMLInputElement).value).toBe(
+        testCase.draftPath,
+      );
+
+      fireEvent.change(specType, { target: { value: "draft-simple" } });
+      expect(specType.value).toBe("draft-simple");
+      expect(screen.getByText(testCase.warning)).toBeDefined();
+    }
   });
 
   it("LoadPresetEditor: lets the user select Draft Model and set a path without a scanned companion", async () => {
@@ -467,5 +561,31 @@ describe("Preset Editors Integration", () => {
     fireEvent.change(pathInput, { target: { value: "/models/custom-assistant.gguf" } });
     expect(pathInput.value).toBe("/models/custom-assistant.gguf");
     expect(specType.value).toBe("draft-simple");
+
+    expect(
+      (screen.getByRole("option", { name: /MTP \(no MTP model found\)/ }) as HTMLOptionElement)
+        .disabled,
+    ).toBe(true);
+    expect(
+      (
+        screen.getByRole("option", {
+          name: /DFlash \(no DFlash model found\)/,
+        }) as HTMLOptionElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      (
+        screen.getByRole("option", {
+          name: /DSpark \(no DSpark model found\)/,
+        }) as HTMLOptionElement
+      ).disabled,
+    ).toBe(true);
+    expect(
+      (
+        screen.getByRole("option", {
+          name: /Eagle3 \(no Eagle3 model found\)/,
+        }) as HTMLOptionElement
+      ).disabled,
+    ).toBe(true);
   });
 });

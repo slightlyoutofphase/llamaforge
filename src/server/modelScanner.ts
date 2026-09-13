@@ -14,7 +14,14 @@ const EXCLUDED_DIRS = new Set(["node_modules", "dist", "build", ".git", ".next",
 const DEFAULT_SCAN_MAX_DEPTH = 20;
 const DEFAULT_SCAN_MAX_ENTRIES = 10000;
 const IGNORED_COMPANION_TOKENS = new Set(["model", "mmproj", "mmproject", "projector", "clip"]);
-const IGNORED_DRAFT_TOKENS = new Set(["assistant", "eagle3", "draft", "speculative"]);
+const IGNORED_DRAFT_TOKENS = new Set([
+  "assistant",
+  "eagle3",
+  "dflash",
+  "dspark",
+  "draft",
+  "speculative",
+]);
 const QUANTIZATION_TOKEN_PATTERN =
   /^(?:q\d.*|iq\d.*|f16|f32|bf16|fp16|fp32|int\d+|mxfp4|k|m|s|l|xl)$/i;
 
@@ -36,19 +43,19 @@ function getErrorCode(err: unknown): string | undefined {
  * for speculative decoding.
  *
  * @param architecture - The architecture string from GGUF metadata.
- * @returns `true` if the model is a draft model (assistant or eagle3 architecture).
+ * @returns `true` if the model is a draft model (assistant, DFlash, or Eagle3 architecture).
  */
 function isDraftModelArchitecture(architecture: string): boolean {
   const lower = architecture.toLowerCase();
-  return lower.includes("assistant") || lower.includes("eagle3");
+  return lower.includes("assistant") || lower === "eagle3" || lower === "dflash";
 }
 
 /**
  * Determines whether a GGUF should be treated as a hidden draft companion rather
  * than a selectable primary model.
  *
- * Classification prefers `general.architecture` (`gemma4-assistant`, `eagle3`, …)
- * and also accepts filename tokens such as `assistant` / `eagle3` / `draft`.
+ * Classification prefers `general.architecture` (`gemma4-assistant`, `dflash`, `eagle3`, …)
+ * and also accepts filename tokens such as `assistant` / `dflash` / `dspark` / `eagle3` / `draft`.
  *
  * @param filePath - Absolute path to the GGUF being classified.
  * @param architecture - Architecture string from GGUF metadata.
@@ -67,11 +74,31 @@ function isDraftModelCandidate(filePath: string, architecture: string): boolean 
 }
 
 /**
+ * Returns whether a sidecar filename contains a speculative-decoding family word.
+ *
+ * Matching is a case-insensitive substring of the filename, including the extension.
+ *
+ * @param filePath - Absolute path to the draft GGUF.
+ * @param word - Family word such as `dflash`, `dspark`, or `eagle3`.
+ * @returns `true` when the filename contains the word in any casing.
+ */
+function draftFileNameContains(filePath: string, word: string): boolean {
+  return path.basename(filePath).toLowerCase().includes(word.toLowerCase());
+}
+
+/**
  * Maps a draft GGUF onto llama-server `--spec-type`.
+ *
+ * Specialized companions require both a filename family word and the matching
+ * `general.architecture` value:
+ * - DFlash: filename contains `dflash` and architecture is `dflash` → `draft-dflash`
+ * - DSpark: filename contains `dspark` and architecture is `dflash` → `draft-dspark`
+ *   (DSpark extends DFlash, so there is no separate `dspark` architecture)
+ * - Eagle3: filename contains `eagle3` and architecture is `eagle3` → `draft-eagle3`
  *
  * Gemma 4 `gemma4-assistant` checkpoints are attached Multi-Token Prediction
  * drafters and must be loaded with `draft-mtp` plus `--spec-draft-model`.
- * Using `draft-simple` for those files crashes llama-server at load.
+ * Using `draft-simple` for specialized companions crashes llama-server at load.
  *
  * @param filePath - Absolute path to the draft GGUF.
  * @param architecture - Architecture string from GGUF metadata.
@@ -81,18 +108,17 @@ function specTypeForDraft(
   filePath: string,
   architecture: string,
 ): NonNullable<ModelEntry["draftSpecType"]> {
-  const lower = architecture.toLowerCase();
-  const tokens = new Set(
-    path
-      .parse(filePath)
-      .name.toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((token) => token.length > 0),
-  );
-  if (lower.includes("eagle3") || tokens.has("eagle3")) {
+  const arch = architecture.toLowerCase();
+  if (draftFileNameContains(filePath, "dspark") && arch === "dflash") {
+    return "draft-dspark";
+  }
+  if (draftFileNameContains(filePath, "dflash") && arch === "dflash") {
+    return "draft-dflash";
+  }
+  if (draftFileNameContains(filePath, "eagle3") && arch === "eagle3") {
     return "draft-eagle3";
   }
-  if (lower.includes("assistant") || lower.includes("mtp")) {
+  if (arch.includes("assistant") || arch.includes("mtp")) {
     return "draft-mtp";
   }
   return "draft-simple";

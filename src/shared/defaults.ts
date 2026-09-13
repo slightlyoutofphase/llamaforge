@@ -11,7 +11,16 @@ import {
   DEFAULT_IMAGE_MIN_TOKENS,
   defaultBatchingForImageTokens,
 } from "./imageTokens";
-import type { AppSettings, InferencePreset, ModelLoadConfig } from "./types";
+import {
+  DRAFT_SPEC_TYPES,
+  SPECIALIZED_DRAFT_SPEC_TYPES,
+  type AppSettings,
+  type DraftSpeculativeType,
+  type InferencePreset,
+  type ModelLoadConfig,
+  type SpecializedDraftSpecType,
+  type SpeculativeDecodeType,
+} from "./types";
 
 /** llama-server `--video-fps` default used when a load preset does not override it. */
 export const DEFAULT_VIDEO_FPS = 4;
@@ -145,6 +154,32 @@ export function createDefaultLoadConfig(modelPath: string = ""): ModelLoadConfig
 }
 
 /**
+ * Returns whether a speculative mode loads a sidecar draft GGUF.
+ *
+ * @param specType - Selected speculative decoding mode.
+ * @returns `true` when llama-server should receive `--spec-draft-model`.
+ */
+export function isDraftSpecType(
+  specType: SpeculativeDecodeType | undefined,
+): specType is DraftSpeculativeType {
+  return specType !== undefined && (DRAFT_SPEC_TYPES as readonly string[]).includes(specType);
+}
+
+/**
+ * Returns whether a sidecar requires a specialized `--spec-type` rather than `draft-simple`.
+ *
+ * @param specType - Detected or selected speculative decoding mode.
+ * @returns `true` for MTP, DFlash, DSpark, and Eagle3 companions.
+ */
+export function isSpecializedDraftSpecType(
+  specType: string | undefined,
+): specType is SpecializedDraftSpecType {
+  return (
+    specType !== undefined && (SPECIALIZED_DRAFT_SPEC_TYPES as readonly string[]).includes(specType)
+  );
+}
+
+/**
  * Resolves the draft GGUF path that should be sent to llama-server.
  * An explicit preset path wins; otherwise the scanned same-directory companion is used
  * when its required `--spec-type` matches the selected mode.
@@ -159,9 +194,9 @@ export function resolveSpecDraftModelPath(
   specType: ModelLoadConfig["specType"],
   configuredPath: string | undefined,
   detectedPath: string | undefined,
-  detectedSpecType?: "draft-mtp" | "draft-simple" | "draft-eagle3" | undefined,
+  detectedSpecType?: DraftSpeculativeType | undefined,
 ): string | undefined {
-  if (specType !== "draft-simple" && specType !== "draft-eagle3" && specType !== "draft-mtp") {
+  if (!isDraftSpecType(specType)) {
     return undefined;
   }
   const configured = configuredPath?.trim();

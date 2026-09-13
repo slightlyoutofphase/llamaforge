@@ -44,12 +44,14 @@ describe("modelScanner", () => {
 
     parseSpy = spyOn(ggufReaderModule, "parseGgufMetadata").mockImplementation(
       async (filePath: string) => {
-        const lower = filePath.toLowerCase();
+        const lower = path.basename(filePath).toLowerCase();
         const isEagle = lower.includes("eagle3");
         const isGemmaAssistant = lower.includes("gemma") && lower.includes("assistant");
+        const isDflashFamily = lower.includes("dflash") || lower.includes("dspark");
         let architecture = "llama";
         if (isEagle) architecture = "eagle3";
         else if (isGemmaAssistant) architecture = "gemma4-assistant";
+        else if (isDflashFamily) architecture = "dflash";
         return {
           ...baseMockMetadata,
           architecture,
@@ -262,5 +264,135 @@ describe("modelScanner", () => {
     expect(entries[0]?.primaryPath).toBe(mainPath);
     expect(entries[0]?.draftModelPath).toBe(draftPath);
     expect(entries[0]?.draftSpecType).toBe("draft-mtp");
+  });
+
+  it("links a DFlash sidecar when the filename contains dflash and architecture is dflash", async () => {
+    const root = path.join(tmpDir, "DFlashPublisher", "Model-7B");
+    await fs.mkdir(root, { recursive: true });
+    await Bun.write(path.join(root, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(root, "model-7b-DFlash-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "DFlashPublisher"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftModelPath?.includes("model-7b-DFlash-q4.gguf")).toBeTrue();
+    expect(entries[0]?.draftSpecType).toBe("draft-dflash");
+    expect(
+      entries.some((entry) => path.basename(entry.primaryPath).toLowerCase().includes("dflash")),
+    ).toBeFalse();
+  });
+
+  it("links a DSpark sidecar when the filename contains dspark and architecture is dflash", async () => {
+    const root = path.join(tmpDir, "DSparkPublisher", "Model-7B");
+    await fs.mkdir(root, { recursive: true });
+    await Bun.write(path.join(root, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(root, "model-7b-DSpark-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "DSparkPublisher"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftModelPath?.includes("model-7b-DSpark-q4.gguf")).toBeTrue();
+    expect(entries[0]?.draftSpecType).toBe("draft-dspark");
+  });
+
+  it("prefers DSpark over DFlash when the sidecar filename contains both family words", async () => {
+    const root = path.join(tmpDir, "DSparkDFlashPublisher", "Model-7B");
+    await fs.mkdir(root, { recursive: true });
+    await Bun.write(path.join(root, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(root, "model-7b-dspark-dflash-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "DSparkDFlashPublisher"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftSpecType).toBe("draft-dspark");
+  });
+
+  it("links an Eagle3 sidecar when the filename contains eagle3 and architecture is eagle3", async () => {
+    const root = path.join(tmpDir, "Eagle3Publisher", "Model-7B");
+    await fs.mkdir(root, { recursive: true });
+    await Bun.write(path.join(root, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(root, "model-7b-Eagle3-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "Eagle3Publisher"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftModelPath?.includes("model-7b-Eagle3-q4.gguf")).toBeTrue();
+    expect(entries[0]?.draftSpecType).toBe("draft-eagle3");
+  });
+
+  it("does not classify a dflash-named sidecar as DFlash when architecture is not dflash", async () => {
+    const originalImpl = parseSpy.getMockImplementation();
+    parseSpy.mockImplementation(async () => ({
+      ...baseMockMetadata,
+      architecture: "llama",
+    }));
+
+    const root = path.join(tmpDir, "DFlashNameOnly", "Model-7B");
+    await fs.mkdir(root, { recursive: true });
+    await Bun.write(path.join(root, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(root, "model-7b-dflash-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "DFlashNameOnly"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftModelPath?.includes("model-7b-dflash-q4.gguf")).toBeTrue();
+    expect(entries[0]?.draftSpecType).toBe("draft-simple");
+
+    parseSpy.mockImplementation(originalImpl);
+  });
+
+  it("does not classify a dflash-architecture sidecar as DFlash when the filename lacks dflash", async () => {
+    const originalImpl = parseSpy.getMockImplementation();
+    parseSpy.mockImplementation(async (filePath: string) => ({
+      ...baseMockMetadata,
+      architecture: filePath.toLowerCase().includes("sidecar") ? "dflash" : "llama",
+    }));
+
+    const root = path.join(tmpDir, "DFlashArchOnly", "Model-7B");
+    await fs.mkdir(root, { recursive: true });
+    await Bun.write(path.join(root, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(root, "model-7b-sidecar.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "DFlashArchOnly"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftModelPath?.includes("model-7b-sidecar.gguf")).toBeTrue();
+    expect(entries[0]?.draftSpecType).toBe("draft-simple");
+
+    parseSpy.mockImplementation(originalImpl);
+  });
+
+  it("does not classify a dspark-named sidecar as DSpark when architecture is not dflash", async () => {
+    const originalImpl = parseSpy.getMockImplementation();
+    parseSpy.mockImplementation(async () => ({
+      ...baseMockMetadata,
+      architecture: "llama",
+    }));
+
+    const root = path.join(tmpDir, "DSparkNameOnly", "Model-7B");
+    await fs.mkdir(root, { recursive: true });
+    await Bun.write(path.join(root, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(root, "model-7b-dspark-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "DSparkNameOnly"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftModelPath?.includes("model-7b-dspark-q4.gguf")).toBeTrue();
+    expect(entries[0]?.draftSpecType).toBe("draft-simple");
+
+    parseSpy.mockImplementation(originalImpl);
+  });
+
+  it("does not classify an eagle3-named sidecar as Eagle3 when architecture is not eagle3", async () => {
+    const originalImpl = parseSpy.getMockImplementation();
+    parseSpy.mockImplementation(async () => ({
+      ...baseMockMetadata,
+      architecture: "llama",
+    }));
+
+    const root = path.join(tmpDir, "Eagle3NameOnly", "Model-7B");
+    await fs.mkdir(root, { recursive: true });
+    await Bun.write(path.join(root, "model-7b-q4.gguf"), "mock");
+    await Bun.write(path.join(root, "model-7b-eagle3-q4.gguf"), "mock");
+
+    const entries = await scanModels(path.join(tmpDir, "Eagle3NameOnly"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.draftModelPath?.includes("model-7b-eagle3-q4.gguf")).toBeTrue();
+    expect(entries[0]?.draftSpecType).toBe("draft-simple");
+
+    parseSpy.mockImplementation(originalImpl);
   });
 });

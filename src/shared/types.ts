@@ -5,6 +5,52 @@
  */
 
 /**
+ * llama-server `--spec-type` values supported by load presets.
+ * `off` omits the flag entirely.
+ */
+export type SpeculativeDecodeType =
+  "off" | "draft-simple" | "draft-mtp" | "draft-dflash" | "draft-dspark" | "draft-eagle3";
+
+/**
+ * `--spec-type` values that load a sidecar draft GGUF via `--spec-draft-model`.
+ */
+export type DraftSpeculativeType = Exclude<SpeculativeDecodeType, "off">;
+
+/**
+ * Sidecar draft types that cannot be loaded as a simple draft model.
+ */
+export type SpecializedDraftSpecType = Exclude<DraftSpeculativeType, "draft-simple">;
+
+/**
+ * Draft `--spec-type` values accepted by llama-server for a sidecar GGUF.
+ */
+export const DRAFT_SPEC_TYPES: readonly DraftSpeculativeType[] = [
+  "draft-simple",
+  "draft-mtp",
+  "draft-dflash",
+  "draft-dspark",
+  "draft-eagle3",
+];
+
+/**
+ * Specialized sidecar types that must not be injected into `draft-simple` mode.
+ */
+export const SPECIALIZED_DRAFT_SPEC_TYPES: readonly SpecializedDraftSpecType[] = [
+  "draft-mtp",
+  "draft-dflash",
+  "draft-dspark",
+  "draft-eagle3",
+];
+
+/**
+ * Every speculative decoding mode persistable on a load preset, including Off.
+ */
+export const SPECULATIVE_DECODE_TYPES: readonly SpeculativeDecodeType[] = [
+  "off",
+  ...DRAFT_SPEC_TYPES,
+];
+
+/**
  * Configuration parameters for loading a GGUF model into llama-server.
  * Maps mostly to CLI flags for fine-tuned control over the inference engine.
  */
@@ -14,7 +60,7 @@ export interface ModelLoadConfig {
   /** Optional path to a multimodal projection file (for vision/audio). */
   mmProjPath?: string | undefined;
   /** Speculative decoding mode. */
-  specType?: "off" | "draft-mtp" | "draft-simple" | "draft-eagle3" | undefined;
+  specType?: SpeculativeDecodeType | undefined;
   /** Absolute path to the draft model GGUF file. */
   specDraftModelPath?: string | undefined;
   /** Maximum number of draft tokens to generate. */
@@ -167,9 +213,10 @@ export interface ModelEntry {
   draftModelPath?: string | undefined;
   /**
    * llama-server `--spec-type` required by {@link draftModelPath}.
-   * `gemma4-assistant` companions are `draft-mtp`, not `draft-simple`.
+   * Specialized companions (`gemma4-assistant`, DFlash, DSpark, Eagle3) must not
+   * be loaded as `draft-simple`.
    */
-  draftSpecType?: "draft-mtp" | "draft-simple" | "draft-eagle3" | undefined;
+  draftSpecType?: DraftSpeculativeType | undefined;
   /** Optional metadata extracted from the GGUF file. */
   metadata?: GgufDisplayMetadata | undefined;
 }

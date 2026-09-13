@@ -13,6 +13,7 @@ import {
   clampVideoFps,
   createDefaultLoadConfig,
   DEFAULT_VIDEO_FPS,
+  isSpecializedDraftSpecType,
   MAX_VIDEO_FPS,
   MIN_VIDEO_FPS,
 } from "../../../shared/defaults";
@@ -25,7 +26,12 @@ import {
 } from "../../../shared/imageTokens";
 import { analyzeLoadPresetChatTemplate } from "../../../shared/templateCapabilities";
 import { detectThinkingConfig } from "../../../shared/thinkingTags";
-import type { LoadPreset, ModelEntry, ModelLoadConfig } from "../../../shared/types";
+import type {
+  LoadPreset,
+  ModelEntry,
+  ModelLoadConfig,
+  SpecializedDraftSpecType,
+} from "../../../shared/types";
 import {
   useCreateLoadPreset,
   useDeleteLoadPreset,
@@ -63,10 +69,64 @@ function fileNameFromPath(filePath: string): string {
 }
 
 /**
+ * Availability of each speculative decoding mode for the selected primary GGUF.
+ */
+interface SpeculativeDecodingAvailability {
+  /** Whether a simple draft companion was scanned (label hint only; Draft Model stays selectable). */
+  draftModel: boolean;
+  /** Whether MTP (`draft-mtp`) can be selected. */
+  mtp: boolean;
+  /** Whether DFlash (`draft-dflash`) can be selected. */
+  dflash: boolean;
+  /** Whether DSpark (`draft-dspark`) can be selected. */
+  dspark: boolean;
+  /** Whether Eagle3 (`draft-eagle3`) can be selected. */
+  eagle3: boolean;
+  /** Absolute path of the scanned sidecar, if any. */
+  detectedDraftPath: string;
+  /** `--spec-type` required by the scanned sidecar, if known. */
+  detectedSpecType: ModelEntry["draftSpecType"];
+}
+
+/**
+ * UI copy for specialized sidecar modes that cannot be loaded as Draft Model.
+ */
+const SPECIALIZED_SPEC_MODE_COPY: Record<
+  SpecializedDraftSpecType,
+  { label: string; warning: string; companionKind: string }
+> = {
+  "draft-mtp": {
+    label: "MTP",
+    warning:
+      "The auto-detected companion is a Gemma MTP assistant and must be loaded with MTP, not Draft Model.",
+    companionKind: "MTP assistant",
+  },
+  "draft-dflash": {
+    label: "DFlash",
+    warning:
+      "The auto-detected companion is a DFlash and must be loaded with DFlash, not Draft Model.",
+    companionKind: "DFlash companion",
+  },
+  "draft-dspark": {
+    label: "DSpark",
+    warning:
+      "The auto-detected companion is a DSpark and must be loaded with DSpark, not Draft Model.",
+    companionKind: "DSpark companion",
+  },
+  "draft-eagle3": {
+    label: "Eagle3",
+    warning:
+      "The auto-detected companion is an Eagle3 and must be loaded with Eagle3, not Draft Model.",
+    companionKind: "Eagle3 companion",
+  },
+};
+
+/**
  * Computes which speculative decoding modes are available for a given model.
  *
  * Draft companions are omitted from the scanned catalog (like mmproj files).
- * `gemma4-assistant` companions require `--spec-type draft-mtp`, not `draft-simple`.
+ * Specialized companions (`gemma4-assistant`, DFlash, DSpark, Eagle3) require
+ * their matching `--spec-type`, not `draft-simple`.
  *
  * @param model - The primary model entry (may be undefined).
  * @param allModels - Full list of scanned models.
@@ -75,17 +135,21 @@ function fileNameFromPath(filePath: string): string {
 function getSpeculativeDecodingAvailability(
   model: ModelEntry | undefined,
   allModels: ModelEntry[],
-): {
-  draftModel: boolean;
-  mtp: boolean;
-  detectedDraftPath: string;
-  detectedSpecType: ModelEntry["draftSpecType"];
-} {
+): SpeculativeDecodingAvailability {
   if (!model) {
-    return { draftModel: false, mtp: false, detectedDraftPath: "", detectedSpecType: undefined };
+    return {
+      draftModel: false,
+      mtp: false,
+      dflash: false,
+      dspark: false,
+      eagle3: false,
+      detectedDraftPath: "",
+      detectedSpecType: undefined,
+    };
   }
   const detectedDraftPath = model.draftModelPath?.trim() ?? "";
   const detectedSpecType = model.draftSpecType;
+  const hasAttachedCompanion = Boolean(detectedDraftPath);
   const modelDir = modelDirectoryPrefix(model.primaryPath);
   const siblingDraft =
     modelDir.length > 0 &&
@@ -95,18 +159,49 @@ function getSpeculativeDecodingAvailability(
         entry.primaryPath !== model.primaryPath &&
         entry.primaryPath.startsWith(modelDir),
     );
-  const hasAttachedMtp = detectedSpecType === "draft-mtp" && Boolean(detectedDraftPath);
+  const hasAttachedSpecialized =
+    hasAttachedCompanion && isSpecializedDraftSpecType(detectedSpecType);
   const hasMtpInName = model.modelName?.toLowerCase().includes("mtp") ?? false;
   const hasSimpleDraft =
-    (Boolean(detectedDraftPath) && detectedSpecType === "draft-simple") ||
-    (Boolean(detectedDraftPath) && !detectedSpecType) ||
+    (hasAttachedCompanion && detectedSpecType === "draft-simple") ||
+    (hasAttachedCompanion && !detectedSpecType) ||
     siblingDraft;
   return {
-    draftModel: hasSimpleDraft && !hasAttachedMtp,
-    mtp: hasAttachedMtp || hasMtpInName,
+    draftModel: hasSimpleDraft && !hasAttachedSpecialized,
+    mtp: (detectedSpecType === "draft-mtp" && hasAttachedCompanion) || hasMtpInName,
+    dflash: detectedSpecType === "draft-dflash" && hasAttachedCompanion,
+    dspark: detectedSpecType === "draft-dspark" && hasAttachedCompanion,
+    eagle3: detectedSpecType === "draft-eagle3" && hasAttachedCompanion,
     detectedDraftPath,
     detectedSpecType,
   };
+}
+
+/**
+ * Returns whether the selected speculative mode is valid for the scanned companion.
+ *
+ * Off and Draft Model are always selectable. Specialized modes require a matching sidecar.
+ *
+ * @param specType - Currently selected `--spec-type`.
+ * @param availability - Companion detection flags for the primary model.
+ * @returns `true` when the mode may remain selected.
+ */
+function isSpecModeAvailable(
+  specType: ModelLoadConfig["specType"],
+  availability: SpeculativeDecodingAvailability,
+): boolean {
+  switch (specType) {
+    case "draft-mtp":
+      return availability.mtp;
+    case "draft-dflash":
+      return availability.dflash;
+    case "draft-dspark":
+      return availability.dspark;
+    case "draft-eagle3":
+      return availability.eagle3;
+    default:
+      return true;
+  }
 }
 
 /**
@@ -173,7 +268,7 @@ export function LoadPresetEditor() {
     );
     const availability = getSpeculativeDecodingAvailability(matching, models);
     const currentType = config.specType ?? "off";
-    if (currentType !== "draft-mtp" || availability.mtp) return;
+    if (isSpecModeAvailable(currentType, availability)) return;
     setLocalState((prev) =>
       prev?.config ? { ...prev, config: { ...prev.config, specType: "off" } } : prev,
     );
@@ -842,7 +937,49 @@ export function LoadPresetEditor() {
             {(() => {
               const availability = getSpeculativeDecodingAvailability(matchingModel, models);
               const currentType = config.specType ?? "off";
-              const isInvalidMtp = currentType === "draft-mtp" && !availability.mtp;
+              const isInvalidSpecialized = !isSpecModeAvailable(currentType, availability);
+              const specializedOptions: {
+                value: SpecializedDraftSpecType;
+                available: boolean;
+                foundHint: string;
+                missingHint: string;
+              }[] = [
+                {
+                  value: "draft-mtp",
+                  available: availability.mtp,
+                  foundHint:
+                    availability.detectedSpecType === "draft-mtp"
+                      ? " (assistant companion found)"
+                      : "",
+                  missingHint: " (no MTP model found)",
+                },
+                {
+                  value: "draft-dflash",
+                  available: availability.dflash,
+                  foundHint: " (companion found)",
+                  missingHint: " (no DFlash model found)",
+                },
+                {
+                  value: "draft-dspark",
+                  available: availability.dspark,
+                  foundHint: " (companion found)",
+                  missingHint: " (no DSpark model found)",
+                },
+                {
+                  value: "draft-eagle3",
+                  available: availability.eagle3,
+                  foundHint: " (companion found)",
+                  missingHint: " (no Eagle3 model found)",
+                },
+              ];
+              const detectedWarning =
+                currentType === "draft-simple" &&
+                isSpecializedDraftSpecType(availability.detectedSpecType)
+                  ? SPECIALIZED_SPEC_MODE_COPY[availability.detectedSpecType].warning
+                  : undefined;
+              const autoDetectedKind = isSpecializedDraftSpecType(availability.detectedSpecType)
+                ? SPECIALIZED_SPEC_MODE_COPY[availability.detectedSpecType].companionKind
+                : "companion";
               return (
                 <>
                   <label htmlFor="specType" className="block font-medium">
@@ -862,7 +999,7 @@ export function LoadPresetEditor() {
                           next.specDraftModelPath = detected;
                         } else if (
                           val === "draft-simple" &&
-                          detectedType === "draft-mtp" &&
+                          isSpecializedDraftSpecType(detectedType) &&
                           next.specDraftModelPath === detected
                         ) {
                           next.specDraftModelPath = "";
@@ -873,31 +1010,25 @@ export function LoadPresetEditor() {
                     disabled={isReadonly}
                     className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded">
                     <option value="off">Off</option>
-                    <option value="draft-mtp" disabled={!availability.mtp}>
-                      MTP
-                      {availability.mtp
-                        ? availability.detectedSpecType === "draft-mtp"
-                          ? " (assistant companion found)"
-                          : ""
-                        : " (no MTP model found)"}
-                    </option>
+                    {specializedOptions.map((option) => (
+                      <option key={option.value} value={option.value} disabled={!option.available}>
+                        {SPECIALIZED_SPEC_MODE_COPY[option.value].label}
+                        {option.available ? option.foundHint : option.missingHint}
+                      </option>
+                    ))}
                     <option value="draft-simple">
                       Draft Model
                       {availability.draftModel ? "" : " (set path below)"}
                     </option>
                   </select>
-                  {isInvalidMtp && (
+                  {isInvalidSpecialized && (
                     <p className="text-[11px] text-red-400">
                       Selected mode is not available for this model. Switching to Off.
                     </p>
                   )}
-                  {currentType === "draft-simple" &&
-                    availability.detectedSpecType === "draft-mtp" && (
-                      <p className="text-[11px] text-amber-400">
-                        The auto-detected companion is a Gemma MTP assistant and must be loaded with
-                        MTP, not Draft Model.
-                      </p>
-                    )}
+                  {detectedWarning && (
+                    <p className="text-[11px] text-amber-400">{detectedWarning}</p>
+                  )}
 
                   <div className="space-y-1 pt-2">
                     <label
@@ -988,11 +1119,8 @@ export function LoadPresetEditor() {
                     />
                     {availability.detectedDraftPath && !config.specDraftModelPath?.trim() && (
                       <p className="text-[11px] text-[var(--color-text-muted)]">
-                        Auto-detected{" "}
-                        {availability.detectedSpecType === "draft-mtp"
-                          ? "MTP assistant"
-                          : "companion"}
-                        : {fileNameFromPath(availability.detectedDraftPath)}
+                        Auto-detected {autoDetectedKind}:{" "}
+                        {fileNameFromPath(availability.detectedDraftPath)}
                       </p>
                     )}
                   </div>

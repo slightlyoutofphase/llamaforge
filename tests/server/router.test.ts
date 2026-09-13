@@ -845,6 +845,162 @@ describe("router", () => {
     }
   });
 
+  it("POST /api/server/load auto-populates specDraftModelPath for DFlash, DSpark, and Eagle3", async () => {
+    await saveSettings({
+      modelsPath: settings.modelsPath,
+      llamaServerPath: settings.llamaServerPath,
+      llamaPortRangeMin: settings.llamaPortRangeMin,
+      llamaPortRangeMax: settings.llamaPortRangeMax,
+    });
+
+    const cases = [
+      {
+        specType: "draft-dflash",
+        draftModelPath: "/tmp/models/main-dflash.gguf",
+      },
+      {
+        specType: "draft-dspark",
+        draftModelPath: "/tmp/models/main-dspark.gguf",
+      },
+      {
+        specType: "draft-eagle3",
+        draftModelPath: "/tmp/models/main-eagle3.gguf",
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const router = createRouter();
+      const modelScannerModule = await import("../../src/server/modelScanner.ts");
+      const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
+
+      const scanSpy = spyOn(modelScannerModule, "scanModels").mockResolvedValue([
+        {
+          publisher: "Test Publisher",
+          modelName: "Main Model",
+          primaryPath: "/tmp/models/main.gguf",
+          draftModelPath: testCase.draftModelPath,
+          draftSpecType: testCase.specType,
+        },
+      ]);
+      const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(null);
+      const loadSpy = spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+
+      try {
+        const res = await router.fetch(
+          new Request("http://localhost/api/server/load", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              modelPath: "/tmp/models/main.gguf",
+              contextSize: 4096,
+              contextShift: false,
+              gpuLayers: 0,
+              threads: 4,
+              batchSize: 512,
+              microBatchSize: 128,
+              ropeScaling: "none",
+              ropeFreqBase: 10000,
+              ropeFreqScale: 1,
+              kvCacheTypeK: "f16",
+              kvCacheTypeV: "f16",
+              mlock: false,
+              noMmap: false,
+              contBatching: true,
+              flashAttn: "off",
+              swaFull: false,
+              noKvOffload: false,
+              cacheReuse: 0,
+              specType: testCase.specType,
+            }),
+          }),
+          noUpgradeServer,
+        );
+
+        expect(res?.status).toBe(200);
+        expect(loadSpy).toHaveBeenCalledTimes(1);
+        expect(loadSpy.mock.calls[0]?.[0]).toEqual(
+          expect.objectContaining({
+            modelPath: "/tmp/models/main.gguf",
+            specType: testCase.specType,
+            specDraftModelPath: testCase.draftModelPath,
+          }),
+        );
+      } finally {
+        scanSpy.mockRestore();
+        metadataSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    }
+  });
+
+  it("POST /api/server/load does not inject specialized sidecars into draft-simple mode", async () => {
+    await saveSettings({
+      modelsPath: settings.modelsPath,
+      llamaServerPath: settings.llamaServerPath,
+      llamaPortRangeMin: settings.llamaPortRangeMin,
+      llamaPortRangeMax: settings.llamaPortRangeMax,
+    });
+
+    const specializedTypes = ["draft-dflash", "draft-dspark", "draft-eagle3"] as const;
+    for (const specType of specializedTypes) {
+      const router = createRouter();
+      const modelScannerModule = await import("../../src/server/modelScanner.ts");
+      const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
+
+      const scanSpy = spyOn(modelScannerModule, "scanModels").mockResolvedValue([
+        {
+          publisher: "Test Publisher",
+          modelName: "Main Model",
+          primaryPath: "/tmp/models/main.gguf",
+          draftModelPath: `/tmp/models/main-${specType}.gguf`,
+          draftSpecType: specType,
+        },
+      ]);
+      const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(null);
+      const loadSpy = spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+
+      try {
+        const res = await router.fetch(
+          new Request("http://localhost/api/server/load", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              modelPath: "/tmp/models/main.gguf",
+              contextSize: 4096,
+              contextShift: false,
+              gpuLayers: 0,
+              threads: 4,
+              batchSize: 512,
+              microBatchSize: 128,
+              ropeScaling: "none",
+              ropeFreqBase: 10000,
+              ropeFreqScale: 1,
+              kvCacheTypeK: "f16",
+              kvCacheTypeV: "f16",
+              mlock: false,
+              noMmap: false,
+              contBatching: true,
+              flashAttn: "off",
+              swaFull: false,
+              noKvOffload: false,
+              cacheReuse: 0,
+              specType: "draft-simple",
+            }),
+          }),
+          noUpgradeServer,
+        );
+
+        expect(res?.status).toBe(200);
+        expect(loadSpy).toHaveBeenCalledTimes(1);
+        expect(loadSpy.mock.calls[0]?.[0]).not.toHaveProperty("specDraftModelPath");
+      } finally {
+        scanSpy.mockRestore();
+        metadataSpy.mockRestore();
+        loadSpy.mockRestore();
+      }
+    }
+  });
+
   it("POST /api/server/unload responds before teardown finishes", async () => {
     const router = createRouter();
     const unloadSpy = spyOn(llamaServerModule, "requestUnloadModel").mockImplementation(

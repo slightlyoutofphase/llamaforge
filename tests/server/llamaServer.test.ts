@@ -161,6 +161,27 @@ describe("llamaServer", () => {
     expect(args[args.indexOf("--spec-draft-model") + 1]).toBe("/models/draft.gguf");
   });
 
+  it("adds --spec-type for DFlash, DSpark, and Eagle3 draft companions", () => {
+    const cases = [
+      { specType: "draft-dflash", draftPath: "/models/model-dflash.gguf" },
+      { specType: "draft-dspark", draftPath: "/models/model-dspark.gguf" },
+      { specType: "draft-eagle3", draftPath: "/models/model-eagle3.gguf" },
+    ] as const;
+
+    for (const testCase of cases) {
+      const args = buildArgs(
+        {
+          ...baseConfig,
+          specType: testCase.specType,
+          specDraftModelPath: testCase.draftPath,
+        },
+        8080,
+      );
+      expect(args[args.indexOf("--spec-type") + 1]).toBe(testCase.specType);
+      expect(args[args.indexOf("--spec-draft-model") + 1]).toBe(testCase.draftPath);
+    }
+  });
+
   it("omits speculative decoding flags when mode is off", () => {
     const config: ModelLoadConfig = {
       ...baseConfig,
