@@ -9,6 +9,7 @@ import {
   createDefaultInferenceSampling,
   createDefaultLoadConfig,
   DEFAULT_APP_SETTINGS,
+  resolveSpecDraftModelPath,
 } from "../../src/shared/defaults";
 
 describe("shared defaults", () => {
@@ -55,5 +56,30 @@ describe("shared defaults", () => {
     expect(sampling.contextOverflowPolicy).toBe("TruncateMiddle");
     expect(sampling.thinkingEnabled).toBe(true);
     expect(sampling.maxTokens).toBe(-1);
+  });
+
+  it("prefers an explicit draft path and otherwise uses the scanned companion", () => {
+    expect(
+      resolveSpecDraftModelPath(
+        "draft-simple",
+        "/presets/custom-assistant.gguf",
+        "/models/auto-assistant.gguf",
+      ),
+    ).toBe("/presets/custom-assistant.gguf");
+    expect(resolveSpecDraftModelPath("draft-simple", "  ", "/models/auto-assistant.gguf")).toBe(
+      "/models/auto-assistant.gguf",
+    );
+    expect(resolveSpecDraftModelPath("draft-mtp", "", "/models/auto-assistant.gguf")).toBe(
+      "/models/auto-assistant.gguf",
+    );
+    expect(
+      resolveSpecDraftModelPath("draft-mtp", "", "/models/auto-assistant.gguf", "draft-mtp"),
+    ).toBe("/models/auto-assistant.gguf");
+    expect(
+      resolveSpecDraftModelPath("draft-simple", "", "/models/auto-assistant.gguf", "draft-mtp"),
+    ).toBeUndefined();
+    expect(
+      resolveSpecDraftModelPath("off", "/models/auto-assistant.gguf", undefined),
+    ).toBeUndefined();
   });
 });

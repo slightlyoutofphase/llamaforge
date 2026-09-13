@@ -23,6 +23,9 @@ mock.module("react-dropzone", () => ({
 import { InputBar } from "../../src/client/components/chat/InputBar";
 import { useAppStore } from "../../src/client/store";
 
+/** {@link InputBar} send callback used by these tests. */
+type SendHandler = (content: string, files: File[]) => void | Promise<void>;
+
 describe("InputBar Component", () => {
   beforeEach(() => {
     mock.restore();
@@ -41,6 +44,10 @@ describe("InputBar Component", () => {
 
     const buttons = screen.getAllByRole("button");
     const stopButton = buttons[buttons.length - 1];
+    expect(stopButton).toBeDefined();
+    if (!stopButton) {
+      throw new Error("expected a stop button");
+    }
     fireEvent.click(stopButton);
 
     expect(onStop).toHaveBeenCalledTimes(1);
@@ -56,6 +63,10 @@ describe("InputBar Component", () => {
     const textarea = screen.getByPlaceholderText("Type your message...");
     const buttons = screen.getAllByRole("button");
     const sendButton = buttons[buttons.length - 1];
+    expect(sendButton).toBeDefined();
+    if (!sendButton) {
+      throw new Error("expected a send button");
+    }
 
     fireEvent.change(textarea, { target: { value: "Hello" } });
     return act(async () => {
@@ -94,6 +105,10 @@ describe("InputBar Component", () => {
 
       const buttons = screen.getAllByRole("button");
       const sendButton = buttons[buttons.length - 1];
+      expect(sendButton).toBeDefined();
+      if (!sendButton) {
+        throw new Error("expected a send button");
+      }
       await act(async () => {
         fireEvent.click(sendButton);
       });
@@ -108,7 +123,7 @@ describe("InputBar Component", () => {
 
   it("keeps attachments mounted until an async send completes", async () => {
     let resolveSend: (() => void) | undefined;
-    const onSend = mock(
+    const onSend = mock<SendHandler>(
       () =>
         new Promise<void>((resolve) => {
           resolveSend = resolve;
@@ -136,17 +151,22 @@ describe("InputBar Component", () => {
 
       const buttons = screen.getAllByRole("button");
       const sendButton = buttons[buttons.length - 1];
+      expect(sendButton).toBeDefined();
+      if (!sendButton) {
+        throw new Error("expected a send button");
+      }
       await act(async () => {
         fireEvent.click(sendButton);
         await Promise.resolve();
       });
 
       expect(onSend).toHaveBeenCalledTimes(1);
-      const [sentContent, sentFiles] = onSend.mock.calls[0] as [string, File[]];
-      expect(sentContent).toBe("Wait for send");
-      expect(sentFiles).toHaveLength(1);
-      expect(sentFiles[0]?.name).toBe(file.name);
-      expect(sentFiles[0]?.type).toBe(file.type);
+      const firstCall = onSend.mock.calls[0];
+      expect(firstCall).toBeDefined();
+      expect(firstCall?.[0]).toBe("Wait for send");
+      expect(firstCall?.[1]).toHaveLength(1);
+      expect(firstCall?.[1]?.[0]?.name).toBe(file.name);
+      expect(firstCall?.[1]?.[0]?.type).toBe(file.type);
       expect(screen.getByAltText("delayed.png")).toBeTruthy();
       expect((textarea as HTMLTextAreaElement).value).toBe("Wait for send");
       expect(revokeObjectURLMock).not.toHaveBeenCalled();

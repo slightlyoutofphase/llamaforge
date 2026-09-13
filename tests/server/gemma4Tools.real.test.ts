@@ -40,6 +40,9 @@ describeGemma4("Gemma 4 live tool round trip", () => {
       const llamaServerPath = process.env["LLAMA_SERVER_PATH"];
       expect(modelPath).toBeString();
       expect(llamaServerPath).toBeString();
+      if (!modelPath || !llamaServerPath) {
+        throw new Error("GEMMA4_GGUF_PATH and LLAMA_SERVER_PATH must be set");
+      }
 
       const { initDb, resetDb } = await import("../../src/server/persistence/db");
       const { saveSettings } = await import("../../src/server/persistence/settingsRepo");

@@ -143,3 +143,31 @@ export function createDefaultLoadConfig(modelPath: string = ""): ModelLoadConfig
     specDraftModelPath: "",
   };
 }
+
+/**
+ * Resolves the draft GGUF path that should be sent to llama-server.
+ * An explicit preset path wins; otherwise the scanned same-directory companion is used
+ * when its required `--spec-type` matches the selected mode.
+ *
+ * @param specType - Selected speculative decoding mode.
+ * @param configuredPath - Path stored on the load preset, if any.
+ * @param detectedPath - Companion draft path discovered next to the main GGUF.
+ * @param detectedSpecType - `--spec-type` required by the scanned companion, if known.
+ * @returns Path to pass as `--spec-draft-model`, or `undefined` to omit the flag.
+ */
+export function resolveSpecDraftModelPath(
+  specType: ModelLoadConfig["specType"],
+  configuredPath: string | undefined,
+  detectedPath: string | undefined,
+  detectedSpecType?: "draft-mtp" | "draft-simple" | "draft-eagle3" | undefined,
+): string | undefined {
+  if (specType !== "draft-simple" && specType !== "draft-eagle3" && specType !== "draft-mtp") {
+    return undefined;
+  }
+  const configured = configuredPath?.trim();
+  if (configured) return configured;
+  const detected = detectedPath?.trim();
+  if (!detected) return undefined;
+  if (detectedSpecType && detectedSpecType !== specType) return undefined;
+  return detected;
+}

@@ -20,6 +20,7 @@ import type { ModelLoadConfig } from "../../src/shared/types";
 const baseConfig: ModelLoadConfig = {
   modelPath: "/models/model.gguf",
   contextSize: 4096,
+  contextShift: false,
   gpuLayers: 33,
   threads: 4,
   batchSize: 512,
@@ -127,6 +128,21 @@ describe("llamaServer", () => {
     expect(args[args.indexOf("--spec-draft-n-min") + 1]).toBe("2");
     expect(args).toContain("--spec-draft-p-min");
     expect(args[args.indexOf("--spec-draft-p-min") + 1]).toBe("0.85");
+  });
+
+  it("adds draft model path for draft-mtp attached assistants", () => {
+    const config: ModelLoadConfig = {
+      ...baseConfig,
+      specType: "draft-mtp",
+      specDraftModelPath: "/models/gemma4-assistant.gguf",
+      specDraftNMax: 4,
+    };
+
+    const args = buildArgs(config, 8080);
+
+    expect(args[args.indexOf("--spec-type") + 1]).toBe("draft-mtp");
+    expect(args).toContain("--spec-draft-model");
+    expect(args[args.indexOf("--spec-draft-model") + 1]).toBe("/models/gemma4-assistant.gguf");
   });
 
   it("adds draft model path for draft-simple mode", () => {

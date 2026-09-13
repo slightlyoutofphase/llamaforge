@@ -12,6 +12,7 @@ import { getAppDataDir, initDb } from "../../src/server/persistence/db";
 import { createInferencePreset } from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
 import { __setHardwareProbe } from "../../src/server/router";
+import { ggufDisplayMetadata, noUpgradeServer, setBunEnv } from "../fixtures";
 
 let createRouter: typeof import("../../src/server/router").createRouter;
 
@@ -39,7 +40,7 @@ describe("router", () => {
   it("GET /health returns 200 OK", async () => {
     const router = createRouter();
     const req = new Request("http://localhost/health");
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     expect(await res?.text()).toBe("OK");
   });
@@ -65,13 +66,13 @@ describe("router", () => {
       const req = new Request("http://localhost/chat/prod-route", {
         headers: { Accept: "text/html" },
       });
-      const res = await router.fetch(req, {});
+      const res = await router.fetch(req, noUpgradeServer);
 
       expect(res?.status).toBe(200);
       expect(await res?.text()).toContain("ok");
     } finally {
       fileSpy.mockRestore();
-      Bun.env.NODE_ENV = previousNodeEnv;
+      setBunEnv("NODE_ENV", previousNodeEnv);
     }
   });
 
@@ -82,12 +83,12 @@ describe("router", () => {
     try {
       const router = createRouter();
       const req = new Request("http://localhost/assets/does-not-exist.js");
-      const res = await router.fetch(req, {});
+      const res = await router.fetch(req, noUpgradeServer);
 
       expect(res?.status).toBe(404);
       expect(await res?.text()).toBe("Not Found");
     } finally {
-      Bun.env.NODE_ENV = previousNodeEnv;
+      setBunEnv("NODE_ENV", previousNodeEnv);
     }
   });
 
@@ -101,19 +102,19 @@ describe("router", () => {
         method: "POST",
         headers: { Accept: "text/html" },
       });
-      const res = await router.fetch(req, {});
+      const res = await router.fetch(req, noUpgradeServer);
 
       expect(res?.status).toBe(404);
       expect(await res?.text()).toBe("Not Found");
     } finally {
-      Bun.env.NODE_ENV = previousNodeEnv;
+      setBunEnv("NODE_ENV", previousNodeEnv);
     }
   });
 
   it("GET /api/settings returns settings", async () => {
     const router = createRouter();
     const req = new Request("http://localhost/api/settings");
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     const body = await res?.json();
     expect(body).toBeDefined();
@@ -121,7 +122,7 @@ describe("router", () => {
 
   it("GET /api/tools lists built-in and user TypeScript tools", async () => {
     const router = createRouter();
-    const res = await router.fetch(new Request("http://localhost/api/tools"), {});
+    const res = await router.fetch(new Request("http://localhost/api/tools"), noUpgradeServer);
     expect(res?.status).toBe(200);
     const body = (await res?.json()) as {
       tools?: Array<{ name?: string; source?: string; execute?: unknown }>;
@@ -142,14 +143,17 @@ describe("router", () => {
   it("JSON API responses close the connection for direct browser clients", async () => {
     const router = createRouter();
 
-    const settingsRes = await router.fetch(new Request("http://localhost/api/settings"), {});
+    const settingsRes = await router.fetch(
+      new Request("http://localhost/api/settings"),
+      noUpgradeServer,
+    );
     const chatRes = await router.fetch(
       new Request("http://localhost/api/chats", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: "Connection Close Test" }),
       }),
-      {},
+      noUpgradeServer,
     );
 
     expect(settingsRes?.status).toBe(200);
@@ -168,7 +172,7 @@ describe("router", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messageId: "missing-message", newContent: "edited" }),
       }),
-      {},
+      noUpgradeServer,
     );
 
     expect(res?.status).toBe(404);
@@ -185,7 +189,7 @@ describe("router", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ requestTimeoutSeconds: -1 }),
       }),
-      {},
+      noUpgradeServer,
     );
 
     expect(res?.status).toBe(400);
@@ -207,33 +211,32 @@ describe("router", () => {
         primaryPath: "/tmp/models/cached.gguf",
       },
     ]);
-    const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue({
-      architecture: "llama",
-      name: "Cached Model",
-      fileSizeBytes: 123,
-      contextLength: 4096,
-      embeddingLength: undefined,
-      attentionHeadCount: undefined,
-      attentionHeadCountKv: undefined,
-      blockCount: undefined,
-      feedForwardLength: undefined,
-      quantType: undefined,
-      hasVisionEncoder: false,
-      hasAudioEncoder: false,
-      hasToolCalling: false,
-      defaultTemperature: undefined,
-      defaultTopK: undefined,
-      defaultTopP: undefined,
-      defaultMinP: undefined,
-      defaultRepeatPenalty: undefined,
-      chatTemplate: undefined,
-    });
+    const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(
+      ggufDisplayMetadata({
+        architecture: "llama",
+        name: "Cached Model",
+        fileSizeBytes: 123,
+        contextLength: 4096,
+        embeddingLength: undefined,
+        attentionHeadCount: undefined,
+        attentionHeadCountKv: undefined,
+        blockCount: undefined,
+        feedForwardLength: undefined,
+        quantType: undefined,
+      }),
+    );
     const presetSpy = spyOn(presetRepoModule, "ensureModelDefaultPresets").mockResolvedValue();
     const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
 
     try {
-      const firstRes = await router.fetch(new Request("http://localhost/api/models"), {});
-      const secondRes = await router.fetch(new Request("http://localhost/api/models"), {});
+      const firstRes = await router.fetch(
+        new Request("http://localhost/api/models"),
+        noUpgradeServer,
+      );
+      const secondRes = await router.fetch(
+        new Request("http://localhost/api/models"),
+        noUpgradeServer,
+      );
       const body: any[] = (await secondRes?.json()) as any[];
 
       expect(firstRes?.status).toBe(200);
@@ -284,6 +287,7 @@ describe("router", () => {
         hasVisionEncoder: false,
         hasAudioEncoder: false,
         hasToolCalling: false,
+        isDraftModel: false,
         defaultTemperature: undefined,
         defaultTopK: undefined,
         defaultTopP: undefined,
@@ -298,7 +302,7 @@ describe("router", () => {
     try {
       const res = await router.fetch(
         new Request("http://localhost/api/models/rescan", { method: "POST" }),
-        {},
+        noUpgradeServer,
       );
       expect(res?.status).toBe(200);
       expect(scanSpy).toHaveBeenCalledTimes(1);
@@ -317,14 +321,14 @@ describe("router", () => {
   it("returns 404 for unknown endpoints", async () => {
     const router = createRouter();
     const req = new Request("http://localhost/api/unknown");
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(404);
   });
 
   it("GET /api/attachments/nonexistent returns 404", async () => {
     const router = createRouter();
     const req = new Request("http://localhost/api/attachments/nonexistent.txt");
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(404);
   });
 
@@ -335,7 +339,7 @@ describe("router", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "Router Test Chat", modelPath: "some/path.gguf" }),
     });
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     const body: any = await res?.json();
     expect(body.id).toBeDefined();
@@ -346,7 +350,7 @@ describe("router", () => {
   it("GET /api/chats returns chat list", async () => {
     const router = createRouter();
     const req = new Request("http://localhost/api/chats");
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     const body: any = await res?.json();
     expect(Array.isArray(body)).toBe(true);
@@ -357,7 +361,7 @@ describe("router", () => {
     const chat = await createChat("Specific Chat", "test.gguf");
     const router = createRouter();
     const req = new Request(`http://localhost/api/chats/${chat.id}`);
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     const body: any = await res?.json();
     expect(body.id).toBe(chat.id);
@@ -381,7 +385,7 @@ describe("router", () => {
         body: formData,
       });
 
-      const res = await router.fetch(req, {});
+      const res = await router.fetch(req, noUpgradeServer);
       expect(res?.status).toBe(200);
       expect(proxyCompletionSpy).toHaveBeenCalledTimes(1);
       const firstCall = proxyCompletionSpy.mock.calls[0]?.[0] as {
@@ -407,12 +411,12 @@ describe("router", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: "Updated Chat" }),
     });
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
 
     // Verify update
     const getReq = new Request(`http://localhost/api/chats/${chat.id}`);
-    const getRes = await router.fetch(getReq, {});
+    const getRes = await router.fetch(getReq, noUpgradeServer);
     const getBody: any = await getRes?.json();
     expect(getBody.name).toBe("Updated Chat");
   });
@@ -430,7 +434,7 @@ describe("router", () => {
         },
       }),
     });
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     const body: any = await res?.json();
     expect(body.success).toBe(true);
@@ -468,7 +472,7 @@ describe("router", () => {
     });
     const router = createRouter();
     const req = new Request("http://localhost/api/presets/inference");
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     const body: any = await res?.json();
     expect(Array.isArray(body)).toBe(true);
@@ -478,7 +482,7 @@ describe("router", () => {
   it("GET /api/hardware returns hardware info payload", async () => {
     const router = createRouter();
     const req = new Request("http://localhost/api/hardware");
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     const body: any = await res?.json();
     expect(body.cpuThreads).toBeDefined();
@@ -489,7 +493,7 @@ describe("router", () => {
   it("GET /api/server/status returns current server runtime config", async () => {
     const router = createRouter();
     const req = new Request("http://localhost/api/server/status");
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(200);
     const body: any = await res?.json();
     expect(body).toBeDefined();
@@ -546,7 +550,7 @@ describe("router", () => {
             cacheReuse: 0,
           }),
         }),
-        {},
+        noUpgradeServer,
       );
 
       expect(res?.status).toBe(200);
@@ -615,7 +619,7 @@ describe("router", () => {
             specType: "draft-simple",
           }),
         }),
-        {},
+        noUpgradeServer,
       );
 
       expect(res?.status).toBe(200);
@@ -633,7 +637,7 @@ describe("router", () => {
     }
   });
 
-  it("POST /api/server/load does not auto-populate specDraftModelPath for draft-mtp mode", async () => {
+  it("POST /api/server/load keeps an explicit specDraftModelPath instead of overwriting it", async () => {
     await saveSettings({
       modelsPath: settings.modelsPath,
       llamaServerPath: settings.llamaServerPath,
@@ -681,17 +685,159 @@ describe("router", () => {
             swaFull: false,
             noKvOffload: false,
             cacheReuse: 0,
-            specType: "draft-mtp",
+            specType: "draft-simple",
+            specDraftModelPath: "/tmp/models/custom-assistant.gguf",
           }),
         }),
-        {},
+        noUpgradeServer,
       );
 
       expect(res?.status).toBe(200);
       expect(loadSpy).toHaveBeenCalledTimes(1);
-      const mtpCall = loadSpy.mock.calls[0]?.[0] as Record<string, unknown>;
-      expect(mtpCall?.modelPath).toBe("/tmp/models/main.gguf");
-      expect(mtpCall).not.toHaveProperty("specDraftModelPath");
+      expect(loadSpy.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          modelPath: "/tmp/models/main.gguf",
+          specDraftModelPath: "/tmp/models/custom-assistant.gguf",
+        }),
+      );
+    } finally {
+      scanSpy.mockRestore();
+      metadataSpy.mockRestore();
+      loadSpy.mockRestore();
+    }
+  });
+
+  it("POST /api/server/load auto-populates specDraftModelPath for draft-mtp assistants", async () => {
+    await saveSettings({
+      modelsPath: settings.modelsPath,
+      llamaServerPath: settings.llamaServerPath,
+      llamaPortRangeMin: settings.llamaPortRangeMin,
+      llamaPortRangeMax: settings.llamaPortRangeMax,
+    });
+
+    const router = createRouter();
+    const modelScannerModule = await import("../../src/server/modelScanner.ts");
+    const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
+
+    const scanSpy = spyOn(modelScannerModule, "scanModels").mockResolvedValue([
+      {
+        publisher: "Test Publisher",
+        modelName: "Main Model",
+        primaryPath: "/tmp/models/main.gguf",
+        draftModelPath: "/tmp/models/main-assistant.gguf",
+        draftSpecType: "draft-mtp",
+      },
+    ]);
+    const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(null);
+    const loadSpy = spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+
+    try {
+      const res = await router.fetch(
+        new Request("http://localhost/api/server/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            modelPath: "/tmp/models/main.gguf",
+            contextSize: 4096,
+            contextShift: false,
+            gpuLayers: 0,
+            threads: 4,
+            batchSize: 512,
+            microBatchSize: 128,
+            ropeScaling: "none",
+            ropeFreqBase: 10000,
+            ropeFreqScale: 1,
+            kvCacheTypeK: "f16",
+            kvCacheTypeV: "f16",
+            mlock: false,
+            noMmap: false,
+            contBatching: true,
+            flashAttn: "off",
+            swaFull: false,
+            noKvOffload: false,
+            cacheReuse: 0,
+            specType: "draft-mtp",
+          }),
+        }),
+        noUpgradeServer,
+      );
+
+      expect(res?.status).toBe(200);
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+      expect(loadSpy.mock.calls[0]?.[0]).toEqual(
+        expect.objectContaining({
+          modelPath: "/tmp/models/main.gguf",
+          specType: "draft-mtp",
+          specDraftModelPath: "/tmp/models/main-assistant.gguf",
+        }),
+      );
+    } finally {
+      scanSpy.mockRestore();
+      metadataSpy.mockRestore();
+      loadSpy.mockRestore();
+    }
+  });
+
+  it("POST /api/server/load does not inject an MTP assistant into draft-simple mode", async () => {
+    await saveSettings({
+      modelsPath: settings.modelsPath,
+      llamaServerPath: settings.llamaServerPath,
+      llamaPortRangeMin: settings.llamaPortRangeMin,
+      llamaPortRangeMax: settings.llamaPortRangeMax,
+    });
+
+    const router = createRouter();
+    const modelScannerModule = await import("../../src/server/modelScanner.ts");
+    const chatRepoModule = await import("../../src/server/persistence/chatRepo.ts");
+
+    const scanSpy = spyOn(modelScannerModule, "scanModels").mockResolvedValue([
+      {
+        publisher: "Test Publisher",
+        modelName: "Main Model",
+        primaryPath: "/tmp/models/main.gguf",
+        draftModelPath: "/tmp/models/main-assistant.gguf",
+        draftSpecType: "draft-mtp",
+      },
+    ]);
+    const metadataSpy = spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(null);
+    const loadSpy = spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+
+    try {
+      const res = await router.fetch(
+        new Request("http://localhost/api/server/load", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            modelPath: "/tmp/models/main.gguf",
+            contextSize: 4096,
+            contextShift: false,
+            gpuLayers: 0,
+            threads: 4,
+            batchSize: 512,
+            microBatchSize: 128,
+            ropeScaling: "none",
+            ropeFreqBase: 10000,
+            ropeFreqScale: 1,
+            kvCacheTypeK: "f16",
+            kvCacheTypeV: "f16",
+            mlock: false,
+            noMmap: false,
+            contBatching: true,
+            flashAttn: "off",
+            swaFull: false,
+            noKvOffload: false,
+            cacheReuse: 0,
+            specType: "draft-simple",
+          }),
+        }),
+        noUpgradeServer,
+      );
+
+      expect(res?.status).toBe(200);
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+      const simpleCall = loadSpy.mock.calls[0]?.[0];
+      expect(simpleCall?.modelPath).toBe("/tmp/models/main.gguf");
+      expect(simpleCall).not.toHaveProperty("specDraftModelPath");
     } finally {
       scanSpy.mockRestore();
       metadataSpy.mockRestore();
@@ -708,7 +854,10 @@ describe("router", () => {
     try {
       const timeoutToken = Symbol("timeout");
       const responseOrTimeout = await Promise.race([
-        router.fetch(new Request("http://localhost/api/server/unload", { method: "POST" }), {}),
+        router.fetch(
+          new Request("http://localhost/api/server/unload", { method: "POST" }),
+          noUpgradeServer,
+        ),
         new Promise<symbol>((resolve) => setTimeout(() => resolve(timeoutToken), 100)),
       ]);
 
@@ -766,7 +915,7 @@ describe("router", () => {
       },
       body: JSON.stringify({ name: "Injected" }),
     });
-    const res = await router.fetch(req, {});
+    const res = await router.fetch(req, noUpgradeServer);
     expect(res?.status).toBe(403);
   });
 
@@ -790,7 +939,10 @@ describe("router", () => {
 
     try {
       const router = createRouter();
-      const res = await router.fetch(new Request("http://localhost/assets/app.js"), {});
+      const res = await router.fetch(
+        new Request("http://localhost/assets/app.js"),
+        noUpgradeServer,
+      );
 
       expect(res?.status).toBe(200);
       expect(await res?.text()).toBe("console.log(1)");
@@ -800,7 +952,7 @@ describe("router", () => {
       ).toBe(false);
     } finally {
       fileSpy.mockRestore();
-      Bun.env.NODE_ENV = previousNodeEnv;
+      setBunEnv("NODE_ENV", previousNodeEnv);
     }
   });
 
@@ -822,8 +974,11 @@ describe("router", () => {
 
     try {
       const router = createRouter();
-      await router.fetch(new Request("http://localhost/assets/../../llamaforge.db"), {});
-      await router.fetch(new Request("http://localhost/etc/passwd"), {});
+      await router.fetch(
+        new Request("http://localhost/assets/../../llamaforge.db"),
+        noUpgradeServer,
+      );
+      await router.fetch(new Request("http://localhost/etc/passwd"), noUpgradeServer);
 
       const normalized = requestedPaths.map((p) => p.replace(/\\/g, "/"));
       expect(normalized.length).toBeGreaterThan(0);
@@ -839,7 +994,7 @@ describe("router", () => {
       ).toBe(false);
     } finally {
       fileSpy.mockRestore();
-      Bun.env.NODE_ENV = previousNodeEnv;
+      setBunEnv("NODE_ENV", previousNodeEnv);
     }
   });
 
@@ -852,11 +1007,11 @@ describe("router", () => {
       const router = createRouter();
       const dbRes = await router.fetch(
         new Request("http://localhost/api/attachments/llamaforge.db"),
-        {},
+        noUpgradeServer,
       );
       const slashEscapeRes = await router.fetch(
         new Request("http://localhost/api/attachments/..%5Cp0-attachment-secret.txt"),
-        {},
+        noUpgradeServer,
       );
 
       expect(dbRes?.status).toBe(404);
@@ -878,7 +1033,7 @@ describe("router", () => {
       const router = createRouter();
       const res = await router.fetch(
         new Request(`http://localhost/api/attachments/${relative}`),
-        {},
+        noUpgradeServer,
       );
       expect(res?.status).toBe(200);
       expect(await res?.text()).toBe("attachment-ok");
@@ -899,7 +1054,7 @@ describe("router", () => {
       const router = createRouter();
       const full = await router.fetch(
         new Request(`http://localhost/api/attachments/${relative}`),
-        {},
+        noUpgradeServer,
       );
       expect(full?.status).toBe(200);
       expect(full?.headers.get("Content-Disposition")).toContain("inline");
@@ -909,7 +1064,7 @@ describe("router", () => {
         new Request(`http://localhost/api/attachments/${relative}`, {
           headers: { Range: "bytes=0-3" },
         }),
-        {},
+        noUpgradeServer,
       );
       expect(ranged?.status).toBe(206);
       expect(ranged?.headers.get("Content-Range")).toBe(`bytes 0-3/${payload.length}`);
@@ -946,7 +1101,7 @@ describe("router", () => {
     const router = createRouter();
     const res = await router.fetch(
       new Request(`http://localhost/api/chats/${chat.id}/continue`, { method: "POST" }),
-      {},
+      noUpgradeServer,
     );
 
     expect(res?.status).toBe(400);
@@ -968,7 +1123,7 @@ describe("router", () => {
           },
         }),
       }),
-      {},
+      noUpgradeServer,
     );
     expect(res?.status).toBe(400);
     const body = (await res?.json()) as { error?: string };
@@ -977,7 +1132,10 @@ describe("router", () => {
 
   it("GET /api/runtime/usage reports LlamaForge process memory", async () => {
     const router = createRouter();
-    const res = await router.fetch(new Request("http://localhost/api/runtime/usage"), {});
+    const res = await router.fetch(
+      new Request("http://localhost/api/runtime/usage"),
+      noUpgradeServer,
+    );
     expect(res?.status).toBe(200);
     const body = (await res?.json()) as { ramBytes?: number; vramBytes?: number };
     expect(typeof body.ramBytes).toBe("number");
@@ -1000,7 +1158,7 @@ describe("router", () => {
     const router = createRouter();
     const res = await router.fetch(
       new Request(`http://localhost/api/chats/${chat.id}/context-usage`),
-      {},
+      noUpgradeServer,
     );
     expect(res?.status).toBe(200);
     const body = (await res?.json()) as { usedTokens?: number; contextSize?: number | null };
@@ -1010,7 +1168,7 @@ describe("router", () => {
 
   it("GET /api/settings exposes autoloadLastModel disabled by default", async () => {
     const router = createRouter();
-    const res = await router.fetch(new Request("http://localhost/api/settings"), {});
+    const res = await router.fetch(new Request("http://localhost/api/settings"), noUpgradeServer);
     expect(res?.status).toBe(200);
     const body = (await res?.json()) as { autoloadLastModel?: boolean };
     expect(body.autoloadLastModel).toBe(false);
@@ -1018,7 +1176,7 @@ describe("router", () => {
 
   it("GET /api/settings exposes includeVideoAudio disabled by default", async () => {
     const router = createRouter();
-    const res = await router.fetch(new Request("http://localhost/api/settings"), {});
+    const res = await router.fetch(new Request("http://localhost/api/settings"), noUpgradeServer);
     expect(res?.status).toBe(200);
     const body = (await res?.json()) as { includeVideoAudio?: boolean };
     expect(body.includeVideoAudio).toBe(false);
@@ -1052,11 +1210,14 @@ describe("router", () => {
       new Request(`http://localhost/api/chats/${chat.id}/messages/${assistantId}`, {
         method: "DELETE",
       }),
-      {},
+      noUpgradeServer,
     );
     expect(res?.status).toBe(200);
 
-    const remaining = await router.fetch(new Request(`http://localhost/api/chats/${chat.id}`), {});
+    const remaining = await router.fetch(
+      new Request(`http://localhost/api/chats/${chat.id}`),
+      noUpgradeServer,
+    );
     const body = (await remaining?.json()) as { messages?: Array<{ id: string }> };
     expect(body.messages?.map((message) => message.id)).toEqual([userId]);
   });
@@ -1068,7 +1229,7 @@ describe("router", () => {
       new Request(`http://localhost/api/chats/${chat.id}/messages/missing-message`, {
         method: "DELETE",
       }),
-      {},
+      noUpgradeServer,
     );
     expect(res?.status).toBe(404);
   });
@@ -1098,7 +1259,7 @@ describe("router", () => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: "new turn", expectedHeadMessageId: null }),
         }),
-        {},
+        noUpgradeServer,
       );
       expect(res?.status).toBe(409);
       const body = (await res?.json()) as { code?: string; lastMessageId?: string };
@@ -1148,7 +1309,7 @@ describe("router", () => {
       const router = createRouter();
       const res = await router.fetch(
         new Request(`http://localhost/api/chats/${chat.id}/regenerate`, { method: "POST" }),
-        {},
+        noUpgradeServer,
       );
       expect(res?.status).toBe(200);
       expect(proxyCompletionSpy).toHaveBeenCalledTimes(1);

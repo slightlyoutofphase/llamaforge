@@ -44,6 +44,80 @@ function isDraftModelArchitecture(architecture: string): boolean {
 }
 
 /**
+ * Determines whether a GGUF should be treated as a hidden draft companion rather
+ * than a selectable primary model.
+ *
+ * Classification prefers `general.architecture` (`gemma4-assistant`, `eagle3`, …)
+ * and also accepts filename tokens such as `assistant` / `eagle3` / `draft`.
+ *
+ * @param filePath - Absolute path to the GGUF being classified.
+ * @param architecture - Architecture string from GGUF metadata.
+ * @returns `true` when the file is a speculative-decoding draft model.
+ */
+function isDraftModelCandidate(filePath: string, architecture: string): boolean {
+  if (isDraftModelArchitecture(architecture)) {
+    return true;
+  }
+  const tokens = path
+    .parse(filePath)
+    .name.toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 0);
+  return tokens.some((token) => IGNORED_DRAFT_TOKENS.has(token));
+}
+
+/**
+ * Maps a draft GGUF onto llama-server `--spec-type`.
+ *
+ * Gemma 4 `gemma4-assistant` checkpoints are attached Multi-Token Prediction
+ * drafters and must be loaded with `draft-mtp` plus `--spec-draft-model`.
+ * Using `draft-simple` for those files crashes llama-server at load.
+ *
+ * @param filePath - Absolute path to the draft GGUF.
+ * @param architecture - Architecture string from GGUF metadata.
+ * @returns Speculative decoding type required by this companion.
+ */
+function specTypeForDraft(
+  filePath: string,
+  architecture: string,
+): NonNullable<ModelEntry["draftSpecType"]> {
+  const lower = architecture.toLowerCase();
+  const tokens = new Set(
+    path
+      .parse(filePath)
+      .name.toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length > 0),
+  );
+  if (lower.includes("eagle3") || tokens.has("eagle3")) {
+    return "draft-eagle3";
+  }
+  if (lower.includes("assistant") || lower.includes("mtp")) {
+    return "draft-mtp";
+  }
+  return "draft-simple";
+}
+
+/**
+ * Writes the draft-model flag onto display metadata, returning whether it changed.
+ *
+ * Always recomputes from architecture and filename so a stale cache row that stored
+ * `isDraftModel: false` cannot leak assistant GGUFs into the primary model list.
+ *
+ * @param filePath - Absolute path to the GGUF being classified.
+ * @param metadata - Parsed or cached display metadata (mutated in place).
+ * @returns `true` when `isDraftModel` changed and the cache should be rewritten.
+ */
+function applyDraftModelClassification(filePath: string, metadata: GgufDisplayMetadata): boolean {
+  const isDraft = isDraftModelCandidate(filePath, metadata.architecture);
+  if (metadata.isDraftModel === isDraft) {
+    return false;
+  }
+  metadata.isDraftModel = isDraft;
+  return true;
+}
+
+/**
  * Builds a normalized token key used to match main GGUF files with mmproj companions.
  *
  * @param filePath - Absolute path to a GGUF or mmproj file.
@@ -81,17 +155,22 @@ function buildDraftCompanionKey(filePath: string): string {
 /**
  * Returns whether two companion keys refer to the same model family.
  *
+ * Token sets are compared rather than hyphen-joined substrings so that
+ * `it-qat` vs `qat-it` still matches, and extra main-only tokens such as
+ * `heretic` do not block pairing with a publisher assistant GGUF.
+ *
  * @param primaryKey - Key derived from the primary GGUF filename.
  * @param candidateKey - Key derived from a companion filename.
- * @returns `true` when the keys are equal or one contains the other.
+ * @returns `true` when one token set is a subset of the other.
  */
 function companionKeysAlign(primaryKey: string, candidateKey: string): boolean {
   if (!primaryKey || !candidateKey) return false;
-  return (
-    primaryKey === candidateKey ||
-    primaryKey.includes(candidateKey) ||
-    candidateKey.includes(primaryKey)
-  );
+  const primaryTokens = new Set(primaryKey.split("-").filter((token) => token.length > 0));
+  const candidateTokens = new Set(candidateKey.split("-").filter((token) => token.length > 0));
+  if (primaryTokens.size === 0 || candidateTokens.size === 0) return false;
+  const candidateSubset = [...candidateTokens].every((token) => primaryTokens.has(token));
+  const primarySubset = [...primaryTokens].every((token) => candidateTokens.has(token));
+  return candidateSubset || primarySubset;
 }
 
 /**
@@ -195,30 +274,37 @@ function findMatchingMmproj(primaryPath: string, mmprojFiles: string[]): string 
  * Finds the best draft model companion for a primary GGUF model.
  * Only considers draft models in the same directory as the primary model.
  *
- * @param primaryPath - Absolute path to the primary model file.
+ * A unique same-directory draft is always paired (publisher folder layout), matching
+ * mmproj discovery. Token-set alignment is only used to disambiguate multiple drafts.
+ *
+ * @param primaryPath - Absolute path to the primary GGUF model file.
  * @param draftModels - Candidate draft model paths discovered during the scan.
  * @returns The matching draft model file path, or `undefined` when no unique match exists.
  */
 function findMatchingDraftModel(primaryPath: string, draftModels: string[]): string | undefined {
-  const primaryKey = buildDraftCompanionKey(primaryPath);
-  if (!primaryKey) {
+  const sameDirMatches = draftModels.filter(
+    (candidate) => path.dirname(candidate) === path.dirname(primaryPath),
+  );
+  if (sameDirMatches.length === 0) {
     return undefined;
   }
-
-  const sameDirMatches = draftModels.filter(
-    (candidate) =>
-      path.dirname(candidate) === path.dirname(primaryPath) &&
-      companionKeysAlign(primaryKey, buildDraftCompanionKey(candidate)),
-  );
   if (sameDirMatches.length === 1) {
     return sameDirMatches[0];
   }
-  if (sameDirMatches.length > 1) {
-    logWarn(
-      `Ambiguous draft models for ${primaryPath}: ${sameDirMatches.join(", ")}. Leaving draftModelPath unset.`,
-    );
+
+  const primaryKey = buildDraftCompanionKey(primaryPath);
+  const aligned = primaryKey
+    ? sameDirMatches.filter((candidate) =>
+        companionKeysAlign(primaryKey, buildDraftCompanionKey(candidate)),
+      )
+    : [];
+  if (aligned.length === 1) {
+    return aligned[0];
   }
 
+  logWarn(
+    `Ambiguous draft models for ${primaryPath}: ${sameDirMatches.join(", ")}. Leaving draftModelPath unset.`,
+  );
   return undefined;
 }
 
@@ -370,8 +456,10 @@ export async function scanModels(
       (f) => !path.basename(f).toUpperCase().includes("MMPROJ"),
     );
 
-    // Detect draft models by parsing GGUF metadata (architecture contains "assistant" or "eagle3")
+    // Detect draft models (architecture or filename tokens). They are omitted
+    // from the returned catalog the same way mmproj companions are omitted.
     const draftModelPaths = new Set<string>();
+    const draftSpecs = new Map<string, NonNullable<ModelEntry["draftSpecType"]>>();
     for (const filePath of primaryGgufs) {
       try {
         const stat = await fs.stat(filePath);
@@ -379,14 +467,14 @@ export async function scanModels(
         if (!metadata) {
           metadata = await ggufReader.parseGgufMetadata(filePath);
           metadata.fileSizeBytes = stat.size;
-          metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
+          applyDraftModelClassification(filePath, metadata);
           await setCachedGgufMetadata(filePath, stat.mtimeMs, metadata);
-        } else if (typeof metadata.isDraftModel === "undefined") {
-          metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
+        } else if (applyDraftModelClassification(filePath, metadata)) {
           await setCachedGgufMetadata(filePath, stat.mtimeMs, metadata);
         }
         if (metadata.isDraftModel) {
           draftModelPaths.add(filePath);
+          draftSpecs.set(filePath, specTypeForDraft(filePath, metadata.architecture));
         }
       } catch (err: unknown) {
         logWarn(
@@ -415,6 +503,7 @@ export async function scanModels(
 
       const mmProjPath = findMatchingMmproj(primaryPath, mmprojFiles);
       const draftModelPath = findMatchingDraftModel(primaryPath, [...draftModelPaths]);
+      const draftSpecType = draftModelPath ? draftSpecs.get(draftModelPath) : undefined;
 
       try {
         const stat = await fs.stat(primaryPath);
@@ -428,8 +517,8 @@ export async function scanModels(
           if (!metadata) {
             metadata = await ggufReader.parseGgufMetadata(primaryPath);
             metadata.fileSizeBytes = stat.size;
-            metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
           }
+          applyDraftModelClassification(primaryPath, metadata);
           await mergeMmprojEncoderFlags(metadata, mmProjPath);
           await setCachedGgufMetadata(primaryPath, stat.mtimeMs, metadata, {
             mmprojPath: companion?.path ?? "",
@@ -447,6 +536,7 @@ export async function scanModels(
         primaryPath,
         mmProjPath,
         draftModelPath,
+        draftSpecType,
       });
     }
   } catch (err: unknown) {
@@ -483,8 +573,8 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
         if (!metadata) {
           metadata = await ggufReader.parseGgufMetadata(entry.primaryPath);
           metadata.fileSizeBytes = stat.size;
-          metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
         }
+        applyDraftModelClassification(entry.primaryPath, metadata);
 
         await mergeMmprojEncoderFlags(metadata, entry.mmProjPath);
         await setCachedGgufMetadata(entry.primaryPath, mtime, metadata, {
@@ -495,8 +585,7 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
         const message = err instanceof Error ? err.message : String(err);
         logWarn(`Failed to parse GGUF metadata for ${entry.primaryPath}: ${message}`);
       }
-    } else if (typeof metadata.isDraftModel === "undefined") {
-      metadata.isDraftModel = isDraftModelArchitecture(metadata.architecture);
+    } else if (applyDraftModelClassification(entry.primaryPath, metadata)) {
       await setCachedGgufMetadata(entry.primaryPath, mtime, metadata, {
         mmprojPath: companion?.path ?? "",
         mmprojMtime: companion?.mtime ?? 0,

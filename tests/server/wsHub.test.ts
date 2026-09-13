@@ -24,6 +24,38 @@ import {
 } from "../../src/server/logger";
 import { beforeEach, afterEach } from "bun:test";
 
+/**
+ * Replaces `setInterval` so tests can fire the heartbeat callback immediately.
+ * The dummy timer comes from the real `setInterval` so the return type matches.
+ *
+ * @returns Captured tick function, restore callback, and the dummy timer id.
+ */
+function captureHeartbeatInterval(): {
+  getTick: () => (() => void) | undefined;
+  restore: () => void;
+} {
+  const originalSetInterval = globalThis.setInterval.bind(globalThis);
+  const originalClearInterval = globalThis.clearInterval.bind(globalThis);
+  let captured: (() => void) | undefined;
+  let dummy: ReturnType<typeof setInterval> | undefined;
+
+  globalThis.setInterval = ((handler: TimerHandler) => {
+    captured = typeof handler === "function" ? () => (handler as () => void)() : () => {};
+    dummy = originalSetInterval(() => {}, 60 * 60 * 1000);
+    return dummy;
+  }) as unknown as typeof setInterval;
+
+  return {
+    getTick: () => captured,
+    restore: () => {
+      globalThis.setInterval = originalSetInterval;
+      if (dummy !== undefined) {
+        originalClearInterval(dummy as Parameters<typeof originalClearInterval>[0]);
+      }
+    },
+  };
+}
+
 describe("wsHub", () => {
   beforeEach(() => {
     clearConnections();
@@ -35,8 +67,12 @@ describe("wsHub", () => {
     setConfiguredLogLevel("info");
   });
   it("broadcasts messages to all registered connections", () => {
-    const send1 = mock(() => {});
-    const send2 = mock(() => {});
+    const send1 = mock((data: string) => {
+      void data;
+    });
+    const send2 = mock((data: string) => {
+      void data;
+    });
 
     const ws1 = { send: send1 } as unknown as ServerWebSocket<unknown>;
     const ws2 = { send: send2 } as unknown as ServerWebSocket<unknown>;
@@ -61,7 +97,9 @@ describe("wsHub", () => {
   });
 
   it("broadcastStatus sends server_status frame", () => {
-    const send = mock(() => {});
+    const send = mock((data: string) => {
+      void data;
+    });
     const ws = { send } as unknown as ServerWebSocket<unknown>;
     addConnection(ws);
 
@@ -72,12 +110,24 @@ describe("wsHub", () => {
   });
 
   it("broadcastLog sends log frame with timestamp", () => {
-    const send = mock(() => {});
+    const send = mock((data: string) => {
+      void data;
+    });
     const ws = { send } as unknown as ServerWebSocket<unknown>;
     addConnection(ws);
 
     broadcastLog("info", "test log");
-    const sent = JSON.parse(send.mock.calls[0]?.[0] as string);
+    const firstPayload = send.mock.calls[0]?.[0];
+    expect(typeof firstPayload).toBe("string");
+    if (typeof firstPayload !== "string") {
+      throw new Error("expected a broadcast log payload");
+    }
+    const sent = JSON.parse(firstPayload) as {
+      type: string;
+      level: string;
+      body: string;
+      ts?: number;
+    };
     expect(sent.type).toBe("log");
     expect(sent.level).toBe("info");
     expect(sent.body).toBe("test log");
@@ -87,7 +137,9 @@ describe("wsHub", () => {
   });
 
   it("filters emitted logs according to the configured backend log level", () => {
-    const send = mock(() => {});
+    const send = mock((data: string) => {
+      void data;
+    });
     const ws = { send } as unknown as ServerWebSocket<unknown>;
     const infoSpy = spyOn(console, "log").mockImplementation(() => {});
     const debugSpy = spyOn(console, "debug").mockImplementation(() => {});
@@ -103,7 +155,12 @@ describe("wsHub", () => {
       logError("visible error");
 
       expect(send).toHaveBeenCalledTimes(1);
-      const sent = JSON.parse(send.mock.calls[0]?.[0] as string);
+      const errorPayload = send.mock.calls[0]?.[0];
+      expect(typeof errorPayload).toBe("string");
+      if (typeof errorPayload !== "string") {
+        throw new Error("expected a filtered log payload");
+      }
+      const sent = JSON.parse(errorPayload) as { level: string; body: string };
       expect(sent.level).toBe("error");
       expect(sent.body).toContain("visible error");
     } finally {
@@ -115,7 +172,9 @@ describe("wsHub", () => {
   });
 
   it("emits verbose logs only when the configured level is verbose", () => {
-    const send = mock(() => {});
+    const send = mock((data: string) => {
+      void data;
+    });
     const ws = { send } as unknown as ServerWebSocket<unknown>;
     const debugSpy = spyOn(console, "debug").mockImplementation(() => {});
 
@@ -129,7 +188,12 @@ describe("wsHub", () => {
       setConfiguredLogLevel("verbose");
       logVerbose("visible verbose", { temperature: 0.8 });
       expect(send).toHaveBeenCalledTimes(1);
-      const sent = JSON.parse(send.mock.calls[0]?.[0] as string);
+      const verbosePayload = send.mock.calls[0]?.[0];
+      expect(typeof verbosePayload).toBe("string");
+      if (typeof verbosePayload !== "string") {
+        throw new Error("expected a verbose log payload");
+      }
+      const sent = JSON.parse(verbosePayload) as { body: string };
       expect(sent.body).toContain("visible verbose");
       expect(sent.body).toContain("temperature");
     } finally {
@@ -139,18 +203,10 @@ describe("wsHub", () => {
   });
 
   it("schedules heartbeat pings and keeps active sockets alive after pong updates", () => {
-    const originalSetInterval = globalThis.setInterval;
-    const originalClearInterval = globalThis.clearInterval;
     const nowSpy = spyOn(Date, "now");
-    let heartbeatTick: (() => void) | undefined;
     let now = 1_000;
-
     nowSpy.mockImplementation(() => now);
-    globalThis.setInterval = ((handler: TimerHandler) => {
-      heartbeatTick = handler as () => void;
-      return 1 as ReturnType<typeof setInterval>;
-    }) as typeof setInterval;
-    globalThis.clearInterval = mock(() => {}) as typeof clearInterval;
+    const heartbeat = captureHeartbeatInterval();
 
     try {
       const ping = mock(() => {});
@@ -158,16 +214,16 @@ describe("wsHub", () => {
       const ws = { send: mock(() => {}), ping, close } as unknown as ServerWebSocket<unknown>;
 
       addConnection(ws);
-      expect(heartbeatTick).toBeDefined();
+      expect(heartbeat.getTick()).toBeDefined();
 
-      heartbeatTick?.();
+      heartbeat.getTick()?.();
       expect(ping).toHaveBeenCalledTimes(1);
       expect(close).not.toHaveBeenCalled();
 
       now += 10_000;
       recordPong(ws);
       now += 10_000;
-      heartbeatTick?.();
+      heartbeat.getTick()?.();
 
       expect(ping).toHaveBeenCalledTimes(2);
       expect(close).not.toHaveBeenCalled();
@@ -175,25 +231,19 @@ describe("wsHub", () => {
       removeConnection(ws);
     } finally {
       nowSpy.mockRestore();
-      globalThis.setInterval = originalSetInterval;
-      globalThis.clearInterval = originalClearInterval;
+      heartbeat.restore();
     }
   });
 
   it("closes stale sockets and stops the heartbeat when the last connection disappears", () => {
-    const originalSetInterval = globalThis.setInterval;
-    const originalClearInterval = globalThis.clearInterval;
+    const originalClearInterval = globalThis.clearInterval.bind(globalThis);
     const nowSpy = spyOn(Date, "now");
-    const clearIntervalSpy = mock(() => {});
-    let heartbeatTick: (() => void) | undefined;
     let now = 5_000;
-
     nowSpy.mockImplementation(() => now);
-    globalThis.setInterval = ((handler: TimerHandler) => {
-      heartbeatTick = handler as () => void;
-      return 1 as ReturnType<typeof setInterval>;
-    }) as typeof setInterval;
-    globalThis.clearInterval = clearIntervalSpy as typeof clearInterval;
+    const heartbeat = captureHeartbeatInterval();
+    const clearIntervalSpy = spyOn(globalThis, "clearInterval").mockImplementation((id) => {
+      originalClearInterval(id as Parameters<typeof originalClearInterval>[0]);
+    });
 
     try {
       const ping = mock(() => {});
@@ -202,15 +252,15 @@ describe("wsHub", () => {
 
       addConnection(ws);
       now += 70_000;
-      heartbeatTick?.();
+      heartbeat.getTick()?.();
 
       expect(close).toHaveBeenCalledWith(1001, "Heartbeat timeout");
       expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
       expect(ping).not.toHaveBeenCalled();
     } finally {
       nowSpy.mockRestore();
-      globalThis.setInterval = originalSetInterval;
-      globalThis.clearInterval = originalClearInterval;
+      clearIntervalSpy.mockRestore();
+      heartbeat.restore();
     }
   });
 });

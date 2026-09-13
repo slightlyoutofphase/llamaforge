@@ -7,9 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { ChatMessage } from "@shared/types";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { StrictMode } from "react";
+import { StrictMode, type ReactNode } from "react";
 import { InputBar } from "../../src/client/components/chat/InputBar";
 import { useAppStore } from "../../src/client/store";
+import { asFetch } from "../fixtures";
 
 mock.module("react-dropzone", () => ({
   useDropzone: () => ({
@@ -24,7 +25,7 @@ mock.module("@tanstack/react-router", () => ({
   useParams: () => ({ chatId: "chat-loop-1" }),
   useNavigate: () => mock(),
   useLocation: () => ({ pathname: "/chat/chat-loop-1" }),
-  Link: ({ children }: { children?: unknown }) => <a href="#test">{children}</a>,
+  Link: ({ children }: { children?: ReactNode }) => <a href="#test">{children}</a>,
   Outlet: () => <div data-testid="outlet">Mock Outlet</div>,
 }));
 
@@ -77,45 +78,47 @@ describe("ChatView inference preset bind", () => {
   beforeEach(async () => {
     originalFetch = global.fetch;
     putCount = 0;
-    global.fetch = mock((input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      const method = (init?.method ?? "GET").toUpperCase();
-      if (method === "PUT" && String(url).includes("/api/chats/")) {
-        putCount += 1;
-        return new Promise((resolve) => {
-          setTimeout(() => {
-            resolve(
-              new Response(JSON.stringify({ success: true }), {
-                status: 200,
-                headers: { "Content-Type": "application/json" },
-              }),
-            );
-          }, 25);
-        });
-      }
-      if (String(url).includes("/api/presets/inference")) {
+    global.fetch = asFetch(
+      mock((input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "PUT" && String(url).includes("/api/chats/")) {
+          putCount += 1;
+          return new Promise((resolve) => {
+            setTimeout(() => {
+              resolve(
+                new Response(JSON.stringify({ success: true }), {
+                  status: 200,
+                  headers: { "Content-Type": "application/json" },
+                }),
+              );
+            }, 25);
+          });
+        }
+        if (String(url).includes("/api/presets/inference")) {
+          return Promise.resolve(
+            new Response(JSON.stringify([inferencePreset]), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(url).includes("/api/presets/system") || String(url).includes("/api/settings")) {
+          return Promise.resolve(
+            new Response(JSON.stringify(String(url).includes("/api/settings") ? {} : []), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
         return Promise.resolve(
-          new Response(JSON.stringify([inferencePreset]), {
+          new Response(JSON.stringify({}), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           }),
         );
-      }
-      if (String(url).includes("/api/presets/system") || String(url).includes("/api/settings")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(String(url).includes("/api/settings") ? {} : []), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }) as typeof global.fetch;
+      }),
+    );
 
     useAppStore.setState({
       currentChatId: "chat-loop-1",
@@ -358,41 +361,43 @@ describe("ChatView generate response after deleted assistant reply", () => {
   beforeEach(async () => {
     originalFetch = global.fetch;
     regenerateUrls = [];
-    global.fetch = mock((input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      const method = (init?.method ?? "GET").toUpperCase();
-      if (method === "POST" && String(url).includes("/regenerate")) {
-        regenerateUrls.push(String(url));
+    global.fetch = asFetch(
+      mock((input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && String(url).includes("/regenerate")) {
+          regenerateUrls.push(String(url));
+          return Promise.resolve(
+            new Response(JSON.stringify({ messageId: "a-new" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(url).includes("/api/presets/inference")) {
+          return Promise.resolve(
+            new Response(JSON.stringify([inferencePreset]), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(url).includes("/api/presets/system") || String(url).includes("/api/settings")) {
+          return Promise.resolve(
+            new Response(JSON.stringify(String(url).includes("/api/settings") ? {} : []), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
         return Promise.resolve(
-          new Response(JSON.stringify({ messageId: "a-new" }), {
+          new Response(JSON.stringify({}), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           }),
         );
-      }
-      if (String(url).includes("/api/presets/inference")) {
-        return Promise.resolve(
-          new Response(JSON.stringify([inferencePreset]), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (String(url).includes("/api/presets/system") || String(url).includes("/api/settings")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(String(url).includes("/api/settings") ? {} : []), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }) as typeof global.fetch;
+      }),
+    );
 
     useAppStore.setState({
       currentChatId: "chat-loop-1",
@@ -485,63 +490,65 @@ describe("ChatView in-place message actions", () => {
     window.confirm = () => true;
     regenerateUrls = [];
     deleteUrls = [];
-    global.fetch = mock((input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      const method = (init?.method ?? "GET").toUpperCase();
-      if (method === "POST" && String(url).includes("/regenerate")) {
-        regenerateUrls.push(String(url));
-        return Promise.resolve(
-          new Response(JSON.stringify({ messageId: "a-new" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (method === "DELETE" && String(url).includes("/messages/")) {
-        deleteUrls.push(String(url));
-        return Promise.resolve(
-          new Response(JSON.stringify({ success: true }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (String(url).includes("/api/presets/inference")) {
-        return Promise.resolve(
-          new Response(JSON.stringify([inferencePreset]), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (String(url).includes("/api/presets/system") || String(url).includes("/api/settings")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(String(url).includes("/api/settings") ? {} : []), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (method === "GET" && String(url).includes("/api/chats/chat-loop-1")) {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              id: "chat-loop-1",
-              name: "New Chat",
-              messages: [testMessage({ id: "u1", role: "user", content: "hello." })],
-              totalMessages: 1,
+    global.fetch = asFetch(
+      mock((input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "POST" && String(url).includes("/regenerate")) {
+          regenerateUrls.push(String(url));
+          return Promise.resolve(
+            new Response(JSON.stringify({ messageId: "a-new" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
             }),
-            { status: 200, headers: { "Content-Type": "application/json" } },
-          ),
+          );
+        }
+        if (method === "DELETE" && String(url).includes("/messages/")) {
+          deleteUrls.push(String(url));
+          return Promise.resolve(
+            new Response(JSON.stringify({ success: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(url).includes("/api/presets/inference")) {
+          return Promise.resolve(
+            new Response(JSON.stringify([inferencePreset]), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(url).includes("/api/presets/system") || String(url).includes("/api/settings")) {
+          return Promise.resolve(
+            new Response(JSON.stringify(String(url).includes("/api/settings") ? {} : []), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (method === "GET" && String(url).includes("/api/chats/chat-loop-1")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                id: "chat-loop-1",
+                name: "New Chat",
+                messages: [testMessage({ id: "u1", role: "user", content: "hello." })],
+                totalMessages: 1,
+              }),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
         );
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }) as typeof global.fetch;
+      }),
+    );
 
     useAppStore.setState({
       currentChatId: "chat-loop-1",
@@ -621,41 +628,43 @@ describe("ChatView in-place message actions", () => {
   });
 
   it("does not drop messages locally when delete returns 404", async () => {
-    global.fetch = mock((input, init) => {
-      const url = typeof input === "string" ? input : input.url;
-      const method = (init?.method ?? "GET").toUpperCase();
-      if (method === "DELETE" && String(url).includes("/messages/")) {
-        deleteUrls.push(String(url));
+    global.fetch = asFetch(
+      mock((input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "DELETE" && String(url).includes("/messages/")) {
+          deleteUrls.push(String(url));
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: "Message not found" }), {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(url).includes("/api/presets/inference")) {
+          return Promise.resolve(
+            new Response(JSON.stringify([inferencePreset]), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(url).includes("/api/presets/system") || String(url).includes("/api/settings")) {
+          return Promise.resolve(
+            new Response(JSON.stringify(String(url).includes("/api/settings") ? {} : []), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
         return Promise.resolve(
-          new Response(JSON.stringify({ error: "Message not found" }), {
-            status: 404,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (String(url).includes("/api/presets/inference")) {
-        return Promise.resolve(
-          new Response(JSON.stringify([inferencePreset]), {
+          new Response(JSON.stringify({}), {
             status: 200,
             headers: { "Content-Type": "application/json" },
           }),
         );
-      }
-      if (String(url).includes("/api/presets/system") || String(url).includes("/api/settings")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(String(url).includes("/api/settings") ? {} : []), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }) as typeof global.fetch;
+      }),
+    );
 
     await renderChatView(ChatView);
 

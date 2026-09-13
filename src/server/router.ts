@@ -5,6 +5,7 @@
 
 import path from "node:path";
 import type { Server, ServerWebSocket } from "bun";
+import { resolveSpecDraftModelPath } from "../shared/defaults";
 import type {
   LoadModelRequest,
   ModelEntry,
@@ -270,6 +271,12 @@ function normalizeAttachmentPath(attachPath: string): string | null {
 }
 
 /**
+ * The Bun server surface used by {@link createRouter}'s fetch handler.
+ * Only WebSocket upgrades are read; HTTP callers may pass a no-op `upgrade`.
+ */
+export type RouterServer = Pick<Server<unknown>, "upgrade">;
+
+/**
  * Creates the main application router for HTTP and WebSocket requests.
  *
  * @returns An object containing `fetch` and `websocket` handlers compatible with `Bun.serve`.
@@ -373,7 +380,7 @@ export function createRouter() {
      * @param server - Bun server instance used for WebSocket upgrades.
      * @returns Response to send to the client, or `undefined` when a WebSocket upgrade succeeds.
      */
-    async fetch(req: Request, server: Server<unknown>): Promise<Response | undefined> {
+    async fetch(req: Request, server: RouterServer): Promise<Response | undefined> {
       const url = new URL(req.url);
       logDebug(`API Request: ${req.method} ${url.pathname}`);
 
@@ -503,11 +510,14 @@ export function createRouter() {
           if (selectedModel?.mmProjPath) {
             loadConfig.mmProjPath = selectedModel.mmProjPath;
           }
-          if (
-            (loadConfig.specType === "draft-simple" || loadConfig.specType === "draft-eagle3") &&
-            selectedModel?.draftModelPath
-          ) {
-            loadConfig.specDraftModelPath = selectedModel.draftModelPath;
+          const resolvedDraftPath = resolveSpecDraftModelPath(
+            loadConfig.specType,
+            loadConfig.specDraftModelPath,
+            selectedModel?.draftModelPath,
+            selectedModel?.draftSpecType,
+          );
+          if (resolvedDraftPath) {
+            loadConfig.specDraftModelPath = resolvedDraftPath;
           }
           const port = await loadModel(
             loadConfig,

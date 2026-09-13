@@ -34,6 +34,30 @@ describe("chatTemplateEngine", () => {
       expect(config.openTag).toBe("<think>");
       expect(config.closeTag).toBe("</think>");
     });
+
+    it("fills missing override fields from architecture defaults", () => {
+      const config = detectThinkingConfig("gemma4", {
+        openTag: "<custom>",
+        closeTag: "",
+        enableToken: undefined,
+      });
+      expect(config.openTag).toBe("<custom>");
+      expect(config.closeTag).toBe("<channel|>");
+      expect(config.enableToken).toBe("<|think|>");
+    });
+
+    it("keeps a complete user override on a non-Gemma architecture", () => {
+      const config = detectThinkingConfig("llama", {
+        openTag: "<a>",
+        closeTag: "</a>",
+        enableToken: "<tok>",
+      });
+      expect(config).toEqual({
+        openTag: "<a>",
+        closeTag: "</a>",
+        enableToken: "<tok>",
+      });
+    });
   });
 
   describe("parseThinkTags", () => {

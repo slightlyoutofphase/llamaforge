@@ -9,6 +9,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
 import { DEFAULT_APP_SETTINGS } from "../../src/shared/defaults";
+import { asFetch } from "../fixtures";
 
 let App: typeof import("../../src/client/App").default;
 let queryClient: QueryClient;
@@ -28,58 +29,63 @@ describe("E2E application shell", () => {
       defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
     });
     navigateSpy = mock();
-    global.fetch = mock((input) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.endsWith("/api/settings")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(settings), {
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (url.includes("/api/runtime/usage")) {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({ ramBytes: 512 * 1024 * 1024, vramBytes: 0, llamaServerPid: null }),
-            {
+    global.fetch = asFetch(
+      mock((input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/api/settings")) {
+          return Promise.resolve(
+            new Response(JSON.stringify(settings), {
               headers: { "Content-Type": "application/json" },
-            },
-          ),
-        );
-      }
-      if (url.includes("/context-usage")) {
-        const used = url.includes("chat-a") ? 120 : url.includes("chat-b") ? 40 : 0;
+            }),
+          );
+        }
+        if (url.includes("/api/runtime/usage")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ ramBytes: 512 * 1024 * 1024, vramBytes: 0, llamaServerPid: null }),
+              {
+                headers: { "Content-Type": "application/json" },
+              },
+            ),
+          );
+        }
+        if (url.includes("/context-usage")) {
+          const used = url.includes("chat-a") ? 120 : url.includes("chat-b") ? 40 : 0;
+          return Promise.resolve(
+            new Response(JSON.stringify({ usedTokens: used, contextSize: 4096 }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (url.includes("/api/server/status")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ status: "idle", config: null }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (url.includes("/api/hardware")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ totalRamBytes: 16 * 1024 ** 3, cpuThreads: 8, gpus: [] }),
+              {
+                headers: { "Content-Type": "application/json" },
+              },
+            ),
+          );
+        }
+        if (url.includes("/api/chats") && url.includes("POST")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: "created-chat", name: "New Chat" }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
         return Promise.resolve(
-          new Response(JSON.stringify({ usedTokens: used, contextSize: 4096 }), {
-            headers: { "Content-Type": "application/json" },
-          }),
+          new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } }),
         );
-      }
-      if (url.includes("/api/server/status")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ status: "idle", config: null }), {
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (url.includes("/api/hardware")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ totalRamBytes: 16 * 1024 ** 3, cpuThreads: 8, gpus: [] }), {
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (url.includes("/api/chats") && url.includes("POST")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ id: "created-chat", name: "New Chat" }), {
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify([]), { headers: { "Content-Type": "application/json" } }),
-      );
-    }) as typeof global.fetch;
+      }),
+    );
 
     global.WebSocket = class {
       onopen: ((ev?: Event) => void) | null = null;

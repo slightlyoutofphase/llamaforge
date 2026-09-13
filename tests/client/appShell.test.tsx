@@ -8,6 +8,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
+import { asFetch } from "../fixtures";
 
 let App: typeof import("../../src/client/App").default;
 let navigateSpy = mock();
@@ -58,36 +59,38 @@ describe("App shell settings", () => {
     document.documentElement.style.fontSize = "";
     document.documentElement.className = "";
     navigateSpy = mock();
-    global.fetch = mock((input, init) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.endsWith("/api/settings")) {
-        return Promise.resolve(
-          new Response(JSON.stringify(appSettings), {
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (url.includes("/api/chats") && (init?.method ?? "GET") === "POST") {
-        return Promise.resolve(
-          new Response(JSON.stringify({ id: "created-chat", name: "New Chat" }), {
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      if (url.includes("/api/presets/load") || url.includes("/api/presets/inference")) {
-        return Promise.resolve(
-          new Response(JSON.stringify([]), {
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
+    global.fetch = asFetch(
+      mock((input, init) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/api/settings")) {
+          return Promise.resolve(
+            new Response(JSON.stringify(appSettings), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (url.includes("/api/chats") && (init?.method ?? "GET") === "POST") {
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: "created-chat", name: "New Chat" }), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (url.includes("/api/presets/load") || url.includes("/api/presets/inference")) {
+          return Promise.resolve(
+            new Response(JSON.stringify([]), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
 
-      return Promise.resolve(
-        new Response(JSON.stringify({}), {
-          headers: { "Content-Type": "application/json" },
-        }),
-      );
-    }) as typeof global.fetch;
+        return Promise.resolve(
+          new Response(JSON.stringify({}), {
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
 
     await mock.module("@tanstack/react-router", () => ({
       useLocation: () => ({ pathname: "/" }),

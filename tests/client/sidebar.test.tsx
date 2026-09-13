@@ -210,6 +210,9 @@ describe("ChatSidebar Component", () => {
     const renameInputs = screen.getAllByRole("textbox");
     const renameInput = renameInputs[renameInputs.length - 1];
     expect(renameInput).toBeTruthy();
+    if (!renameInput) {
+      throw new Error("expected a rename input");
+    }
     fireEvent.click(renameInput);
     expect(linkClickSpy).not.toHaveBeenCalled();
   });
@@ -328,14 +331,14 @@ describe("ChatSidebar Component", () => {
     expect(sortSelect.value).toBe("date");
 
     const chatLinksBefore = screen.getAllByRole("link");
-    expect(chatLinksBefore[0].textContent).toContain("Beta Chat");
-    expect(chatLinksBefore[1].textContent).toContain("Alpha Chat");
+    expect(chatLinksBefore[0]?.textContent).toContain("Beta Chat");
+    expect(chatLinksBefore[1]?.textContent).toContain("Alpha Chat");
 
     fireEvent.change(sortSelect, { target: { value: "name" } });
 
     const chatLinksAfter = screen.getAllByRole("link");
-    expect(chatLinksAfter[0].textContent).toContain("Alpha Chat");
-    expect(chatLinksAfter[1].textContent).toContain("Beta Chat");
+    expect(chatLinksAfter[0]?.textContent).toContain("Alpha Chat");
+    expect(chatLinksAfter[1]?.textContent).toContain("Beta Chat");
   });
 
   it("creates only one chat on rapid New Chat clicks", async () => {
@@ -431,6 +434,10 @@ describe("ChatSidebar Component", () => {
 
     const deleteButtons = screen.getAllByTitle("Delete");
     const deleteButton = deleteButtons[0];
+    expect(deleteButton).toBeDefined();
+    if (!deleteButton) {
+      throw new Error("expected a delete button");
+    }
     fireEvent.click(deleteButton);
     fireEvent.click(deleteButton);
 
@@ -512,8 +519,8 @@ describe("ChatSidebar Component", () => {
     );
 
     const chatLinks = screen.getAllByRole("link");
-    expect(chatLinks[0].textContent).toContain("Newer Chat");
-    expect(chatLinks[1].textContent).toContain("Older but recently active");
+    expect(chatLinks[0]?.textContent).toContain("Newer Chat");
+    expect(chatLinks[1]?.textContent).toContain("Older but recently active");
   });
 
   it("renders branch history indicator for branch chats", () => {

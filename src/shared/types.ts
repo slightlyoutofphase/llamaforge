@@ -165,6 +165,11 @@ export interface ModelEntry {
   mmProjPath?: string | undefined;
   /** Optional path to an associated draft model for speculative decoding. */
   draftModelPath?: string | undefined;
+  /**
+   * llama-server `--spec-type` required by {@link draftModelPath}.
+   * `gemma4-assistant` companions are `draft-mtp`, not `draft-simple`.
+   */
+  draftSpecType?: "draft-mtp" | "draft-simple" | "draft-eagle3" | undefined;
   /** Optional metadata extracted from the GGUF file. */
   metadata?: GgufDisplayMetadata | undefined;
 }

@@ -7,7 +7,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { ChevronDown, Cpu, Database, Play, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { createDefaultLoadConfig } from "../shared/defaults";
+import { createDefaultLoadConfig, resolveSpecDraftModelPath } from "../shared/defaults";
 import { metadataHasToolCalling } from "../shared/templateCapabilities";
 import type { ChatMessage, LoadModelRequest, ModelEntry, ModelLoadConfig } from "../shared/types";
 import { MultimodalGuardModal } from "./components/sidebar/MultimodalGuardModal";
@@ -87,11 +87,14 @@ export function ModelSelector() {
       ...(preset?.thinkingTagOverride ? { thinkingTagOverride: preset.thinkingTagOverride } : {}),
     };
 
-    if (
-      (config.specType === "draft-simple" || config.specType === "draft-eagle3") &&
-      model.draftModelPath
-    ) {
-      request.specDraftModelPath = model.draftModelPath;
+    const resolvedDraftPath = resolveSpecDraftModelPath(
+      config.specType,
+      config.specDraftModelPath,
+      model.draftModelPath,
+      model.draftSpecType,
+    );
+    if (resolvedDraftPath) {
+      request.specDraftModelPath = resolvedDraftPath;
     }
 
     const defaultTemplate = model.metadata?.chatTemplate;

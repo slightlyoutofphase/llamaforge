@@ -22,11 +22,13 @@ import {
   createSystemPreset,
 } from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
+import { getActiveGenerations } from "../../src/server/generationRegistry";
 import { abortGeneration, proxyCompletion } from "../../src/server/streamProxy";
 import { cancelPendingApprovals, resolveToolApproval } from "../../src/server/tools";
 import * as llamaServerModule from "../../src/server/llamaServer";
 import { createDefaultInferenceSampling, createDefaultLoadConfig } from "../../src/shared/defaults";
 import { GEMMA4_THINKING_CONFIG } from "../../src/shared/thinkingTags";
+import { asFetch, ggufDisplayMetadata, testLoadConfig } from "../fixtures";
 
 let mockPdfText = "PDF text";
 
@@ -96,6 +98,156 @@ function chatStop(finishReason: string = "stop"): object {
 }
 
 /**
+ * Wraps an SSE body in a real Fetch {@link Response}, matching llama-server's streaming replies.
+ *
+ * @param body - Encoded `data: ...\n\n` SSE bytes.
+ * @returns An `ok` response whose `body` is the provided stream.
+ */
+function sseResponse(body: ReadableStream<Uint8Array>): Response {
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+}
+
+/**
+ * Returns whether a mocked fetch target is llama-server's tokenize endpoint.
+ *
+ * @param input - Fetch URL or Request.
+ * @returns `true` when overflow tokenization should receive a JSON token list.
+ */
+function isTokenizeRequest(input: RequestInfo): boolean {
+  const url = typeof input === "string" ? input : input.url;
+  return url.includes("/tokenize");
+}
+
+/**
+ * Builds the JSON tokenize reply streamProxy uses to count prompt tokens.
+ *
+ * @returns A successful tokenize {@link Response}.
+ */
+function tokenizeJsonResponse(): Response {
+  return new Response(JSON.stringify({ tokens: [1, 2, 3] }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+/**
+ * Mocks llama-server fetch so `/tokenize` never consumes the chat-completions SSE body.
+ *
+ * @param completions - Handler for `/v1/chat/completions` (and any other non-tokenize URL).
+ * @returns A Bun mock suitable for {@link asFetch}.
+ */
+function llamaFetch(
+  completions: (input: RequestInfo, init?: RequestInit) => Response | Promise<Response>,
+): ReturnType<typeof mock> {
+  return mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+    if (isTokenizeRequest(input)) {
+      return tokenizeJsonResponse();
+    }
+    return completions(input, init);
+  });
+}
+
+/**
+ * Waits until streamProxy has released every in-flight generation slot.
+ *
+ * @param timeoutMs - Maximum time to wait before failing the test.
+ * @returns A promise that resolves once the registry is empty.
+ */
+async function waitForGenerationIdle(timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (getActiveGenerations().size > 0) {
+    if (Date.now() > deadline) {
+      throw new Error("Timed out waiting for streamProxy generation to finish");
+    }
+    await Bun.sleep(10);
+  }
+}
+
+/**
+ * Polls until `predicate` is true.
+ *
+ * @param predicate - Condition that becomes true when the awaited state is reached.
+ * @param timeoutMs - Maximum time to wait before failing the test.
+ * @param message - Error text used when the deadline elapses.
+ * @returns A promise that resolves once the predicate succeeds.
+ */
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 5000,
+  message = "Timed out waiting for condition",
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate())) {
+    if (Date.now() > deadline) {
+      throw new Error(message);
+    }
+    await Bun.sleep(10);
+  }
+}
+
+/**
+ * Builds a streaming response that never emits a chunk until `signal` aborts.
+ *
+ * @param signal - Abort signal from the streamProxy fetch call.
+ * @returns An SSE {@link Response} that errors on abort.
+ */
+function hangingSseResponse(signal: AbortSignal): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        const fail = () => {
+          try {
+            controller.error(new DOMException("Aborted", "AbortError"));
+          } catch {
+            // The stream may already be closed after abort.
+          }
+        };
+        if (signal.aborted) {
+          fail();
+          return;
+        }
+        signal.addEventListener("abort", fail, { once: true });
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "text/event-stream" } },
+  );
+}
+
+/**
+ * Builds a streaming response that emits one SSE payload, then hangs until abort.
+ *
+ * @param signal - Abort signal from the streamProxy fetch call.
+ * @param firstChunk - OpenAI-style chat completions delta object.
+ * @returns An SSE {@link Response} that errors on abort after the first chunk.
+ */
+function sseThenHangResponse(signal: AbortSignal, firstChunk: object): Response {
+  const encoder = new TextEncoder();
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(firstChunk)}\n\n`));
+        const fail = () => {
+          try {
+            controller.error(new DOMException("Aborted", "AbortError"));
+          } catch {
+            // The stream may already be closed after abort.
+          }
+        };
+        if (signal.aborted) {
+          fail();
+          return;
+        }
+        signal.addEventListener("abort", fail, { once: true });
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "text/event-stream" } },
+  );
+}
+
+/**
  * Persists a load preset and points the mocked llama-server status at it.
  *
  * @param id - Load preset id stored as `config.presetId`.
@@ -109,7 +261,7 @@ async function seedLoadedLoadPreset(id: string, preserveThinking: boolean): Prom
     modelPath: "test.gguf",
     isDefault: false,
     isReadonly: false,
-    config: createDefaultLoadConfig("test.gguf"),
+    config: { ...createDefaultLoadConfig("test.gguf"), presetId: id },
     preserveThinking,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -117,7 +269,7 @@ async function seedLoadedLoadPreset(id: string, preserveThinking: boolean): Prom
   spyOn(llamaServerModule, "getServerStatus").mockReturnValue({
     status: "running",
     port: 8080,
-    config: { modelPath: "test.gguf", contextSize: 4096, presetId: id },
+    config: testLoadConfig("test.gguf", { presetId: id }),
   });
 }
 
@@ -130,7 +282,7 @@ describe("streamProxy", () => {
     spyOn(llamaServerModule, "getServerStatus").mockReturnValue({
       status: "running",
       port: 8080,
-      config: { modelPath: "test.gguf", contextSize: 4096 } as any,
+      config: testLoadConfig("test.gguf"),
     });
     spyOn(llamaServerModule, "getActiveThinkingTagOverride").mockReturnValue(undefined);
     spyOn(fs, "mkdir").mockResolvedValue(undefined);
@@ -143,6 +295,9 @@ describe("streamProxy", () => {
 
   afterEach(() => {
     writeSpy.mockRestore();
+    for (const [id] of getActiveGenerations()) {
+      abortGeneration(id);
+    }
     cancelPendingApprovals();
     resetDb();
     mock.restore();
@@ -150,18 +305,18 @@ describe("streamProxy", () => {
 
   it("ALWAYS sends requests to /v1/chat/completions, never /completion", async () => {
     const stream = buildSSEStream([chatDelta("Hi"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (input: RequestInfo, init?: RequestInit) => {
       capturedEndpoint = String(input);
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Endpoint Test");
     await proxyCompletion({ chatId: chat.id, content: "hello", attachments: [] });
 
     // Wait for async stream processing
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(capturedEndpoint).toBe("http://127.0.0.1:8080/v1/chat/completions");
     // Must NOT be the legacy /completion endpoint (without /v1/chat/ prefix)
@@ -179,10 +334,10 @@ describe("streamProxy", () => {
     const debugSpy = spyOn(console, "debug").mockImplementation(() => {});
     try {
       const stream = buildSSEStream([chatDelta("Hi"), chatStop()]);
-      globalThis.fetch = mock().mockResolvedValue({ ok: true, body: stream } as any);
+      globalThis.fetch = asFetch(llamaFetch(() => sseResponse(stream)));
       const chat = await createChat("Verbose Settings");
       await proxyCompletion({ chatId: chat.id, content: "hello", attachments: [] });
-      await new Promise((r) => setTimeout(r, 200));
+      await waitForGenerationIdle();
       const verboseCall = debugSpy.mock.calls.find((call) =>
         String(call[0]).includes("Active inference settings"),
       );
@@ -197,11 +352,11 @@ describe("streamProxy", () => {
 
   it("sends a proper messages array with user content for plain text chat", async () => {
     const stream = buildSSEStream([chatDelta("Hello"), chatDelta(" World"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Messages Test");
     const messageId = await proxyCompletion({
@@ -210,7 +365,7 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(messageId).toBeString();
     expect(capturedBody).not.toBeNull();
@@ -227,16 +382,16 @@ describe("streamProxy", () => {
 
   it("includes inference sampling parameters in the request", async () => {
     const stream = buildSSEStream([chatDelta("OK"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Params Test");
     await proxyCompletion({ chatId: chat.id, content: "test", attachments: [] });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(capturedBody.temperature).toBeNumber();
     expect(capturedBody.top_k).toBeNumber();
@@ -247,11 +402,11 @@ describe("streamProxy", () => {
 
   it("uses the model-bound inference preset instead of the first database row", async () => {
     const stream = buildSSEStream([chatDelta("OK"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     await createInferencePreset({
       ...createDefaultInferenceSampling(),
@@ -277,7 +432,7 @@ describe("streamProxy", () => {
 
     const chat = await createChat("Model Bound Preset");
     await proxyCompletion({ chatId: chat.id, content: "test", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(capturedBody.temperature).toBe(0.21);
     expect(capturedBody.top_k).toBe(17);
@@ -288,11 +443,11 @@ describe("streamProxy", () => {
 
   it("uses a client-supplied inference preset id when the chat row has none", async () => {
     const stream = buildSSEStream([chatDelta("OK"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     await createInferencePreset({
       ...createDefaultInferenceSampling(),
@@ -312,7 +467,7 @@ describe("streamProxy", () => {
       attachments: [],
       inferencePresetId: "header-selected",
     });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(capturedBody.temperature).toBe(1.15);
     expect(capturedBody.top_k).toBe(64);
@@ -320,16 +475,16 @@ describe("streamProxy", () => {
 
   it("includes thinking template kwargs for thinking-enabled models", async () => {
     const stream = buildSSEStream([chatDelta("thinking"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Thinking Test");
     await proxyCompletion({ chatId: chat.id, content: "think", attachments: [] });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     // Thinking stays on via chat_template_kwargs. reasoning_format is always
     // `none` so llama-server streams tagged tokens in content for live splitting.
@@ -342,17 +497,19 @@ describe("streamProxy", () => {
 
   it("sends enable_thinking false when the inference preset disables thinking", async () => {
     const stream = buildSSEStream([chatDelta("direct answer"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Thinking Disabled Test");
     const infPresetId = "thinking-disabled-preset";
     await createInferencePreset({
       id: infPresetId,
       name: "Thinking Disabled Preset",
+      ...createDefaultInferenceSampling(),
+      isDefault: false,
       temperature: 0.7,
       topP: 0.9,
       minP: 0.05,
@@ -360,12 +517,6 @@ describe("streamProxy", () => {
       frequencyPenalty: 0.0,
       presencePenalty: 0.0,
       maxTokens: 1024,
-      seed: undefined,
-      stopSequences: [],
-      toolCallsEnabled: false,
-      tools: undefined,
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -373,7 +524,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { inferencePresetId: infPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "answer directly", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(capturedBody.chat_template_kwargs).toEqual({
       enable_thinking: false,
@@ -385,17 +536,19 @@ describe("streamProxy", () => {
   it("includes preserve_thinking in chat_template_kwargs when the load preset has it enabled", async () => {
     await seedLoadedLoadPreset("lp-preserve-on", true);
     const stream = buildSSEStream([chatDelta("preserved"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Preserve Thinking Test");
     const infPresetId = "preserve-thinking-preset";
     await createInferencePreset({
       id: infPresetId,
       name: "Preserve Thinking Preset",
+      ...createDefaultInferenceSampling(),
+      isDefault: false,
       temperature: 0.7,
       topP: 0.9,
       minP: 0.05,
@@ -403,12 +556,6 @@ describe("streamProxy", () => {
       frequencyPenalty: 0.0,
       presencePenalty: 0.0,
       maxTokens: 1024,
-      seed: undefined,
-      stopSequences: [],
-      toolCallsEnabled: false,
-      tools: undefined,
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -416,7 +563,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { inferencePresetId: infPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "preserve me", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(capturedBody.chat_template_kwargs).toEqual({
       enable_thinking: true,
@@ -427,17 +574,19 @@ describe("streamProxy", () => {
   it("does not enable preserve_thinking when the load preset has it disabled", async () => {
     await seedLoadedLoadPreset("lp-preserve-off", false);
     const stream = buildSSEStream([chatDelta("not preserved"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("No Preserve Thinking Test");
     const infPresetId = "no-preserve-thinking-preset";
     await createInferencePreset({
       id: infPresetId,
       name: "No Preserve Thinking Preset",
+      ...createDefaultInferenceSampling(),
+      isDefault: false,
       temperature: 0.7,
       topP: 0.9,
       minP: 0.05,
@@ -445,12 +594,6 @@ describe("streamProxy", () => {
       frequencyPenalty: 0.0,
       presencePenalty: 0.0,
       maxTokens: 1024,
-      seed: undefined,
-      stopSequences: [],
-      toolCallsEnabled: false,
-      tools: undefined,
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -458,7 +601,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { inferencePresetId: infPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "do not preserve", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(capturedBody.chat_template_kwargs).toEqual({
       enable_thinking: true,
@@ -469,11 +612,11 @@ describe("streamProxy", () => {
   it("preserves historical thinking in tagged content instead of reasoning_content", async () => {
     await seedLoadedLoadPreset("lp-preserve-history-on", true);
     const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Preserve Thinking History Test");
     // Insert a historical assistant message with thinking content
@@ -500,6 +643,8 @@ describe("streamProxy", () => {
     await createInferencePreset({
       id: infPresetId,
       name: "Preserve Thinking History Preset",
+      ...createDefaultInferenceSampling(),
+      isDefault: false,
       temperature: 0.7,
       topP: 0.9,
       minP: 0.05,
@@ -507,12 +652,6 @@ describe("streamProxy", () => {
       frequencyPenalty: 0.0,
       presencePenalty: 0.0,
       maxTokens: 1024,
-      seed: undefined,
-      stopSequences: [],
-      toolCallsEnabled: false,
-      tools: undefined,
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -520,7 +659,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { inferencePresetId: infPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "next question", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const assistantMsg = capturedBody.messages.find((m: any) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
@@ -533,11 +672,11 @@ describe("streamProxy", () => {
   it("reconstructs think tags for preserved history stored without tags in rawContent", async () => {
     await seedLoadedLoadPreset("lp-preserve-native-history", true);
     const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Preserve Native Thinking History");
     await addMessage({
@@ -555,6 +694,8 @@ describe("streamProxy", () => {
     await createInferencePreset({
       id: infPresetId,
       name: "Preserve Native History Preset",
+      ...createDefaultInferenceSampling(),
+      isDefault: false,
       temperature: 0.7,
       topP: 0.9,
       minP: 0.05,
@@ -562,12 +703,6 @@ describe("streamProxy", () => {
       frequencyPenalty: 0.0,
       presencePenalty: 0.0,
       maxTokens: 1024,
-      seed: undefined,
-      stopSequences: [],
-      toolCallsEnabled: false,
-      tools: undefined,
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -575,7 +710,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { inferencePresetId: infPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "next question", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const assistantMsg = capturedBody.messages.find(
       (m: { role: string }) => m.role === "assistant",
@@ -591,33 +726,26 @@ describe("streamProxy", () => {
     spyOn(llamaServerModule, "getActiveThinkingTagOverride").mockReturnValue(
       GEMMA4_THINKING_CONFIG,
     );
-    spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue({
-      architecture: "gemma4",
-      name: "Gemma 4",
-      fileSizeBytes: 1,
-      contextLength: 4096,
-      embeddingLength: undefined,
-      attentionHeadCount: undefined,
-      attentionHeadCountKv: undefined,
-      blockCount: undefined,
-      feedForwardLength: undefined,
-      quantType: undefined,
-      hasVisionEncoder: false,
-      hasAudioEncoder: false,
-      hasToolCalling: false,
-      defaultTemperature: undefined,
-      defaultTopK: undefined,
-      defaultTopP: undefined,
-      defaultMinP: undefined,
-      defaultRepeatPenalty: undefined,
-      chatTemplate: undefined,
-    });
+    spyOn(chatRepoModule, "getMetadataForPath").mockResolvedValue(
+      ggufDisplayMetadata({
+        architecture: "gemma4",
+        name: "Gemma 4",
+        fileSizeBytes: 1,
+        contextLength: 4096,
+        embeddingLength: undefined,
+        attentionHeadCount: undefined,
+        attentionHeadCountKv: undefined,
+        blockCount: undefined,
+        feedForwardLength: undefined,
+        quantType: undefined,
+      }),
+    );
     const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Preserve Gemma Thinking History");
     await addMessage({
@@ -635,6 +763,8 @@ describe("streamProxy", () => {
     await createInferencePreset({
       id: infPresetId,
       name: "Preserve Gemma History Preset",
+      ...createDefaultInferenceSampling(),
+      isDefault: false,
       temperature: 0.7,
       topP: 0.9,
       minP: 0.05,
@@ -642,12 +772,6 @@ describe("streamProxy", () => {
       frequencyPenalty: 0.0,
       presencePenalty: 0.0,
       maxTokens: 1024,
-      seed: undefined,
-      stopSequences: [],
-      toolCallsEnabled: false,
-      tools: undefined,
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -655,7 +779,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { inferencePresetId: infPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "2", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const assistantMsg = capturedBody.messages.find(
       (m: { role: string }) => m.role === "assistant",
@@ -669,11 +793,11 @@ describe("streamProxy", () => {
   it("sends reasoning_content on preserved historical assistants that have tool calls", async () => {
     await seedLoadedLoadPreset("lp-preserve-tool-history", true);
     const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Preserve Tool Call Thinking History");
     await addMessage({
@@ -706,8 +830,10 @@ describe("streamProxy", () => {
 
     const infPresetId = "preserve-tool-history-preset";
     await createInferencePreset({
+      ...createDefaultInferenceSampling(),
       id: infPresetId,
       name: "Preserve Tool History Preset",
+      isDefault: false,
       temperature: 0.7,
       topP: 0.9,
       minP: 0.05,
@@ -715,12 +841,7 @@ describe("streamProxy", () => {
       frequencyPenalty: 0.0,
       presencePenalty: 0.0,
       maxTokens: 1024,
-      seed: undefined,
-      stopSequences: [],
       toolCallsEnabled: true,
-      tools: undefined,
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -728,7 +849,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { inferencePresetId: infPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "what next", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const assistantMsg = capturedBody.messages.find(
       (m: { role: string }) => m.role === "assistant",
@@ -740,11 +861,11 @@ describe("streamProxy", () => {
 
   it("omits reasoning_content on assistants before the last user when preserve_thinking is off", async () => {
     const stream = buildSSEStream([chatDelta("follow up"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("No Preserve Thinking History Test");
     // Insert a historical assistant message with thinking content
@@ -771,6 +892,8 @@ describe("streamProxy", () => {
     await createInferencePreset({
       id: infPresetId,
       name: "No Preserve Thinking History Preset",
+      ...createDefaultInferenceSampling(),
+      isDefault: false,
       temperature: 0.7,
       topP: 0.9,
       minP: 0.05,
@@ -778,12 +901,6 @@ describe("streamProxy", () => {
       frequencyPenalty: 0.0,
       presencePenalty: 0.0,
       maxTokens: 1024,
-      seed: undefined,
-      stopSequences: [],
-      toolCallsEnabled: false,
-      tools: undefined,
-      structuredOutput: undefined,
-      contextOverflowPolicy: "TruncateMiddle",
       thinkingEnabled: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -791,7 +908,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { inferencePresetId: infPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "next question", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const assistantMsg = capturedBody.messages.find((m: any) => m.role === "assistant");
     expect(assistantMsg).toBeDefined();
@@ -803,11 +920,11 @@ describe("streamProxy", () => {
 
   it("sends reasoning_content on a continued last assistant when preserve_thinking is off", async () => {
     const stream = buildSSEStream([chatDelta(" more"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Continue Reasoning Replay");
     await addMessage({
@@ -836,7 +953,7 @@ describe("streamProxy", () => {
       attachments: [],
       isContinue: true,
     });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const assistantMsg = capturedBody.messages.find(
       (m: { role: string }) => m.role === "assistant",
@@ -849,11 +966,11 @@ describe("streamProxy", () => {
   it("sends reasoning_content on a continued last assistant when preserve_thinking is on", async () => {
     await seedLoadedLoadPreset("lp-preserve-continue", true);
     const stream = buildSSEStream([chatDelta(" more"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Continue Preserve Reasoning Replay");
     await addMessage({
@@ -882,7 +999,7 @@ describe("streamProxy", () => {
       attachments: [],
       isContinue: true,
     });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const assistantMsg = capturedBody.messages.find(
       (m: { role: string }) => m.role === "assistant",
@@ -895,21 +1012,17 @@ describe("streamProxy", () => {
 
   it("keeps thinking enabled after editing the last user turn and on a new chat", async () => {
     const bodies: unknown[] = [];
-    const fetchMock = mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (input: RequestInfo, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.url;
       if (url.includes("/tokenize")) {
-        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 }) as any;
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 });
       }
       if (init?.body) bodies.push(JSON.parse(init.body as string));
-      return {
-        ok: true,
-        body: buildSSEStream([
-          chatDelta("<|channel>thought plan<channel|>edited answer"),
-          chatStop(),
-        ]),
-      } as any;
+      return sseResponse(
+        buildSSEStream([chatDelta("<|channel>thought plan<channel|>edited answer"), chatStop()]),
+      );
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Edit User Then Regen");
     await addMessage({
@@ -956,7 +1069,7 @@ describe("streamProxy", () => {
       attachments: [],
       isRegenerate: true,
     });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const regenBody = bodies[0] as {
       chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean };
@@ -979,7 +1092,7 @@ describe("streamProxy", () => {
 
     const newChat = await createChat("After Edit Thinking");
     await proxyCompletion({ chatId: newChat.id, content: "fresh", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const newChatBody = bodies[1] as {
       chat_template_kwargs?: { enable_thinking?: boolean };
@@ -989,8 +1102,8 @@ describe("streamProxy", () => {
 
   it("persists the user message and creates an assistant message row", async () => {
     const stream = buildSSEStream([chatDelta("Reply!"), chatStop()]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Persist Test");
     const assistantMsgId = await proxyCompletion({
@@ -999,7 +1112,7 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForGenerationIdle();
 
     // Reload the chat from DB
     const reloaded = await getChat(chat.id);
@@ -1040,8 +1153,8 @@ describe("streamProxy", () => {
         },
       },
     ]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Tok/sec derivation");
     const assistantMsgId = await proxyCompletion({
@@ -1049,7 +1162,7 @@ describe("streamProxy", () => {
       content: "Hello there",
       attachments: [],
     });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
     const reloaded = await getChat(chat.id);
     const assistantMsg = reloaded?.messages?.find((m) => m.id === assistantMsgId);
     expect(assistantMsg?.metrics?.tokensPerSecond).toBe(50);
@@ -1059,8 +1172,8 @@ describe("streamProxy", () => {
 
   it("broadcasts the persisted user message so clients can reconcile optimistic ids", async () => {
     const stream = buildSSEStream([chatDelta("Reply!"), chatStop()]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const wsHubModule = await import("../../src/server/wsHub");
     const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
@@ -1073,7 +1186,7 @@ describe("streamProxy", () => {
         attachments: [],
       });
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitForGenerationIdle();
 
       const userMessageFrame = broadcastSpy.mock.calls
         .map((call) => call[0])
@@ -1095,11 +1208,11 @@ describe("streamProxy", () => {
 
   it("ignores malformed persisted toolCallsJson when preparing a follow-up request", async () => {
     const stream = buildSSEStream([chatDelta("Recovered"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Malformed Tool Calls History");
     getDb()
@@ -1123,7 +1236,7 @@ describe("streamProxy", () => {
 
     await proxyCompletion({ chatId: chat.id, content: "continue", attachments: [] });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(fetchMock).toHaveBeenCalled();
     expect(capturedBody.messages).toBeInstanceOf(Array);
@@ -1138,8 +1251,8 @@ describe("streamProxy", () => {
       chatDelta("The answer is 42"),
       chatStop(),
     ]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Think Test");
     const msgId = await proxyCompletion({
@@ -1148,7 +1261,7 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForGenerationIdle();
 
     const reloaded = await getChat(chat.id);
     const assistantMsg = reloaded?.messages?.find((m) => m.id === msgId);
@@ -1172,8 +1285,8 @@ describe("streamProxy", () => {
       chatDelta("The answer is 42"),
       chatStop(),
     ]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const wsHubModule = await import("../../src/server/wsHub");
     const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
@@ -1185,7 +1298,7 @@ describe("streamProxy", () => {
         content: "What is the answer?",
         attachments: [],
       });
-      await new Promise((r) => setTimeout(r, 500));
+      await waitForGenerationIdle();
 
       const frames = broadcastSpy.mock.calls.map((call) => call[0]);
       const stopIndex = frames.findIndex(
@@ -1210,8 +1323,8 @@ describe("streamProxy", () => {
       chatDelta("The answer is 42"),
       chatStop(),
     ]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Native Reasoning Test");
     const msgId = await proxyCompletion({
@@ -1220,7 +1333,7 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForGenerationIdle();
 
     const reloaded = await getChat(chat.id);
     const assistantMsg = reloaded?.messages?.find((m) => m.id === msgId);
@@ -1231,8 +1344,8 @@ describe("streamProxy", () => {
 
   it("broadcasts an empty assistant placeholder before tokens arrive", async () => {
     const stream = buildSSEStream([chatDelta("Reply!"), chatStop()]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const wsHubModule = await import("../../src/server/wsHub");
     const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
@@ -1240,7 +1353,7 @@ describe("streamProxy", () => {
     try {
       const chat = await createChat("Broadcast Assistant Test");
       await proxyCompletion({ chatId: chat.id, content: "Hi", attachments: [] });
-      await new Promise((r) => setTimeout(r, 200));
+      await waitForGenerationIdle();
 
       const frames = broadcastSpy.mock.calls.map((call) => call[0]);
       const assistantPlaceholder = frames.find(
@@ -1271,15 +1384,15 @@ describe("streamProxy", () => {
       enableToken: "<|think|>",
     });
     const stream = buildSSEStream([chatDelta("ok"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Enable Token Kwargs");
     await proxyCompletion({ chatId: chat.id, content: "hi", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(capturedBody.chat_template_kwargs.enable_token).toBe("<|think|>");
   });
@@ -1294,8 +1407,8 @@ describe("streamProxy", () => {
       chatDelta("<|channel>thought\nplan<channel|>The answer is 42"),
       chatStop(),
     ]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Gemma Tags");
     const msgId = await proxyCompletion({
@@ -1303,7 +1416,7 @@ describe("streamProxy", () => {
       content: "What is the answer?",
       attachments: [],
     });
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForGenerationIdle();
 
     const reloaded = await getChat(chat.id);
     const assistantMsg = reloaded?.messages?.find((m) => m.id === msgId);
@@ -1314,8 +1427,8 @@ describe("streamProxy", () => {
 
   it("does not tag-scan a continued native-reasoning answer that mentions an open tag", async () => {
     const stream = buildSSEStream([chatDelta("<think>not a trace</think> more"), chatStop()]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Continue Native");
     await addMessage({
@@ -1353,7 +1466,7 @@ describe("streamProxy", () => {
       attachments: [],
       isContinue: true,
     });
-    await new Promise((r) => setTimeout(r, 500));
+    await waitForGenerationIdle();
 
     const reloaded = await getChat(chat.id);
     const assistantMsg = reloaded?.messages?.find((m) => m.id === "asst-n");
@@ -1370,11 +1483,11 @@ describe("streamProxy", () => {
         }) as any,
     );
 
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Multimodal Flow");
     const file = new File(["abc"], "img.png", { type: "image/png" });
@@ -1384,7 +1497,7 @@ describe("streamProxy", () => {
       attachments: [file],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(messageId).toBeString();
     expect(fetchMock).toHaveBeenCalled();
@@ -1402,11 +1515,11 @@ describe("streamProxy", () => {
 
   it("stores bounded summaries for large text attachments", async () => {
     const stream = buildSSEStream([chatDelta("summarized"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Large Text Attachment Test");
     const file = new File(["A".repeat(30000)], "large.txt", { type: "text/plain" });
@@ -1417,7 +1530,7 @@ describe("streamProxy", () => {
       attachments: [file],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const reloaded = await getChat(chat.id);
     const userMsg = reloaded?.messages?.find((message) => message.role === "user");
@@ -1435,11 +1548,11 @@ describe("streamProxy", () => {
   it("stores bounded summaries for large PDF attachments", async () => {
     mockPdfText = "P".repeat(30000);
     const stream = buildSSEStream([chatDelta("pdf summarized"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Large PDF Attachment Test");
     const file = new File(["fake pdf bytes"], "large.pdf", { type: "application/pdf" });
@@ -1450,7 +1563,7 @@ describe("streamProxy", () => {
       attachments: [file],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const reloaded = await getChat(chat.id);
     const userMsg = reloaded?.messages?.find((message) => message.role === "user");
@@ -1470,36 +1583,30 @@ describe("streamProxy", () => {
   it("times out stalled streams before the first chunk and removes the empty assistant row", async () => {
     await saveSettings({ requestTimeoutSeconds: 0.02 });
 
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
-      const signal = init?.signal as AbortSignal;
-      return {
-        ok: true,
-        body: {
-          getReader: () => ({
-            read: () =>
-              new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
-                if (signal.aborted) {
-                  reject(new DOMException("Aborted", "AbortError"));
-                  return;
-                }
-
-                signal.addEventListener(
-                  "abort",
-                  () => reject(new DOMException("Aborted", "AbortError")),
-                  { once: true },
-                );
-              }),
-            cancel: async () => {},
-          }),
-        },
-      } as any;
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!signal) {
+        throw new Error("streamProxy fetch is missing an AbortSignal");
+      }
+      return hangingSseResponse(signal);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Timeout Test");
     await proxyCompletion({ chatId: chat.id, content: "hello", attachments: [] });
 
-    await new Promise((r) => setTimeout(r, 120));
+    await waitUntil(
+      async () => {
+        const reloaded = await getChat(chat.id);
+        return (
+          (reloaded?.messages?.filter((message) => message.role === "assistant").length ?? -1) ===
+            0 &&
+          (reloaded?.messages?.filter((message) => message.role === "user").length ?? 0) === 1
+        );
+      },
+      2000,
+      "Timed out waiting for the stalled assistant row to be removed",
+    );
 
     const reloaded = await getChat(chat.id);
     expect(reloaded?.messages?.filter((message) => message.role === "assistant")).toHaveLength(0);
@@ -1508,8 +1615,8 @@ describe("streamProxy", () => {
 
   it("handles max_tokens stop reason from chat completions format", async () => {
     const stream = buildSSEStream([chatDelta("partial"), chatStop("length")]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Length Stop Test");
     await proxyCompletion({ chatId: chat.id, content: "write a lot", attachments: [] });
@@ -1517,7 +1624,7 @@ describe("streamProxy", () => {
     // The stop reason should be max_tokens for finish_reason "length"
     // This is verified by the broadcast call internally; as long as
     // no errors are thrown, the response format was handled correctly.
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
     // No crash = success; the old code would have failed here with /completion format
   });
 
@@ -1532,8 +1639,8 @@ describe("streamProxy", () => {
         controller.close();
       },
     });
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Async Test");
     const messageId = await proxyCompletion({
@@ -1572,8 +1679,8 @@ describe("streamProxy", () => {
       },
       chatStop("tool_calls"),
     ]);
-    const fetchMock = mock().mockResolvedValue({ ok: true, body: stream } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Tool Call Test");
     // This will attempt to process tool calls — it may error because we haven't
@@ -1589,7 +1696,7 @@ describe("streamProxy", () => {
       // Tool approval timeout is expected in test
     }
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
     // If we got here without a crash, the tool call accumulation worked
   });
 
@@ -1597,7 +1704,7 @@ describe("streamProxy", () => {
     const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
       const url = typeof input === "string" ? input : input.url;
       if (url.endsWith("/tokenize")) {
-        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 }) as any;
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 });
       }
 
       const stream = buildSSEStream([
@@ -1627,9 +1734,9 @@ describe("streamProxy", () => {
         },
         chatStop("tool_calls"),
       ]);
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Tool Reject Test");
     const inferencePresetId = "tool-reject-preset";
@@ -1682,9 +1789,14 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await waitUntil(async () => {
+      const pending = await getChat(chat.id);
+      return Boolean(
+        pending?.messages?.some((message) => message.toolCallsJson?.includes("tc_reject")),
+      );
+    });
     resolveToolApproval("tc_reject", false);
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await waitForGenerationIdle();
 
     const reloaded = await getChat(chat.id);
     expect(reloaded?.messages?.filter((message) => message.role === "tool")).toHaveLength(0);
@@ -1697,7 +1809,7 @@ describe("streamProxy", () => {
     const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
       const url = typeof input === "string" ? input : input.url;
       if (url.endsWith("/tokenize")) {
-        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 }) as any;
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 });
       }
 
       chatCompletionFetchCount += 1;
@@ -1729,9 +1841,9 @@ describe("streamProxy", () => {
         },
         chatStop("tool_calls"),
       ]);
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Tool Recursion Cap Test");
     const inferencePresetId = "tool-recursion-preset";
@@ -1785,11 +1897,17 @@ describe("streamProxy", () => {
     });
 
     for (let approvalIndex = 1; approvalIndex <= 6; approvalIndex++) {
-      await new Promise((resolve) => setTimeout(resolve, 40));
-      resolveToolApproval(`tc_${approvalIndex}`, true, '{"expression":"2+2"}');
+      const toolCallId = `tc_${approvalIndex}`;
+      await waitUntil(async () => {
+        const pending = await getChat(chat.id);
+        return Boolean(
+          pending?.messages?.some((message) => message.toolCallsJson?.includes(toolCallId)),
+        );
+      });
+      resolveToolApproval(toolCallId, true, '{"expression":"2+2"}');
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await waitForGenerationIdle();
 
     expect(chatCompletionFetchCount).toBe(6);
   });
@@ -1806,13 +1924,13 @@ describe("streamProxy", () => {
         return new Response(JSON.stringify({ tokens: new Array(tokenCount).fill(1) }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
-        }) as any;
+        });
       }
 
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Payload Budget Test");
     await addMessage({
@@ -1885,7 +2003,7 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const contentStrings = capturedBody.messages
       .map((message: any) =>
@@ -1905,12 +2023,10 @@ describe("streamProxy", () => {
   it("handles error responses from the model server gracefully", async () => {
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
 
-    const fetchMock = mock().mockResolvedValue({
-      ok: false,
-      status: 500,
-      text: async () => "Internal Server Error",
-    } as any);
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(
+      async () => new Response("Internal Server Error", { status: 500 }),
+    );
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Error Test");
     const messageId = await proxyCompletion({
@@ -1919,7 +2035,7 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((r) => setTimeout(r, 300));
+    await waitForGenerationIdle();
 
     // Should still return a message ID (created before the stream starts)
     expect(messageId).toBeString();
@@ -1939,8 +2055,10 @@ describe("streamProxy", () => {
     spyOn(llamaServerModule, "getProc").mockReturnValue({ exitCode: 23 } as any);
     spyOn(llamaServerModule, "getRecentServerLogs").mockReturnValue(["fatal multimodal failure"]);
 
-    const fetchMock = mock().mockRejectedValue(new Error("socket hang up"));
-    globalThis.fetch = fetchMock;
+    const fetchMock = llamaFetch(async () => {
+      throw new Error("socket hang up");
+    });
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Transport Error Test");
     const messageId = await proxyCompletion({
@@ -1949,7 +2067,7 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((r) => setTimeout(r, 300));
+    await waitForGenerationIdle();
 
     const errorFrame = broadcastSpy.mock.calls
       .map((call) => call[0])
@@ -1977,11 +2095,11 @@ describe("streamProxy", () => {
       enableToken: "<|think|>",
     });
     const stream = buildSSEStream([chatDelta("ok"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const systemPresetId = "sys-no-think-inject";
     await createSystemPreset({
@@ -1995,7 +2113,7 @@ describe("streamProxy", () => {
     await updateChat(chat.id, { systemPresetId });
 
     await proxyCompletion({ chatId: chat.id, content: "hi", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const systemMsg = capturedBody.messages.find((m: { role: string }) => m.role === "system");
     expect(systemMsg.content).toBe("You are helpful.");
@@ -2008,69 +2126,68 @@ describe("streamProxy", () => {
   });
 
   it("keeps assistant rows that have thinking content when generation is aborted", async () => {
-    const encoder = new TextEncoder();
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
-      const signal = init?.signal as AbortSignal;
-      return {
-        ok: true,
-        body: {
-          getReader: () => {
-            let sent = false;
-            return {
-              read: () =>
-                new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
-                  if (signal.aborted) {
-                    reject(new DOMException("Aborted", "AbortError"));
-                    return;
-                  }
-                  if (!sent) {
-                    sent = true;
-                    resolve({
-                      done: false,
-                      value: encoder.encode(
-                        `data: ${JSON.stringify(chatDelta("<think>I am reasoning about this</think>"))}\n\n`,
-                      ),
-                    });
-                    return;
-                  }
-                  signal.addEventListener(
-                    "abort",
-                    () => reject(new DOMException("Aborted", "AbortError")),
-                    { once: true },
-                  );
-                }),
-              cancel: async () => {},
-            };
-          },
+    const wsHubModule = await import("../../src/server/wsHub");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!signal) {
+        throw new Error("streamProxy fetch is missing an AbortSignal");
+      }
+      return sseThenHangResponse(signal, chatDelta("<think>I am reasoning about this</think>"));
+    });
+    globalThis.fetch = asFetch(fetchMock);
+
+    try {
+      const chat = await createChat("Abort Thinking Test");
+      const msgId = await proxyCompletion({
+        chatId: chat.id,
+        content: "think",
+        attachments: [],
+      });
+
+      await waitUntil(
+        () =>
+          broadcastSpy.mock.calls.some((call) => {
+            const frame = call[0];
+            return (
+              frame.type === "token" &&
+              typeof frame.thinkingDelta === "string" &&
+              frame.thinkingDelta.includes("I am reasoning")
+            );
+          }),
+        2000,
+        "Timed out waiting for thinking tokens before abort",
+      );
+      abortGeneration(chat.id);
+      await waitUntil(
+        async () => {
+          const persisted = await getChat(chat.id);
+          return Boolean(
+            persisted?.messages
+              ?.find((m) => m.id === msgId)
+              ?.thinkingContent?.includes("I am reasoning"),
+          );
         },
-      } as any;
-    });
-    globalThis.fetch = fetchMock;
+        2000,
+        "Timed out waiting for aborted thinking to persist",
+      );
 
-    const chat = await createChat("Abort Thinking Test");
-    const msgId = await proxyCompletion({
-      chatId: chat.id,
-      content: "think",
-      attachments: [],
-    });
-
-    await new Promise((r) => setTimeout(r, 80));
-    abortGeneration(chat.id);
-    await new Promise((r) => setTimeout(r, 80));
-
-    const reloaded = await getChat(chat.id);
-    const assistant = reloaded?.messages?.find((m) => m.id === msgId);
-    expect(assistant).toBeDefined();
-    expect(assistant?.thinkingContent).toContain("I am reasoning");
+      const reloaded = await getChat(chat.id);
+      const assistant = reloaded?.messages?.find((m) => m.id === msgId);
+      expect(assistant).toBeDefined();
+      expect(assistant?.thinkingContent).toContain("I am reasoning");
+    } finally {
+      broadcastSpy.mockRestore();
+    }
   });
 
   it("does not overwrite a trailing tool message when continuing", async () => {
     const stream = buildSSEStream([chatDelta("follow-up"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Continue Tool Tail");
     await addMessage({
@@ -2115,7 +2232,7 @@ describe("streamProxy", () => {
       attachments: [],
       isContinue: true,
     });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     expect(newId).not.toBe("tool-1");
     expect(newId).not.toBe("asst-1");
@@ -2130,11 +2247,11 @@ describe("streamProxy", () => {
 
   it("sends tool-call arguments as objects, not JSON strings", async () => {
     const stream = buildSSEStream([chatDelta("done"), chatStop()]);
-    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       capturedBody = init?.body ? JSON.parse(init.body as string) : null;
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Tool Args Object");
     await addMessage({
@@ -2165,7 +2282,7 @@ describe("streamProxy", () => {
     });
 
     await proxyCompletion({ chatId: chat.id, content: "thanks", attachments: [] });
-    await new Promise((r) => setTimeout(r, 200));
+    await waitForGenerationIdle();
 
     const assistantMsg = capturedBody.messages.find(
       (m: { role: string }) => m.role === "assistant",
@@ -2177,10 +2294,10 @@ describe("streamProxy", () => {
   it("completes a tool round trip and deserializes arguments on the follow-up request", async () => {
     const capturedBodies: unknown[] = [];
     let chatCompletionFetchCount = 0;
-    const fetchMock = mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+    const fetchMock = llamaFetch(async (input: RequestInfo, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.url;
       if (url.endsWith("/tokenize")) {
-        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 }) as any;
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 });
       }
 
       chatCompletionFetchCount += 1;
@@ -2216,13 +2333,13 @@ describe("streamProxy", () => {
           },
           chatStop("tool_calls"),
         ]);
-        return { ok: true, body: stream } as any;
+        return sseResponse(stream);
       }
 
       const stream = buildSSEStream([chatDelta("The answer is 4"), chatStop()]);
-      return { ok: true, body: stream } as any;
+      return sseResponse(stream);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const chat = await createChat("Tool Round Trip");
     const inferencePresetId = "tool-roundtrip-preset";
@@ -2275,9 +2392,14 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await waitUntil(async () => {
+      const pending = await getChat(chat.id);
+      return Boolean(
+        pending?.messages?.some((message) => message.toolCallsJson?.includes("tc_roundtrip")),
+      );
+    });
     resolveToolApproval("tc_roundtrip", true);
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await waitForGenerationIdle();
 
     expect(chatCompletionFetchCount).toBe(2);
     const followUp = capturedBodies[1] as {

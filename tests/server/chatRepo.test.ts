@@ -341,7 +341,7 @@ describe("chatRepo", () => {
     const importedChat = await getChat(importedId);
     expect(importedChat?.name).toContain("Exchange");
     expect(importedChat?.messages?.length).toBe(1);
-    expect(importedChat?.messages?.[0].content).toBe("Export test");
+    expect(importedChat?.messages?.[0]?.content).toBe("Export test");
   });
 
   it("imports extracted soundtracks larger than 10MB and keeps them paired to the video", async () => {

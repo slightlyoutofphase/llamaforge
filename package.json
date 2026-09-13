@@ -14,7 +14,7 @@
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit --project tsconfig.json && tsc --noEmit --project tsconfig.server.json",
     "typecheck:tests": "tsc --noEmit --project tsconfig.test.json",
-    "lint": "npm run typecheck && biome lint . --max-diagnostics 500 && eslint",
+    "lint": "npm run typecheck && npm run typecheck:tests && biome lint . --max-diagnostics 500 && eslint",
     "clean": "bun run scripts/clean.mjs",
     "docs": "typedoc"
   },

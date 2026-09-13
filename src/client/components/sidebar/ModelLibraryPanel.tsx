@@ -3,6 +3,7 @@
  * Provides the model library panel for browsing and loading GGUF models.
  */
 
+import { resolveSpecDraftModelPath } from "../../../shared/defaults";
 import { metadataHasToolCalling } from "../../../shared/templateCapabilities";
 import type { ChatMessage, LoadModelRequest, LoadPreset } from "../../../shared/types";
 import { useNavigate } from "@tanstack/react-router";
@@ -95,11 +96,14 @@ export function ModelLibraryPanel() {
       thinkingTagOverride: preset.thinkingTagOverride,
     };
 
-    if (
-      (preset.config.specType === "draft-simple" || preset.config.specType === "draft-eagle3") &&
-      selectedModel.draftModelPath
-    ) {
-      request.specDraftModelPath = selectedModel.draftModelPath;
+    const resolvedDraftPath = resolveSpecDraftModelPath(
+      preset.config.specType,
+      preset.config.specDraftModelPath,
+      selectedModel.draftModelPath,
+      selectedModel.draftSpecType,
+    );
+    if (resolvedDraftPath) {
+      request.specDraftModelPath = resolvedDraftPath;
     }
 
     if (

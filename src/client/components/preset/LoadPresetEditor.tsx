@@ -52,26 +52,61 @@ function modelDirectoryPrefix(primaryPath: string): string {
 }
 
 /**
+ * Returns the filename component of a path, handling both POSIX and Windows separators.
+ *
+ * @param filePath - Absolute or relative file path.
+ * @returns The last path segment.
+ */
+function fileNameFromPath(filePath: string): string {
+  const slash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
+  return slash >= 0 ? filePath.slice(slash + 1) : filePath;
+}
+
+/**
  * Computes which speculative decoding modes are available for a given model.
+ *
+ * Draft companions are omitted from the scanned catalog (like mmproj files).
+ * `gemma4-assistant` companions require `--spec-type draft-mtp`, not `draft-simple`.
  *
  * @param model - The primary model entry (may be undefined).
  * @param allModels - Full list of scanned models.
- * @returns Flags indicating whether draft-model and MTP modes are allowed.
+ * @returns Flags indicating which speculative modes the companion supports.
  */
 function getSpeculativeDecodingAvailability(
   model: ModelEntry | undefined,
   allModels: ModelEntry[],
-): { draftModel: boolean; mtp: boolean } {
-  if (!model) return { draftModel: false, mtp: false };
+): {
+  draftModel: boolean;
+  mtp: boolean;
+  detectedDraftPath: string;
+  detectedSpecType: ModelEntry["draftSpecType"];
+} {
+  if (!model) {
+    return { draftModel: false, mtp: false, detectedDraftPath: "", detectedSpecType: undefined };
+  }
+  const detectedDraftPath = model.draftModelPath?.trim() ?? "";
+  const detectedSpecType = model.draftSpecType;
   const modelDir = modelDirectoryPrefix(model.primaryPath);
-  if (!modelDir) return { draftModel: false, mtp: false };
-  const hasDraftModel = allModels.some(
-    (m) => m.metadata?.isDraftModel && m.primaryPath.startsWith(modelDir),
-  );
-  if (hasDraftModel) return { draftModel: true, mtp: false };
-  const hasMtp = model.modelName?.toLowerCase().includes("mtp") ?? false;
-  if (hasMtp) return { draftModel: false, mtp: true };
-  return { draftModel: false, mtp: false };
+  const siblingDraft =
+    modelDir.length > 0 &&
+    allModels.some(
+      (entry) =>
+        entry.metadata?.isDraftModel &&
+        entry.primaryPath !== model.primaryPath &&
+        entry.primaryPath.startsWith(modelDir),
+    );
+  const hasAttachedMtp = detectedSpecType === "draft-mtp" && Boolean(detectedDraftPath);
+  const hasMtpInName = model.modelName?.toLowerCase().includes("mtp") ?? false;
+  const hasSimpleDraft =
+    (Boolean(detectedDraftPath) && detectedSpecType === "draft-simple") ||
+    (Boolean(detectedDraftPath) && !detectedSpecType) ||
+    siblingDraft;
+  return {
+    draftModel: hasSimpleDraft && !hasAttachedMtp,
+    mtp: hasAttachedMtp || hasMtpInName,
+    detectedDraftPath,
+    detectedSpecType,
+  };
 }
 
 /**
@@ -138,10 +173,7 @@ export function LoadPresetEditor() {
     );
     const availability = getSpeculativeDecodingAvailability(matching, models);
     const currentType = config.specType ?? "off";
-    const isInvalid =
-      (currentType === "draft-simple" && !availability.draftModel) ||
-      (currentType === "draft-mtp" && !availability.mtp);
-    if (!isInvalid) return;
+    if (currentType !== "draft-mtp" || availability.mtp) return;
     setLocalState((prev) =>
       prev?.config ? { ...prev, config: { ...prev.config, specType: "off" } } : prev,
     );
@@ -810,9 +842,7 @@ export function LoadPresetEditor() {
             {(() => {
               const availability = getSpeculativeDecodingAvailability(matchingModel, models);
               const currentType = config.specType ?? "off";
-              const isInvalid =
-                (currentType === "draft-simple" && !availability.draftModel) ||
-                (currentType === "draft-mtp" && !availability.mtp);
+              const isInvalidMtp = currentType === "draft-mtp" && !availability.mtp;
               return (
                 <>
                   <label htmlFor="specType" className="block font-medium">
@@ -823,26 +853,51 @@ export function LoadPresetEditor() {
                     value={currentType}
                     onChange={(e) => {
                       const val = e.target.value as ModelLoadConfig["specType"];
-                      updateConfigField("specType", val);
-                      if (val !== "off" && val !== "draft-mtp") {
-                        updateConfigField("specDraftModelPath", "");
-                      }
+                      setLocalState((prev) => {
+                        if (!prev?.config) return prev;
+                        const next = { ...prev.config, specType: val };
+                        const detected = availability.detectedDraftPath;
+                        const detectedType = availability.detectedSpecType;
+                        if (detected && val === detectedType && !next.specDraftModelPath?.trim()) {
+                          next.specDraftModelPath = detected;
+                        } else if (
+                          val === "draft-simple" &&
+                          detectedType === "draft-mtp" &&
+                          next.specDraftModelPath === detected
+                        ) {
+                          next.specDraftModelPath = "";
+                        }
+                        return { ...prev, config: next };
+                      });
                     }}
                     disabled={isReadonly}
                     className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded">
                     <option value="off">Off</option>
                     <option value="draft-mtp" disabled={!availability.mtp}>
-                      MTP {availability.mtp ? "" : "(no MTP model found)"}
+                      MTP
+                      {availability.mtp
+                        ? availability.detectedSpecType === "draft-mtp"
+                          ? " (assistant companion found)"
+                          : ""
+                        : " (no MTP model found)"}
                     </option>
-                    <option value="draft-simple" disabled={!availability.draftModel}>
-                      Draft Model {availability.draftModel ? "" : "(no draft model found)"}
+                    <option value="draft-simple">
+                      Draft Model
+                      {availability.draftModel ? "" : " (set path below)"}
                     </option>
                   </select>
-                  {isInvalid && (
+                  {isInvalidMtp && (
                     <p className="text-[11px] text-red-400">
                       Selected mode is not available for this model. Switching to Off.
                     </p>
                   )}
+                  {currentType === "draft-simple" &&
+                    availability.detectedSpecType === "draft-mtp" && (
+                      <p className="text-[11px] text-amber-400">
+                        The auto-detected companion is a Gemma MTP assistant and must be loaded with
+                        MTP, not Draft Model.
+                      </p>
+                    )}
 
                   <div className="space-y-1 pt-2">
                     <label
@@ -916,22 +971,31 @@ export function LoadPresetEditor() {
                     />
                   </div>
 
-                  {(currentType === "draft-simple" || currentType === "draft-eagle3") && (
-                    <div className="space-y-1 pt-2">
-                      <label htmlFor="specDraftModelPath" className="block font-medium">
-                        Draft Model Path
-                      </label>
-                      <input
-                        id="specDraftModelPath"
-                        type="text"
-                        value={config.specDraftModelPath || ""}
-                        onChange={(e) => updateConfigField("specDraftModelPath", e.target.value)}
-                        disabled={isReadonly}
-                        placeholder="Auto-detected if blank"
-                        className="w-full font-mono bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md disabled:opacity-50 text-xs"
-                      />
-                    </div>
-                  )}
+                  <div className="space-y-1 pt-2">
+                    <label htmlFor="specDraftModelPath" className="block font-medium">
+                      Draft Model Path
+                    </label>
+                    <input
+                      id="specDraftModelPath"
+                      type="text"
+                      value={config.specDraftModelPath || ""}
+                      onChange={(e) => updateConfigField("specDraftModelPath", e.target.value)}
+                      disabled={isReadonly}
+                      placeholder={
+                        availability.detectedDraftPath || "Absolute path to a draft/assistant GGUF"
+                      }
+                      className="w-full font-mono bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md disabled:opacity-50 text-xs"
+                    />
+                    {availability.detectedDraftPath && !config.specDraftModelPath?.trim() && (
+                      <p className="text-[11px] text-[var(--color-text-muted)]">
+                        Auto-detected{" "}
+                        {availability.detectedSpecType === "draft-mtp"
+                          ? "MTP assistant"
+                          : "companion"}
+                        : {fileNameFromPath(availability.detectedDraftPath)}
+                      </p>
+                    )}
+                  </div>
                 </>
               );
             })()}

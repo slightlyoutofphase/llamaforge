@@ -8,6 +8,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
+import { asFetch } from "../fixtures";
 
 let App: typeof import("../../src/client/App").default;
 let ModelSelector: typeof import("../../src/client/ModelSelector").ModelSelector;
@@ -48,7 +49,7 @@ const defaultAppState = {
   fetchHardware: mock().mockResolvedValue(undefined),
   fetchModels: mock().mockResolvedValue(undefined),
   fetchServerStatus: mock().mockResolvedValue(undefined),
-  serverStatus: "idle",
+  serverStatus: "idle" as const,
   isConnected: true,
   errorMessage: null,
   errorActionLabel: null,
@@ -68,19 +69,21 @@ const queryClient = new QueryClient({
 describe("Layout regression tests", () => {
   beforeAll(async () => {
     originalFetch = global.fetch;
-    global.fetch = mock((input) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/api/presets/load")) {
+    global.fetch = asFetch(
+      mock((input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/presets/load")) {
+          return Promise.resolve(
+            new Response(JSON.stringify(mockPresets), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
         return Promise.resolve(
-          new Response(JSON.stringify(mockPresets), {
-            headers: { "Content-Type": "application/json" },
-          }),
+          new Response(JSON.stringify({}), { headers: { "Content-Type": "application/json" } }),
         );
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({}), { headers: { "Content-Type": "application/json" } }),
-      );
-    });
+      }),
+    );
 
     const appModule = await import("../../src/client/App");
     App = appModule.default;
@@ -157,6 +160,7 @@ describe("Layout regression tests", () => {
             hasVisionEncoder: true,
             hasAudioEncoder: false,
             hasToolCalling: false,
+            isDraftModel: false,
             defaultTemperature: 0.8,
             defaultTopK: 40,
             defaultTopP: 0.95,
@@ -210,6 +214,7 @@ describe("Layout regression tests", () => {
             hasVisionEncoder: true,
             hasAudioEncoder: false,
             hasToolCalling: false,
+            isDraftModel: false,
             defaultTemperature: 0.8,
             defaultTopK: 40,
             defaultTopP: 0.95,

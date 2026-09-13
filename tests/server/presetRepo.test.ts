@@ -21,6 +21,7 @@ import {
   updateSystemPreset,
   assertWritableLoadPresetConfig,
 } from "../../src/server/persistence/presetRepo";
+import { testInferencePreset, testLoadConfig } from "../fixtures";
 
 describe("presetRepo", () => {
   beforeEach(async () => {
@@ -35,21 +36,16 @@ describe("presetRepo", () => {
       isDefault: false,
       isReadonly: false,
       modelPath: "path1",
-      config: {
+      config: testLoadConfig("path1", {
         contextSize: 2048,
         gpuLayers: 1,
         threads: 1,
         batchSize: 1,
         microBatchSize: 1,
-        ropeScaling: "none",
         ropeFreqBase: 1,
         ropeFreqScale: 1,
-        kvCacheTypeK: "f16",
-        kvCacheTypeV: "f16",
         mlock: false,
-        noMmap: false,
-        flashAttn: "auto",
-      },
+      }),
       thinkingTagOverride: {
         openTag: "<think>",
         closeTag: "</think>",
@@ -65,22 +61,17 @@ describe("presetRepo", () => {
 
     await updateLoadPreset("lp1", {
       name: "Load 1 Updated",
-      config: {
+      config: testLoadConfig("path1-updated", {
         contextSize: 2048,
         gpuLayers: 1,
         threads: 1,
         batchSize: 1,
         microBatchSize: 1,
-        ropeScaling: "none",
         ropeFreqBase: 1,
         ropeFreqScale: 1,
-        kvCacheTypeK: "f16",
-        kvCacheTypeV: "f16",
         mlock: false,
-        noMmap: false,
-        modelPath: "path1-updated",
         flashAttn: "off",
-      },
+      }),
       thinkingTagOverride: {
         openTag: "<reason>",
         closeTag: "</reason>",
@@ -105,21 +96,16 @@ describe("presetRepo", () => {
       isDefault: false,
       isReadonly: false,
       modelPath: "path-preserve",
-      config: {
+      config: testLoadConfig("path-preserve", {
         contextSize: 2048,
         gpuLayers: 1,
         threads: 1,
         batchSize: 1,
         microBatchSize: 1,
-        ropeScaling: "none",
         ropeFreqBase: 1,
         ropeFreqScale: 1,
-        kvCacheTypeK: "f16",
-        kvCacheTypeV: "f16",
         mlock: false,
-        noMmap: false,
-        flashAttn: "auto",
-      },
+      }),
       preserveThinking: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -149,7 +135,7 @@ describe("presetRepo", () => {
     const stored = (await getLoadPresets()).find((p) => p.id === "lp-unknown");
     expect(stored?.config).toBeDefined();
     if (!stored?.config) return;
-    expect((stored.config as Record<string, unknown>)["extraFlag"]).toBeUndefined();
+    expect("extraFlag" in stored.config).toBe(false);
     expect(stored.config.contextSize).toBe(2048);
 
     expect(() =>
@@ -205,29 +191,60 @@ describe("presetRepo", () => {
     expect(flatPreset?.config.flashAttn).toBe("on");
     expect(wrappedPreset?.config.flashAttn).toBe("off");
     if (flatPreset) {
-      expect((flatPreset.config as Record<string, unknown>).flashAttention).toBeUndefined();
+      expect("flashAttention" in flatPreset.config).toBe(false);
     }
     if (wrappedPreset) {
-      expect((wrappedPreset.config as Record<string, unknown>).flashAttention).toBeUndefined();
+      expect("flashAttention" in wrappedPreset.config).toBe(false);
     }
   });
 
   it("handles inference presets CRUD", async () => {
-    await createInferencePreset({
-      id: "ip1",
-      name: "Inf 1",
-      isDefault: false,
-      temperature: 0.7,
-      topP: 0.9,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    });
-    let presets = await getInferencePresets();
-    expect(presets.find((p) => p.id === "ip1")).toBeDefined();
+    const calculateTool = {
+      name: "calculate",
+      description: "Evaluate a mathematical expression.",
+      parameters: {
+        type: "object",
+        properties: { expression: { type: "string" } },
+        required: ["expression"],
+      },
+    };
 
-    await updateInferencePreset("ip1", { temperature: 0.8 });
+    await createInferencePreset(
+      testInferencePreset({
+        id: "ip1",
+        name: "Inf 1",
+        isDefault: false,
+        temperature: 0.7,
+        topP: 0.9,
+        stopStrings: ["</s>", "User:"],
+        toolCallsEnabled: true,
+        thinkingEnabled: false,
+        tools: [calculateTool],
+      }),
+    );
+    let presets = await getInferencePresets();
+    const created = presets.find((p) => p.id === "ip1");
+    expect(created).toBeDefined();
+    expect(created?.temperature).toBe(0.7);
+    expect(created?.stopStrings).toEqual(["</s>", "User:"]);
+    expect(created?.toolCallsEnabled).toBe(true);
+    expect(created?.thinkingEnabled).toBe(false);
+    expect(created?.tools).toEqual([calculateTool]);
+
+    await updateInferencePreset("ip1", {
+      temperature: 0.8,
+      stopStrings: ["END"],
+      toolCallsEnabled: false,
+      thinkingEnabled: true,
+      tools: [],
+    });
     presets = await getInferencePresets();
-    expect(presets.find((p) => p.id === "ip1")?.temperature).toBe(0.8);
+    const updated = presets.find((p) => p.id === "ip1");
+    expect(updated?.temperature).toBe(0.8);
+    expect(updated?.stopStrings).toEqual(["END"]);
+    expect(updated?.toolCallsEnabled).toBe(false);
+    expect(updated?.thinkingEnabled).toBe(true);
+    expect(updated?.tools).toEqual([]);
 
     await deleteInferencePreset("ip1");
     presets = await getInferencePresets();
@@ -274,6 +291,7 @@ describe("presetRepo", () => {
           hasVisionEncoder: true,
           hasAudioEncoder: false,
           hasToolCalling: false,
+          isDraftModel: false,
           defaultTemperature: 0.7,
           defaultTopK: 20,
           defaultTopP: 0.9,
@@ -330,6 +348,7 @@ describe("presetRepo", () => {
           hasVisionEncoder: false,
           hasAudioEncoder: false,
           hasToolCalling: false,
+          isDraftModel: false,
           defaultTemperature: 0.7,
           defaultTopK: 40,
           defaultTopP: 0.95,
@@ -371,6 +390,7 @@ describe("presetRepo", () => {
           hasVisionEncoder: false,
           hasAudioEncoder: false,
           hasToolCalling: false,
+          isDraftModel: false,
           defaultTemperature: 0.7,
           defaultTopK: 40,
           defaultTopP: 0.95,
@@ -409,6 +429,7 @@ describe("presetRepo", () => {
           hasVisionEncoder: false,
           hasAudioEncoder: false,
           hasToolCalling: false,
+          isDraftModel: false,
           defaultTemperature: 0.7,
           defaultTopK: undefined,
           defaultTopP: 0.95,

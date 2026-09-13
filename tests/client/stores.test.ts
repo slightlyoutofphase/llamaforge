@@ -5,6 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { act, cleanup } from "@testing-library/react";
+import { asFetch, testLoadConfig } from "../fixtures";
 
 let useAppStore: typeof import("../../src/client/store").useAppStore;
 let useUiStore: typeof import("../../src/client/uiStore").useUiStore;
@@ -47,10 +48,14 @@ describe("stores logic", () => {
     addNotification("Test Toast", "success");
     let state = useAppStore.getState();
     expect(state.notifications.length).toBe(1);
-    expect(state.notifications[0].message).toBe("Test Toast");
-    expect(state.notifications[0].type).toBe("success");
+    expect(state.notifications[0]?.message).toBe("Test Toast");
+    expect(state.notifications[0]?.type).toBe("success");
 
-    const id = state.notifications[0].id;
+    const id = state.notifications[0]?.id;
+    expect(id).toBeString();
+    if (typeof id !== "string") {
+      throw new Error("expected a notification id");
+    }
     removeNotification(id);
     state = useAppStore.getState();
     expect(state.notifications.length).toBe(0);
@@ -86,7 +91,7 @@ describe("stores logic", () => {
   it("sendMessage rolls back optimistic message on failure", async () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = mock().mockResolvedValue(new Response(null, { status: 500 }));
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     act(() => {
       useAppStore.setState({ currentChatId: "chat-1", messages: [], isGenerating: false });
@@ -115,7 +120,7 @@ describe("stores logic", () => {
       capturedUrl = typeof input === "string" ? input : input.url;
       return new Response(null, { status: 200 });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     act(() => {
       useAppStore.setState({ currentChatId: "chat-1", messages: [], isGenerating: false });
@@ -123,7 +128,7 @@ describe("stores logic", () => {
 
     const file = new File(["hello"], "test.txt", { type: "text/plain" });
     await act(async () => {
-      await useAppStore.getState().sendMessage("Hello world", [file], [0]);
+      await useAppStore.getState().sendMessage("Hello world", [file]);
     });
 
     expect(capturedUrl).toBe("/api/chats/chat-1/messages");
@@ -216,7 +221,7 @@ describe("stores logic", () => {
       }
       return new Response(null, { status: 404 });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     act(() => {
       useAppStore.setState({
@@ -246,7 +251,7 @@ describe("stores logic", () => {
   it("unloadModel resets server status on success", async () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = mock().mockResolvedValue(new Response(null, { status: 200 }));
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     act(() => {
       useAppStore.setState({ serverStatus: "running", errorMessage: "oops" });
@@ -271,7 +276,7 @@ describe("stores logic", () => {
       }
       return new Response(null, { status: 404 });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const originalFetchServerStatus = useAppStore.getState().fetchServerStatus;
     const fetchServerStatusSpy = mock().mockResolvedValue(undefined);
@@ -280,23 +285,18 @@ describe("stores logic", () => {
     });
 
     await act(async () => {
-      await useAppStore.getState().loadModel({
-        modelPath: "/models/test.gguf",
-        contextSize: 4096,
-        contextShift: false,
-        gpuLayers: 33,
-        threads: 1,
-        batchSize: 1,
-        microBatchSize: 1,
-        ropeScaling: "none",
-        ropeFreqBase: 10000,
-        ropeFreqScale: 1,
-        kvCacheTypeK: "f16",
-        kvCacheTypeV: "f16",
-        mlock: false,
-        noMmap: false,
-        flashAttn: "off",
-      });
+      await useAppStore.getState().loadModel(
+        testLoadConfig("/models/test.gguf", {
+          gpuLayers: 33,
+          threads: 1,
+          batchSize: 1,
+          microBatchSize: 1,
+          ropeFreqBase: 10000,
+          ropeFreqScale: 1,
+          mlock: false,
+          flashAttn: "off",
+        }),
+      );
     });
 
     expect(fetchServerStatusSpy).toHaveBeenCalled();
@@ -320,7 +320,7 @@ describe("stores logic", () => {
       }
       return new Response(null, { status: 404 });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     act(() => {
       useAppStore.setState({ currentChatId: null, messages: [], currentChatMetadata: null });
@@ -353,30 +353,25 @@ describe("stores logic", () => {
         },
       ),
     );
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     act(() => {
       sharedUiStoreModule.useUiStore.setState({ rightPanelView: null, activePresetId: null });
     });
 
     await act(async () => {
-      await useAppStore.getState().loadModel({
-        modelPath: "/models/test.gguf",
-        contextSize: 4096,
-        contextShift: false,
-        gpuLayers: 33,
-        threads: 1,
-        batchSize: 1,
-        microBatchSize: 1,
-        ropeScaling: "none",
-        ropeFreqBase: 10000,
-        ropeFreqScale: 1,
-        kvCacheTypeK: "f16",
-        kvCacheTypeV: "f16",
-        mlock: false,
-        noMmap: false,
-        flashAttn: "off",
-      });
+      await useAppStore.getState().loadModel(
+        testLoadConfig("/models/test.gguf", {
+          gpuLayers: 33,
+          threads: 1,
+          batchSize: 1,
+          microBatchSize: 1,
+          ropeFreqBase: 10000,
+          ropeFreqScale: 1,
+          mlock: false,
+          flashAttn: "off",
+        }),
+      );
     });
 
     const state = useAppStore.getState();
@@ -425,7 +420,7 @@ describe("stores logic", () => {
       }
       throw new Error(`Unexpected fetch: ${url} ${init?.method ?? "GET"}`);
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     act(() => {
       useAppStore.setState({
@@ -520,7 +515,7 @@ describe("stores logic", () => {
     const fetchMock = mock().mockResolvedValue(
       new Response(JSON.stringify(response), { status: 200 }),
     );
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     act(() => {
       useAppStore.setState({ models: [], loadedModel: null });

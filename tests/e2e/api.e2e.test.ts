@@ -9,6 +9,7 @@ import { initDb, resetDb } from "../../src/server/persistence/db";
 import { loadSettings } from "../../src/server/persistence/settingsRepo";
 import { createRouter } from "../../src/server/router";
 import { DEFAULT_APP_SETTINGS } from "../../src/shared/defaults";
+import { noUpgradeServer } from "../fixtures";
 
 describe("E2E API router", () => {
   beforeEach(async () => {
@@ -22,11 +23,14 @@ describe("E2E API router", () => {
   it("serves health, default settings, runtime usage, and per-chat context occupancy", async () => {
     const router = createRouter();
 
-    const health = await router.fetch(new Request("http://localhost/health"), {});
+    const health = await router.fetch(new Request("http://localhost/health"), noUpgradeServer);
     expect(health?.status).toBe(200);
     expect(await health?.text()).toBe("OK");
 
-    const settingsRes = await router.fetch(new Request("http://localhost/api/settings"), {});
+    const settingsRes = await router.fetch(
+      new Request("http://localhost/api/settings"),
+      noUpgradeServer,
+    );
     const settings = (await settingsRes?.json()) as {
       autoloadLastModel?: boolean;
       fontSize?: number;
@@ -38,7 +42,10 @@ describe("E2E API router", () => {
     expect(persisted.autoloadLastModel).toBe(false);
     expect(persisted.includeVideoAudio).toBe(false);
 
-    const usageRes = await router.fetch(new Request("http://localhost/api/runtime/usage"), {});
+    const usageRes = await router.fetch(
+      new Request("http://localhost/api/runtime/usage"),
+      noUpgradeServer,
+    );
     const usage = (await usageRes?.json()) as { ramBytes?: number; vramBytes?: number };
     expect(usage.ramBytes).toBeGreaterThan(0);
     expect(usage.vramBytes).toBeGreaterThanOrEqual(0);
@@ -57,11 +64,11 @@ describe("E2E API router", () => {
 
     const occupied = await router.fetch(
       new Request(`http://localhost/api/chats/${chat.id}/context-usage`),
-      {},
+      noUpgradeServer,
     );
     const vacant = await router.fetch(
       new Request(`http://localhost/api/chats/${empty.id}/context-usage`),
-      {},
+      noUpgradeServer,
     );
     const occupiedBody = (await occupied?.json()) as { usedTokens?: number };
     const vacantBody = (await vacant?.json()) as { usedTokens?: number };

@@ -4,8 +4,9 @@
  */
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
-import type { ChatMessage } from "@shared/types";
+import type { Attachment, ChatMessage } from "@shared/types";
 import { ContextOverflowError, getTokens, truncateMessages } from "../../src/server/overflow";
+import { asFetch } from "../fixtures";
 
 const originalFetch = globalThis.fetch;
 
@@ -14,13 +15,22 @@ describe("overflow logic", () => {
     globalThis.fetch = originalFetch;
   });
 
-  const mockMsg = (role: any, content: string): ChatMessage => ({
+  const mockMsg = (role: ChatMessage["role"], content: string): ChatMessage => ({
     id: Math.random().toString(),
     chatId: "1",
     role,
     content,
     rawContent: content,
     position: 0,
+    createdAt: Date.now(),
+  });
+
+  const mockAttachment = (mimeType: string): Attachment => ({
+    id: `att-${mimeType}`,
+    messageId: "1",
+    mimeType,
+    filePath: `attachments/${mimeType.replace("/", "-")}`,
+    fileName: "file",
     createdAt: Date.now(),
   });
 
@@ -38,11 +48,11 @@ describe("overflow logic", () => {
     const result = await truncateMessages([...msgs], "TruncateMiddle", 1024, 512);
 
     expect(result.length).toBe(3);
-    expect(result[0].role).toBe("system");
-    expect(result[1].role).toBe("user");
-    expect(result[1].content).toContain("FIRST USER");
-    expect(result[2].role).toBe("user");
-    expect(result[2].content).toBe("LATEST QUERY");
+    expect(result[0]?.role).toBe("system");
+    expect(result[1]?.role).toBe("user");
+    expect(result[1]?.content).toContain("FIRST USER");
+    expect(result[2]?.role).toBe("user");
+    expect(result[2]?.content).toBe("LATEST QUERY");
   });
 
   it("RollingWindow removes oldest until fit (excluding system)", async () => {
@@ -58,9 +68,9 @@ describe("overflow logic", () => {
     const result = await truncateMessages([...msgs], "RollingWindow", 1024, 512);
 
     expect(result.length).toBe(3);
-    expect(result[0].role).toBe("system");
-    expect(result[1].content).toContain("OLD 2");
-    expect(result[2].content).toBe("LATEST");
+    expect(result[0]?.role).toBe("system");
+    expect(result[1]?.content).toContain("OLD 2");
+    expect(result[2]?.content).toBe("LATEST");
   });
 
   it("Hard fallback truncates the query if it's too giant", async () => {
@@ -69,15 +79,15 @@ describe("overflow logic", () => {
     ];
     // maxPrompt 512. Max chars ~ 512 * 3 = 1536.
     const result = await truncateMessages([...msgs], "RollingWindow", 1024, 512);
-    expect(result[0].content).toContain("[TRUNCATED]");
-    expect(result[0].content.length).toBeLessThan(2000);
+    expect(result[0]?.content).toContain("[TRUNCATED]");
+    expect(result[0]?.content.length).toBeLessThan(2000);
   });
 
   it("computes attachment token estimates with default image/audio budgets", async () => {
     const msgs = [
       {
         ...mockMsg("user", "Hello"),
-        attachments: [{ mimeType: "image/png" }, { mimeType: "audio/wav" }],
+        attachments: [mockAttachment("image/png"), mockAttachment("audio/wav")],
       },
     ];
 
@@ -100,7 +110,7 @@ describe("overflow logic", () => {
         headers: { "Content-Type": "application/json" },
       });
     });
-    globalThis.fetch = fetchMock;
+    globalThis.fetch = asFetch(fetchMock);
 
     const first = await getTokens(msgs, 8080);
     const second = await getTokens(msgs, 8080);
@@ -146,9 +156,9 @@ describe("overflow logic", () => {
     });
 
     expect(result).toHaveLength(2);
-    expect(result[0].role).toBe("system");
-    expect(result[1].role).toBe("user");
-    expect(result[1].content).toContain("LATEST QUESTION");
+    expect(result[0]?.role).toBe("system");
+    expect(result[1]?.role).toBe("user");
+    expect(result[1]?.content).toContain("LATEST QUESTION");
   });
 
   it("TruncateMiddle removes assistant tool-call groups atomically", async () => {

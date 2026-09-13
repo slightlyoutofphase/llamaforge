@@ -5,28 +5,21 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
+import { ModelSelector } from "../../src/client/ModelSelector";
+import { ModelLoadOverlay } from "../../src/client/components/ModelLoadOverlay";
+import { asFetch, ggufDisplayMetadata } from "../fixtures";
 
 mock.module("@tanstack/react-router", () => ({
   useNavigate: () => mock(),
 }));
 
-import { ModelSelector } from "../../src/client/ModelSelector";
-import { ModelLoadOverlay } from "../../src/client/components/ModelLoadOverlay";
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { retry: false },
-    mutations: { retry: false },
-  },
-});
-
 const defaultState = {
   models: [],
-  loadModel: () => {},
-  unloadModel: () => {},
-  serverStatus: "idle",
+  loadModel: async () => true,
+  unloadModel: async () => {},
+  serverStatus: "idle" as const,
   loadedModel: null,
   messages: [],
   isGenerating: false,
@@ -35,11 +28,8 @@ const defaultState = {
   loadProgressDetail: null,
 };
 
-mock.module("@tanstack/react-router", () => ({
-  useNavigate: () => mock(),
-}));
-
 let originalFetch: typeof global.fetch;
+let queryClient: QueryClient;
 
 describe("ModelSelector Component", () => {
   beforeAll(() => {
@@ -53,62 +43,71 @@ describe("ModelSelector Component", () => {
 
   beforeEach(() => {
     cleanup();
-    useAppStore.setState(defaultState);
-    global.fetch = mock((input) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/api/presets/load")) {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify([
-              {
-                id: "preset-1",
-                name: "Balanced Default (Default)",
-                modelPath: "D:/Programs/test/embe.gguf",
-                isDefault: true,
-                isReadonly: false,
-                config: {
-                  modelPath: "D:/Programs/test/embe.gguf",
-                  contextSize: 4096,
-                  contextShift: false,
-                  gpuLayers: 33,
-                  threads: 4,
-                  batchSize: 512,
-                  microBatchSize: 128,
-                  ropeScaling: "none",
-                  ropeFreqBase: 10000,
-                  ropeFreqScale: 1.0,
-                  kvCacheTypeK: "f16",
-                  kvCacheTypeV: "f16",
-                  mlock: false,
-                  noMmap: false,
-                  flashAttn: "off",
-                },
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-              },
-            ]),
-            { headers: { "Content-Type": "application/json" } },
-          ),
-        );
-      }
-      if (url.includes("/api/chats")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ id: "new-chat", name: "New Chat" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      return Promise.resolve(new Response(JSON.stringify([])));
+    queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
     });
+    useAppStore.setState(defaultState);
+    global.fetch = asFetch(
+      mock((input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/presets/load")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify([
+                {
+                  id: "preset-1",
+                  name: "Balanced Default (Default)",
+                  modelPath: "D:/Programs/test/embe.gguf",
+                  isDefault: true,
+                  isReadonly: false,
+                  config: {
+                    modelPath: "D:/Programs/test/embe.gguf",
+                    contextSize: 4096,
+                    contextShift: false,
+                    gpuLayers: 33,
+                    threads: 4,
+                    batchSize: 512,
+                    microBatchSize: 128,
+                    ropeScaling: "none",
+                    ropeFreqBase: 10000,
+                    ropeFreqScale: 1.0,
+                    kvCacheTypeK: "f16",
+                    kvCacheTypeV: "f16",
+                    mlock: false,
+                    noMmap: false,
+                    flashAttn: "off",
+                  },
+                  createdAt: Date.now(),
+                  updatedAt: Date.now(),
+                },
+              ]),
+              { headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url.includes("/api/chats")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: "new-chat", name: "New Chat" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify([])));
+      }),
+    );
   });
 
   afterEach(() => {
+    queryClient.clear();
     cleanup();
     useAppStore.setState(defaultState);
   });
 
-  it("renders model metadata without unknown placeholders when metadata is available", () => {
+  it("renders model metadata without unknown placeholders when metadata is available", async () => {
     useAppStore.setState({
       models: [
         {
@@ -140,21 +139,23 @@ describe("ModelSelector Component", () => {
           },
         },
       ],
-      loadModel: () => {},
-      unloadModel: () => {},
-      serverStatus: "idle",
+      loadModel: async () => true,
+      unloadModel: async () => {},
+      serverStatus: "idle" as const,
       loadedModel: null,
       messages: [],
       isGenerating: false,
     });
 
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ModelSelector />
-      </QueryClientProvider>,
-    );
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelSelector />
+        </QueryClientProvider>,
+      );
+    });
 
-    expect(screen.getByText("unsloth")).toBeTruthy();
+    expect(await screen.findByText("unsloth")).toBeTruthy();
     expect(screen.getByText("gemma4")).toBeTruthy();
     expect(screen.getByText("0.11 GB")).toBeTruthy();
     expect(screen.getByText("VISION ENABLED")).toBeTruthy();
@@ -197,8 +198,8 @@ describe("ModelSelector Component", () => {
         },
       ],
       loadModel: loadModelSpy,
-      unloadModel: () => {},
-      serverStatus: "idle",
+      unloadModel: async () => {},
+      serverStatus: "idle" as const,
       loadedModel: null,
       messages: [],
       isGenerating: false,
@@ -207,72 +208,79 @@ describe("ModelSelector Component", () => {
       loadProgressDetail: null,
     } as any);
 
-    global.fetch = mock((input) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/api/presets/load")) {
-        return Promise.resolve(
-          new Response(
-            JSON.stringify([
-              {
-                id: "preset-1",
-                name: "Balanced Default (Default)",
-                modelPath: "D:/Programs/test/embe.gguf",
-                isDefault: true,
-                isReadonly: true,
-                chatTemplateOverride: "same-template",
-                thinkingTagOverride: {
-                  openTag: "<|channel>thought\n",
-                  closeTag: "<channel|>",
-                  enableToken: "<|think|>",
-                },
-                config: {
+    global.fetch = asFetch(
+      mock((input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/presets/load")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify([
+                {
+                  id: "preset-1",
+                  name: "Balanced Default (Default)",
                   modelPath: "D:/Programs/test/embe.gguf",
-                  contextSize: 4096,
-                  contextShift: false,
-                  gpuLayers: 33,
-                  threads: 4,
-                  batchSize: 512,
-                  microBatchSize: 128,
-                  ropeScaling: "none",
-                  ropeFreqBase: 10000,
-                  ropeFreqScale: 1.0,
-                  kvCacheTypeK: "f16",
-                  kvCacheTypeV: "f16",
-                  mlock: false,
-                  noMmap: false,
-                  contBatching: true,
-                  flashAttn: "auto",
-                  swaFull: false,
-                  kvUnified: true,
-                  noKvOffload: false,
-                  cacheReuse: 0,
+                  isDefault: true,
+                  isReadonly: true,
+                  chatTemplateOverride: "same-template",
+                  thinkingTagOverride: {
+                    openTag: "<|channel>thought\n",
+                    closeTag: "<channel|>",
+                    enableToken: "<|think|>",
+                  },
+                  config: {
+                    modelPath: "D:/Programs/test/embe.gguf",
+                    contextSize: 4096,
+                    contextShift: false,
+                    gpuLayers: 33,
+                    threads: 4,
+                    batchSize: 512,
+                    microBatchSize: 128,
+                    ropeScaling: "none",
+                    ropeFreqBase: 10000,
+                    ropeFreqScale: 1.0,
+                    kvCacheTypeK: "f16",
+                    kvCacheTypeV: "f16",
+                    mlock: false,
+                    noMmap: false,
+                    contBatching: true,
+                    flashAttn: "auto",
+                    swaFull: false,
+                    kvUnified: true,
+                    noKvOffload: false,
+                    cacheReuse: 0,
+                  },
+                  createdAt: Date.now(),
+                  updatedAt: Date.now(),
                 },
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-              },
-            ]),
-            { headers: { "Content-Type": "application/json" } },
-          ),
-        );
-      }
-      if (url.includes("/api/chats")) {
-        return Promise.resolve(
-          new Response(JSON.stringify({ id: "new-chat", name: "New Chat" }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          }),
-        );
-      }
-      return Promise.resolve(new Response(JSON.stringify([])));
-    });
-
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ModelSelector />
-      </QueryClientProvider>,
+              ]),
+              { headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (url.includes("/api/chats")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ id: "new-chat", name: "New Chat" }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify([])));
+      }),
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: /load/i }));
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelSelector />
+        </QueryClientProvider>,
+      );
+    });
+
+    const loadButton = await screen.findByRole("button", { name: /load/i });
+    await act(async () => {
+      fireEvent.click(loadButton);
+    });
 
     expect(loadModelSpy).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -287,12 +295,12 @@ describe("ModelSelector Component", () => {
     expect(loadModelSpy.mock.calls[0]?.[0]?.chatTemplateContent).toBeUndefined();
   });
 
-  it("shows load progress instead of the static splash while a model is loading", () => {
+  it("shows load progress instead of the static splash while a model is loading", async () => {
     useAppStore.setState({
       models: [],
-      loadModel: () => {},
-      unloadModel: () => {},
-      serverStatus: "loading",
+      loadModel: async () => true,
+      unloadModel: async () => {},
+      serverStatus: "loading" as const,
       loadedModel: null,
       messages: [],
       isGenerating: false,
@@ -301,16 +309,62 @@ describe("ModelSelector Component", () => {
       loadProgressDetail: "Loading tensor blocks",
     } as any);
 
-    render(
-      <QueryClientProvider client={queryClient}>
-        <ModelLoadOverlay />
-        <ModelSelector />
-      </QueryClientProvider>,
-    );
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelLoadOverlay />
+          <ModelSelector />
+        </QueryClientProvider>,
+      );
+    });
 
     expect(screen.queryByText("Initializing Weights")).toBeNull();
-    expect(screen.getByText("Loading model")).toBeTruthy();
+    expect(await screen.findByText("Loading model")).toBeTruthy();
     expect(screen.getByText("42%")).toBeTruthy();
     expect(screen.getByText("Loading tensor blocks")).toBeTruthy();
+  });
+
+  it("hides draft models from the selectable library", async () => {
+    useAppStore.setState({
+      models: [
+        {
+          publisher: "unsloth",
+          modelName: "Primary Chat Model",
+          primaryPath: "D:/Programs/test/primary.gguf",
+          metadata: ggufDisplayMetadata({
+            architecture: "gemma4",
+            name: "Primary Chat Model",
+            isDraftModel: false,
+          }),
+        },
+        {
+          publisher: "unsloth",
+          modelName: "Draft Speculator",
+          primaryPath: "D:/Programs/test/primary-draft.gguf",
+          metadata: ggufDisplayMetadata({
+            architecture: "gemma4",
+            name: "Draft Speculator",
+            isDraftModel: true,
+          }),
+        },
+      ],
+      loadModel: async () => true,
+      unloadModel: async () => {},
+      serverStatus: "idle" as const,
+      loadedModel: null,
+      messages: [],
+      isGenerating: false,
+    });
+
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelSelector />
+        </QueryClientProvider>,
+      );
+    });
+
+    expect(await screen.findByText("Primary Chat Model")).toBeTruthy();
+    expect(screen.queryByText("Draft Speculator")).toBeNull();
   });
 });

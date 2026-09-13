@@ -383,7 +383,7 @@ describe("MessageBubble Component", () => {
 
     const bubble = screen.getAllByTestId("message-bubble-shell").at(-1);
     expect(bubble).toBeTruthy();
-    expect(bubble.getAttribute("data-bubble-style")).toBe("compact");
+    expect(bubble?.getAttribute("data-bubble-style")).toBe("compact");
   });
 
   it("renders assistant messages even when toolCallsJson is malformed", () => {

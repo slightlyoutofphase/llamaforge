@@ -34,6 +34,7 @@ describe("modelScanner metadata population", () => {
         hasVisionEncoder: true,
         hasAudioEncoder: false,
         hasToolCalling: false,
+        isDraftModel: false,
         defaultTemperature: 0.8,
         defaultTopK: 40,
         defaultTopP: 0.95,

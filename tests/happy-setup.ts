@@ -52,7 +52,7 @@ export function restoreBunNativeWebGlobals(): void {
   restoreNativeWebGlobals();
 }
 
-Bun.env.LLAMAFORGE_APP_DATA_DIR = TEST_APP_DATA_DIR;
+Bun.env["LLAMAFORGE_APP_DATA_DIR"] = TEST_APP_DATA_DIR;
 fs.rmSync(TEST_APP_DATA_DIR, { recursive: true, force: true });
 fs.mkdirSync(TEST_APP_DATA_DIR, { recursive: true });
 

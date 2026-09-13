@@ -8,6 +8,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
 import { DEFAULT_APP_SETTINGS } from "../../src/shared/defaults";
+import { asFetch } from "../fixtures";
+import type { ReactNode } from "react";
 
 let App: typeof import("../../src/client/App").default;
 let queryClient: QueryClient;
@@ -22,7 +24,7 @@ describe("E2E Integration", () => {
         mutations: { retry: false },
       },
     });
-    global.fetch = (input: RequestInfo | URL) => {
+    global.fetch = asFetch((input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("/api/hardware")) {
         return Promise.resolve(
@@ -41,7 +43,7 @@ describe("E2E Integration", () => {
         return Promise.resolve(new Response(JSON.stringify(DEFAULT_APP_SETTINGS)));
       }
       return Promise.resolve(new Response(JSON.stringify([])));
-    };
+    });
     global.WebSocket = class {
       onopen: ((ev?: Event) => void) | null = null;
       onclose: ((ev?: CloseEvent) => void) | null = null;
@@ -51,7 +53,7 @@ describe("E2E Integration", () => {
     } as unknown as typeof WebSocket;
 
     await mock.module("@tanstack/react-router", () => ({
-      Link: ({ children }: { children?: unknown }) => <a href="#test">{children}</a>,
+      Link: ({ children }: { children?: ReactNode }) => <a href="#test">{children}</a>,
       Outlet: () => <div data-testid="outlet">Mock Outlet</div>,
       useLocation: () => ({ pathname: "/" }),
       useNavigate: () => mock(),

@@ -6,6 +6,7 @@
 import { describe, expect, it } from "bun:test";
 import type { GgufDisplayMetadata, HardwareInfo } from "@shared/types";
 import { optimizeLoadConfig } from "../../src/server/optimizer";
+import { ggufDisplayMetadata } from "../fixtures";
 
 describe("optimizer", () => {
   const mockHardware: HardwareInfo = {
@@ -20,7 +21,7 @@ describe("optimizer", () => {
     ],
   };
 
-  const mockMeta: GgufDisplayMetadata = {
+  const mockMeta: GgufDisplayMetadata = ggufDisplayMetadata({
     architecture: "llama",
     name: "Llama 3 8B",
     fileSizeBytes: 5 * 1024 * 1024 * 1024,
@@ -28,7 +29,7 @@ describe("optimizer", () => {
     contextLength: 8192,
     embeddingLength: 4096,
     attentionHeadCount: 32,
-  };
+  });
 
   it("suggests full offload for 8B model on 4090", () => {
     const config = optimizeLoadConfig(mockHardware, mockMeta);
@@ -112,30 +113,31 @@ describe("optimizer", () => {
       attentionHeadCountKv: 8, // GQA
     };
 
-    // GQA means much less bytesPerCtxToken, which should allow hitting the higher context brackets
-    // with less VRAM usage compared to MHA
     const gqaConfig = optimizeLoadConfig(mockHardware, gqaMeta);
-    const _regularConfig = optimizeLoadConfig(mockHardware, mockMeta);
+    const regularConfig = optimizeLoadConfig(mockHardware, mockMeta);
 
-    // In our 4090 mock they both hit 8192 bounds, but verifying they both process correctly
+    // On a 4090 both configs saturate the model's native 8192 context window.
     expect(gqaConfig.contextSize).toBe(8192);
     expect(gqaConfig.gpuLayers).toBe(32);
+    expect(regularConfig.contextSize).toBe(8192);
+    expect(regularConfig.gpuLayers).toBe(32);
 
-    // If we lower VRAM to barely fit contexts, GQA outperforms
-    const tinyGpu: HardwareInfo = {
+    // Leave enough KV-cache headroom that GQA and MHA land in different context brackets.
+    // 1GB weights on 6GB VRAM: ~4.5GB KV budget. MHA ~512KB/token → 8192; GQA ~128KB/token → 32768.
+    const constrainedGpu: HardwareInfo = {
       ...mockHardware,
       gpus: [{ name: "Potato", vramBytes: 6 * 1024 * 1024 * 1024, backend: "cuda" }],
     };
+    const compactWeights: Pick<GgufDisplayMetadata, "fileSizeBytes" | "contextLength"> = {
+      fileSizeBytes: 1 * 1024 * 1024 * 1024,
+      contextLength: 100000,
+    };
+    const tinyGqaConfig = optimizeLoadConfig(constrainedGpu, { ...gqaMeta, ...compactWeights });
+    const tinyMhaConfig = optimizeLoadConfig(constrainedGpu, { ...mockMeta, ...compactWeights });
 
-    // Force a huge context length
-    const hugeGqa: GgufDisplayMetadata = { ...gqaMeta, contextLength: 100000 };
-    const hugeMha: GgufDisplayMetadata = { ...mockMeta, contextLength: 100000 };
-
-    const tinyGqaConfig = optimizeLoadConfig(tinyGpu, hugeGqa);
-    const tinyMhaConfig = optimizeLoadConfig(tinyGpu, hugeMha);
-
-    // GQA should afford larger context size than MHA on the tiny GPU
-    expect(tinyGqaConfig.contextSize || 0).toBeGreaterThanOrEqual(tinyMhaConfig.contextSize || 0);
+    expect(tinyGqaConfig.contextSize).toBe(32768);
+    expect(tinyMhaConfig.contextSize).toBe(8192);
+    expect(tinyGqaConfig.contextSize ?? 0).toBeGreaterThan(tinyMhaConfig.contextSize ?? 0);
   });
 
   it("correctly enables mlock when file size is strictly less than half of total RAM", () => {

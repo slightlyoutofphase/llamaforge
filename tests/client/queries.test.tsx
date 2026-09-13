@@ -5,7 +5,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, render, waitFor } from "@testing-library/react";
+import type { ChatSession } from "../../src/shared/types";
 
 let queryClient: QueryClient;
 let fetchChats: ReturnType<typeof mock>;
@@ -55,11 +56,13 @@ describe("Chat query hooks", () => {
       return <div>{isLoading ? "loading" : data?.pages?.[0]?.[0]?.name}</div>;
     }
 
-    render(
-      <QueryClientProvider client={queryClient}>
-        <TestComponent />
-      </QueryClientProvider>,
-    );
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TestComponent />
+        </QueryClientProvider>,
+      );
+    });
 
     await waitFor(() => expect(fetchChats).toHaveBeenCalledWith(undefined, 300, 0));
     await waitFor(() =>
@@ -78,7 +81,7 @@ describe("Chat query hooks", () => {
     const invalidateQueries = mock((...args: any[]) => originalInvalidate(...args));
     queryClient.invalidateQueries = invalidateQueries as any;
 
-    let mutateAsync: ((variables: unknown) => Promise<unknown>) | null = null;
+    let mutateAsync: ((variables: Partial<ChatSession>) => Promise<unknown>) | undefined;
 
     function TestComponent() {
       const { mutateAsync: mutate } = useCreateChat();
@@ -86,22 +89,28 @@ describe("Chat query hooks", () => {
       return null;
     }
 
-    render(
-      <QueryClientProvider client={queryClient}>
-        <TestComponent />
-      </QueryClientProvider>,
-    );
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TestComponent />
+        </QueryClientProvider>,
+      );
+    });
 
     await waitFor(() => expect(typeof mutateAsync).toBe("function"));
-    if (mutateAsync) {
-      await mutateAsync({ name: "Test Chat" });
+    if (typeof mutateAsync !== "function") {
+      throw new Error("useCreateChat did not expose mutateAsync");
     }
+    const createChatMutate = mutateAsync;
+    await act(async () => {
+      await createChatMutate({ name: "Test Chat" });
+    });
 
     expect(createChat).toHaveBeenCalledWith(
       expect.objectContaining({ name: "Test Chat" }),
       expect.anything(),
     );
     expect(invalidateQueries).toHaveBeenCalled();
-    expect(invalidateQueries.mock.calls[0][0]).toEqual({ queryKey: ["chats"] });
+    expect(invalidateQueries.mock.calls[0]?.[0]).toEqual({ queryKey: ["chats"] });
   });
 });

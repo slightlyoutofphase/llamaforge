@@ -14,6 +14,7 @@ import * as loggerModule from "../../src/server/logger";
 import * as modelScannerModule from "../../src/server/modelScanner";
 import * as presetRepoModule from "../../src/server/persistence/presetRepo";
 import * as settingsRepoModule from "../../src/server/persistence/settingsRepo";
+import { setBunEnv } from "../fixtures";
 
 const productionSettings: AppSettings = {
   serverPort: 14001,
@@ -41,7 +42,7 @@ describe("server index startup", () => {
   });
 
   afterEach(() => {
-    Bun.env.NODE_ENV = originalNodeEnv;
+    setBunEnv("NODE_ENV", originalNodeEnv);
     mock.restore();
   });
 

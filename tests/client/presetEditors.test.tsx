@@ -10,6 +10,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { queryKeys } from "../../src/client/queries";
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
+import { ggufDisplayMetadata } from "../fixtures";
 
 let InferencePresetEditor: typeof import("../../src/client/components/preset/InferencePresetEditor").InferencePresetEditor;
 let LoadPresetEditor: typeof import("../../src/client/components/preset/LoadPresetEditor").LoadPresetEditor;
@@ -135,10 +136,10 @@ describe("Preset Editors Integration", () => {
     useAppStore.setState({
       models: [
         {
+          publisher: "test",
+          modelName: "test-model",
           primaryPath: "/models/test.gguf",
           metadata: { name: "test-model", chatTemplate: "test-template" } as any,
-          mmprojPath: undefined,
-          mtime: Date.now(),
         },
       ],
       loadedModel: null,
@@ -342,17 +343,17 @@ describe("Preset Editors Integration", () => {
     useAppStore.setState({
       models: [
         {
+          publisher: "test",
+          modelName: "test-model",
           primaryPath: "/models/test.gguf",
           metadata: {
             name: "test-model",
             chatTemplate: "{%- set preserve_thinking = preserve_thinking | default(false) -%}",
           } as any,
-          mmprojPath: undefined,
-          mtime: Date.now(),
         },
       ],
-      loadedModel: undefined,
-      loadedConfig: undefined,
+      loadedModel: null,
+      loadedConfig: null,
     });
     useUiStore.setState({ activePresetId: "test-load-id" });
 
@@ -378,8 +379,8 @@ describe("Preset Editors Integration", () => {
       },
     ]);
     useAppStore.setState({
-      loadedModel: undefined,
-      loadedConfig: undefined,
+      loadedModel: null,
+      loadedConfig: null,
     });
     useUiStore.setState({ activePresetId: "test-load-id" });
 
@@ -399,5 +400,72 @@ describe("Preset Editors Integration", () => {
 
     fireEvent.click(preserveCheckbox);
     expect(preserveCheckbox.checked).toBe(false);
+  });
+
+  it("LoadPresetEditor: enables MTP for a gemma4-assistant companion without listing the draft GGUF", async () => {
+    useAppStore.setState({
+      models: [
+        {
+          publisher: "FadedRedStar",
+          modelName: "gemma-4-12B-it-qat-q4_0-heretic-GGUF",
+          primaryPath: "/models/test.gguf",
+          draftModelPath: "/models/gemma-4-12b-qat-it-assistant-Q4_0_Q4emb.gguf",
+          draftSpecType: "draft-mtp",
+          metadata: ggufDisplayMetadata({ name: "test-model", architecture: "gemma4" }),
+        },
+      ],
+    });
+    useUiStore.setState({ activePresetId: "test-load-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LoadPresetEditor />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Test Load (Default)")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Speculative Decoding" }));
+
+    const specType = screen.getByLabelText(/^Mode$/) as HTMLSelectElement;
+    const mtpOption = screen.getByRole("option", {
+      name: /MTP \(assistant companion found\)/,
+    }) as HTMLOptionElement;
+    expect(mtpOption.disabled).toBe(false);
+    expect(screen.getByLabelText(/Draft Model Path/i)).toBeDefined();
+    expect(screen.getByText(/Auto-detected MTP assistant/i)).toBeDefined();
+    expect(screen.getByText(/gemma-4-12b-qat-it-assistant-Q4_0_Q4emb\.gguf/i)).toBeDefined();
+
+    fireEvent.change(specType, { target: { value: "draft-mtp" } });
+    expect(specType.value).toBe("draft-mtp");
+    expect((screen.getByLabelText(/Draft Model Path/i) as HTMLInputElement).value).toBe(
+      "/models/gemma-4-12b-qat-it-assistant-Q4_0_Q4emb.gguf",
+    );
+  });
+
+  it("LoadPresetEditor: lets the user select Draft Model and set a path without a scanned companion", async () => {
+    useUiStore.setState({ activePresetId: "test-load-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LoadPresetEditor />
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText("Test Load (Default)")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Speculative Decoding" }));
+
+    const specType = screen.getByLabelText(/^Mode$/) as HTMLSelectElement;
+    const draftOption = screen.getByRole("option", {
+      name: /Draft Model \(set path below\)/,
+    }) as HTMLOptionElement;
+    expect(draftOption.disabled).toBe(false);
+
+    fireEvent.change(specType, { target: { value: "draft-simple" } });
+    expect(specType.value).toBe("draft-simple");
+
+    const pathInput = screen.getByLabelText(/Draft Model Path/i) as HTMLInputElement;
+    fireEvent.change(pathInput, { target: { value: "/models/custom-assistant.gguf" } });
+    expect(pathInput.value).toBe("/models/custom-assistant.gguf");
+    expect(specType.value).toBe("draft-simple");
   });
 });

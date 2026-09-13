@@ -4,6 +4,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { asFetch } from "../fixtures";
 
 describe("client http request helper", () => {
   const originalFetch = globalThis.fetch;
@@ -28,7 +29,7 @@ describe("client http request helper", () => {
     } as unknown as typeof XMLHttpRequest;
 
     const fetchMock = mock(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
 
     const { request } = await import(`../../src/client/http.ts?cachebust=${Date.now()}`);
     const res = await request("/api/chats", {
@@ -56,7 +57,7 @@ describe("client http request helper", () => {
           );
         }),
     );
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
 
     const { request } = await import(`../../src/client/http.ts?cachebust=${Date.now()}`);
 
@@ -80,7 +81,7 @@ describe("client http request helper", () => {
           );
         }),
     );
-    globalThis.fetch = fetchMock as typeof fetch;
+    globalThis.fetch = asFetch(fetchMock);
 
     const { request } = await import(`../../src/client/http.ts?cachebust=${Date.now()}`);
     const controller = new AbortController();

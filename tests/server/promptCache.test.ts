@@ -11,32 +11,32 @@ describe("promptCache", () => {
     const chatId = "chat-123";
 
     updatePromptCacheStats(chatId, {
-      tokens_evaluated: 10,
+      predicted_ms: 200,
+      predicted_n: 20,
+      predicted_per_second: 100,
+      predicted_per_token_ms: 10,
+      prompt_ms: 100,
+      prompt_n: 10,
+      prompt_per_second: 100,
+      prompt_per_token_ms: 10,
       tokens_cached: 5,
-      tokens_predicted: 20,
-      t_eval_ms: 100,
-      t_predict_ms: 200,
-      t_eval_s: 0.1,
-      t_predict_s: 0.2,
-      t_eval_per_token_ms: 10,
-      t_predict_per_token_ms: 10,
-      tokens_per_second: 100,
+      tokens_evaluated: 10,
     });
 
     let stats = getPromptCacheStats(chatId);
     expect(stats).toEqual({ totalEvaluated: 10, totalCached: 5 });
 
     updatePromptCacheStats(chatId, {
-      tokens_evaluated: 15,
+      predicted_ms: 300,
+      predicted_n: 30,
+      predicted_per_second: 100,
+      predicted_per_token_ms: 10,
+      prompt_ms: 150,
+      prompt_n: 15,
+      prompt_per_second: 100,
+      prompt_per_token_ms: 10,
       tokens_cached: 10,
-      tokens_predicted: 30,
-      t_eval_ms: 150,
-      t_predict_ms: 300,
-      t_eval_s: 0.15,
-      t_predict_s: 0.3,
-      t_eval_per_token_ms: 10,
-      t_predict_per_token_ms: 10,
-      tokens_per_second: 100,
+      tokens_evaluated: 15,
     });
 
     stats = getPromptCacheStats(chatId);

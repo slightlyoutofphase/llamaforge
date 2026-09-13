@@ -10,6 +10,7 @@ import path from "node:path";
 import * as ggufReaderModule from "../../src/server/ggufReader";
 import { scanModels } from "../../src/server/modelScanner";
 import { initDb } from "../../src/server/persistence/db";
+import { setCachedGgufMetadata } from "../../src/server/persistence/chatRepo";
 
 const baseMockMetadata = {
   name: "Test Model",
@@ -43,10 +44,15 @@ describe("modelScanner", () => {
 
     parseSpy = spyOn(ggufReaderModule, "parseGgufMetadata").mockImplementation(
       async (filePath: string) => {
-        const isDraft = filePath.includes("assistant") || filePath.includes("eagle3");
+        const lower = filePath.toLowerCase();
+        const isEagle = lower.includes("eagle3");
+        const isGemmaAssistant = lower.includes("gemma") && lower.includes("assistant");
+        let architecture = "llama";
+        if (isEagle) architecture = "eagle3";
+        else if (isGemmaAssistant) architecture = "gemma4-assistant";
         return {
           ...baseMockMetadata,
-          architecture: isDraft ? "assistant" : "llama",
+          architecture,
         };
       },
     );
@@ -157,6 +163,7 @@ describe("modelScanner", () => {
     expect(draftModel).toBeUndefined();
     expect(mainModel?.draftModelPath).toBeDefined();
     expect(mainModel?.draftModelPath?.includes("assistant.gguf")).toBeTrue();
+    expect(mainModel?.draftSpecType).toBe("draft-simple");
   });
 
   it("does not link draft models when filename contains mtp instead of assistant/eagle3", async () => {
@@ -212,5 +219,48 @@ describe("modelScanner", () => {
     expect(entries).toHaveLength(1);
     expect(mainModel?.draftModelPath?.includes("alpha-7b-q4-assistant.gguf")).toBeTrue();
     expect(mainModel?.draftModelPath?.includes("unrelated-eagle3.gguf")).toBeFalse();
+  });
+
+  it("links a same-directory gemma4-assistant draft even when heretic filename tokens differ", async () => {
+    const gemmaRoot = path.join(tmpDir, "FadedRedStar12B", "gemma-4-12B-it-qat-q4_0-heretic-GGUF");
+    await fs.mkdir(gemmaRoot, { recursive: true });
+    await Bun.write(path.join(gemmaRoot, "gemma-4-12B-it-qat-q4_0-heretic-Q4_0_PURE.gguf"), "mock");
+    await Bun.write(path.join(gemmaRoot, "gemma-4-12b-qat-it-assistant-Q4_0_Q4emb.gguf"), "mock");
+    await Bun.write(
+      path.join(gemmaRoot, "mmproj-gemma-4-12B-it-qat-q4_0-heretic-BF16.gguf"),
+      "mock",
+    );
+
+    const entries = await scanModels(path.join(tmpDir, "FadedRedStar12B"));
+    expect(entries).toHaveLength(1);
+    const gemma = entries[0];
+    expect(gemma?.primaryPath.includes("Q4_0_PURE.gguf")).toBeTrue();
+    expect(gemma?.draftModelPath?.includes("assistant-Q4_0_Q4emb.gguf")).toBeTrue();
+    expect(gemma?.draftSpecType).toBe("draft-mtp");
+    expect(gemma?.mmProjPath?.includes("mmproj-gemma-4-12B-it-qat-q4_0-heretic-BF16.gguf")).toBe(
+      true,
+    );
+    expect(entries.some((entry) => entry.primaryPath.includes("assistant"))).toBeFalse();
+  });
+
+  it("reclassifies cached gemma4-assistant GGUFs as hidden drafts even when isDraftModel was stored false", async () => {
+    const root = path.join(tmpDir, "StaleDraftCache", "Gemma12B");
+    await fs.mkdir(root, { recursive: true });
+    const mainPath = path.resolve(root, "gemma-main.gguf");
+    const draftPath = path.resolve(root, "gemma-sidecar.gguf");
+    await Bun.write(mainPath, "mock");
+    await Bun.write(draftPath, "mock");
+    const draftStat = await fs.stat(draftPath);
+    await setCachedGgufMetadata(draftPath, draftStat.mtimeMs, {
+      ...baseMockMetadata,
+      architecture: "gemma4-assistant",
+      isDraftModel: false,
+    });
+
+    const entries = await scanModels(path.join(tmpDir, "StaleDraftCache"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.primaryPath).toBe(mainPath);
+    expect(entries[0]?.draftModelPath).toBe(draftPath);
+    expect(entries[0]?.draftSpecType).toBe("draft-mtp");
   });
 });

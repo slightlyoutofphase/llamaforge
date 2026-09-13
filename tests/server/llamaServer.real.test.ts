@@ -8,6 +8,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bunNativeFetch, restoreBunNativeWebGlobals } from "../happy-setup";
+import { asFetch } from "../fixtures";
 import {
   getProc,
   getRecentServerLogs,
@@ -192,7 +193,7 @@ async function assertHealthy(port: number): Promise<void> {
 }
 
 function extractAssistantContent(payload: Record<string, unknown>): string {
-  const choices = payload.choices;
+  const choices = payload["choices"];
   if (!Array.isArray(choices) || choices.length === 0) {
     throw new Error(`Missing choices array in payload: ${JSON.stringify(payload)}`);
   }
@@ -236,7 +237,7 @@ async function postChatCompletion(
 
     const payload = JSON.parse(rawBody) as Record<string, unknown>;
     if (Object.hasOwn(payload, "error")) {
-      throw new Error(`${label} returned error payload: ${JSON.stringify(payload.error)}`);
+      throw new Error(`${label} returned error payload: ${JSON.stringify(payload["error"])}`);
     }
 
     return payload;
@@ -282,8 +283,8 @@ async function waitForTerminalFrame(
 describeReal("llamaServer real integration", () => {
   beforeAll(async () => {
     restoreBunNativeWebGlobals();
-    previousAppDataDir = process.env.LLAMAFORGE_APP_DATA_DIR;
-    process.env.LLAMAFORGE_APP_DATA_DIR = TEST_APP_DATA_DIR;
+    previousAppDataDir = process.env["LLAMAFORGE_APP_DATA_DIR"];
+    process.env["LLAMAFORGE_APP_DATA_DIR"] = TEST_APP_DATA_DIR;
 
     const rawFixture = (await Bun.file(
       new URL("../data/real-llama-fixture.json", import.meta.url),
@@ -325,9 +326,9 @@ describeReal("llamaServer real integration", () => {
     resetDb();
     await resetTestAppDataDir();
     if (previousAppDataDir === undefined) {
-      delete process.env.LLAMAFORGE_APP_DATA_DIR;
+      delete process.env["LLAMAFORGE_APP_DATA_DIR"];
     } else {
-      process.env.LLAMAFORGE_APP_DATA_DIR = previousAppDataDir;
+      process.env["LLAMAFORGE_APP_DATA_DIR"] = previousAppDataDir;
     }
   });
 
@@ -471,7 +472,7 @@ describeReal("llamaServer real integration", () => {
     const capturedBodies: Array<{
       messages?: Array<{ content?: unknown }>;
     }> = [];
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = asFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/v1/chat/completions") && init?.body) {
         try {
@@ -481,7 +482,7 @@ describeReal("llamaServer real integration", () => {
         }
       }
       return bunNativeFetch(input, init);
-    }) as typeof fetch;
+    });
 
     let port: number | null = null;
     try {
@@ -717,7 +718,7 @@ describeReal("llamaServer real integration", () => {
       restore: () => void;
     } {
       const bodies: Array<{ messages?: Array<{ role?: string; content?: string }> }> = [];
-      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      globalThis.fetch = asFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/v1/chat/completions") && init?.body) {
           try {
@@ -727,7 +728,7 @@ describeReal("llamaServer real integration", () => {
           }
         }
         return bunNativeFetch(input, init);
-      }) as typeof fetch;
+      });
       return {
         bodies,
         restore: () => {

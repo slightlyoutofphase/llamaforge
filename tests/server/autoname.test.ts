@@ -3,12 +3,13 @@
  * Tests for automatic chat naming behavior.
  */
 
-import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { __setAutonameStartDelayMs, triggerAutoname } from "../../src/server/autoname";
 import { getActiveGenerations } from "../../src/server/generationRegistry";
 import * as llamaServer from "../../src/server/llamaServer";
 import { addMessage, createChat, getChat } from "../../src/server/persistence/chatRepo";
 import { initDb, resetDb } from "../../src/server/persistence/db";
+import { asFetch } from "../fixtures";
 
 describe("autoname", () => {
   beforeEach(async () => {
@@ -54,9 +55,9 @@ describe("autoname", () => {
       config: null,
     });
     let capturedUrl = "";
-    let capturedBody: Record<string, unknown> | null = null;
+    let capturedBody: unknown = null;
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = asFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
       capturedUrl = String(input);
       capturedBody = init?.body ? JSON.parse(String(init.body)) : null;
       return new Response(
@@ -65,17 +66,18 @@ describe("autoname", () => {
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
-    }) as unknown as typeof fetch;
+    });
 
     try {
       await triggerAutoname(chat.id);
       expect(capturedUrl).toContain("/v1/chat/completions");
-      expect(capturedBody?.n_predict).toBe(24);
-      expect(
-        (capturedBody?.chat_template_kwargs as { enable_thinking?: boolean } | undefined)
-          ?.enable_thinking,
-      ).toBe(false);
-      expect(capturedBody?.reasoning_format).toBe("none");
+      expect(capturedBody).toEqual(
+        expect.objectContaining({
+          n_predict: 24,
+          reasoning_format: "none",
+          chat_template_kwargs: expect.objectContaining({ enable_thinking: false }),
+        }),
+      );
       const renamed = await getChat(chat.id);
       expect(renamed?.name).toBe("Python list sorting");
     } finally {

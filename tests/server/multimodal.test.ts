@@ -21,30 +21,32 @@ const encoder = new TextEncoder();
 let mkdirSpy: ReturnType<typeof spyOn<typeof fs, "mkdir">>;
 let writeSpy: ReturnType<typeof spyOn<typeof Bun, "write">>;
 
-const fileSpy = spyOn(Bun, "file").mockImplementation((filePath: string | URL) => {
-  const pathStr = filePath.toString();
-  return {
-    exists: async () => true,
-    size: 100,
-    text: async () => {
-      if (pathStr.includes("large-a.txt")) return "A".repeat(15000);
-      if (pathStr.includes("large-b.txt")) return "B".repeat(15000);
-      if (pathStr.includes("large-c.txt")) return "C".repeat(15000);
-      if (pathStr.includes("img.png")) return "abc";
-      if (pathStr.includes("audio.wav")) return "def";
-      if (pathStr.includes("pic.jpg")) return "ghi";
-      if (pathStr.includes("text.txt")) return "Hello text file";
-      throw new Error(`File not found: ${pathStr}`);
-    },
-    arrayBuffer: async () => {
-      if (pathStr.includes("img.png")) return encoder.encode("abc").buffer;
-      if (pathStr.includes("audio.wav")) return encoder.encode("def").buffer;
-      if (pathStr.includes("pic.jpg")) return encoder.encode("ghi").buffer;
-      if (pathStr.includes("text.txt")) return encoder.encode("Hello text file").buffer;
-      throw new Error(`File not found: ${pathStr}`);
-    },
-  } as any;
-});
+const fileSpy = spyOn(Bun, "file").mockImplementation(
+  (filePath: string | URL | ArrayBufferLike | Uint8Array<ArrayBuffer> | number) => {
+    const pathStr = filePath.toString();
+    return {
+      exists: async () => true,
+      size: 100,
+      text: async () => {
+        if (pathStr.includes("large-a.txt")) return "A".repeat(15000);
+        if (pathStr.includes("large-b.txt")) return "B".repeat(15000);
+        if (pathStr.includes("large-c.txt")) return "C".repeat(15000);
+        if (pathStr.includes("img.png")) return "abc";
+        if (pathStr.includes("audio.wav")) return "def";
+        if (pathStr.includes("pic.jpg")) return "ghi";
+        if (pathStr.includes("text.txt")) return "Hello text file";
+        throw new Error(`File not found: ${pathStr}`);
+      },
+      arrayBuffer: async () => {
+        if (pathStr.includes("img.png")) return encoder.encode("abc").buffer;
+        if (pathStr.includes("audio.wav")) return encoder.encode("def").buffer;
+        if (pathStr.includes("pic.jpg")) return encoder.encode("ghi").buffer;
+        if (pathStr.includes("text.txt")) return encoder.encode("Hello text file").buffer;
+        throw new Error(`File not found: ${pathStr}`);
+      },
+    } as any;
+  },
+);
 describe("multimodal", () => {
   beforeEach(async () => {
     mkdirSpy = spyOn(fs, "mkdir").mockResolvedValue(undefined);
