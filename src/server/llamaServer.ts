@@ -424,11 +424,11 @@ export function buildArgs(
   }
 
   if (config.imageMaxTokens !== undefined) {
-    args.push("--image-max-tokens", String(config.imageMaxTokens));
     args.push(
       "--image-min-tokens",
       String(resolveImageMinTokens(config.imageMaxTokens, config.imageMinTokens)),
     );
+    args.push("--image-max-tokens", String(config.imageMaxTokens));
   }
 
   args.push("--video-fps", String(clampVideoFps(config.videoFps ?? DEFAULT_VIDEO_FPS)));
