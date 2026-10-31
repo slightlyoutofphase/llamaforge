@@ -23,6 +23,45 @@ import { ToolCard } from "./ToolCard";
 
 const REMARK_PLUGINS = [remarkGfm, remarkMath];
 const REHYPE_PLUGINS = [rehypeHighlight, rehypeKatex];
+const STREAMING_REHYPE_PLUGINS = [rehypeKatex];
+const STREAMING_MARKDOWN_INTERVAL_MS = 200;
+
+/**
+ * Returns `value` immediately, then at most once per `intervalMs` while `enabled` is set.
+ *
+ * Disabling the throttle publishes the latest value on the next render.
+ *
+ * @param value - Latest source value.
+ * @param intervalMs - Minimum time between published updates while enabled.
+ * @param enabled - When false, `value` is returned without delay.
+ * @returns The value to render.
+ */
+function useThrottledValue<T>(value: T, intervalMs: number, enabled: boolean): T {
+  const [shown, setShown] = useState(value);
+  const latest = useRef(value);
+  const lastFlush = useRef(0);
+  latest.current = value;
+
+  useEffect(() => {
+    if (!enabled) {
+      setShown(value);
+      return;
+    }
+    const elapsed = Date.now() - lastFlush.current;
+    if (lastFlush.current === 0 || elapsed >= intervalMs) {
+      lastFlush.current = Date.now();
+      setShown(value);
+      return;
+    }
+    const handle = setTimeout(() => {
+      lastFlush.current = Date.now();
+      setShown(latest.current);
+    }, intervalMs - elapsed);
+    return () => clearTimeout(handle);
+  }, [value, intervalMs, enabled]);
+
+  return enabled ? shown : value;
+}
 
 /**
  * Copies text using the clipboard API, falling back to a hidden textarea when
@@ -206,6 +245,12 @@ export const MessageBubble = React.memo(
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const renderedContent =
       message.content || (message.thinkingContent ? "" : message.rawContent) || "";
+    const markdownContent = useThrottledValue(
+      renderedContent,
+      STREAMING_MARKDOWN_INTERVAL_MS,
+      Boolean(isStreaming),
+    );
+    const rehypePlugins = isStreaming ? STREAMING_REHYPE_PLUGINS : REHYPE_PLUGINS;
     const metrics = message.metrics;
     const wrapperSpacingClass = bubbleStyle === "compact" ? "my-3" : "my-6";
     const bubbleClassName =
@@ -422,8 +467,8 @@ export const MessageBubble = React.memo(
                 </div>
               ) : (
                 <div className="prose max-w-none prose-p:leading-relaxed prose-pre:bg-[#11111b] prose-pre:border prose-pre:border-[var(--color-border)] prose-pre:rounded-xl">
-                  <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
-                    {renderedContent + (isStreaming ? " \u2588" : "")}
+                  <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={rehypePlugins}>
+                    {markdownContent + (isStreaming ? " \u2588" : "")}
                   </ReactMarkdown>
                 </div>
               )}

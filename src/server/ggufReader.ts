@@ -6,15 +6,18 @@ import { gguf } from "@huggingface/gguf";
 import { templateSupportsToolCalling } from "../shared/templateCapabilities";
 import type { GgufDisplayMetadata } from "../shared/types";
 
+/**
+ * llama.cpp `LlamaFileType` names, in the same display style as the GGUF reader.
+ * Removed ids (4–6 and 33–35) are omitted so they fall through to `TYPE_<n>`.
+ */
 const QUANT_NAMES: Record<number, string> = {
   0: "F32",
   1: "F16",
   2: "Q4_0",
   3: "Q4_1",
-  6: "Q5_0",
-  7: "Q5_1",
-  8: "Q8_0",
-  9: "Q8_1",
+  7: "Q8_0",
+  8: "Q5_0",
+  9: "Q5_1",
   10: "Q2_K",
   11: "Q3_K_S",
   12: "Q3_K_M",
@@ -32,12 +35,32 @@ const QUANT_NAMES: Record<number, string> = {
   24: "IQ1_S",
   25: "IQ4_NL",
   26: "IQ3_S",
-  27: "IQ2_S",
-  28: "IQ4_XS",
+  27: "IQ3_M",
+  28: "IQ2_S",
   29: "IQ2_M",
-  30: "IQ3_M",
+  30: "IQ4_XS",
   31: "IQ1_M",
+  32: "BF16",
+  36: "TQ1_0",
+  37: "TQ2_0",
+  38: "MXFP4_MOE",
+  39: "NVFP4",
+  40: "Q1_0",
+  41: "Q2_0",
+  42: "F8_E4M3",
 };
+
+/**
+ * Maps a GGUF `general.file_type` id to its quantization label.
+ *
+ * Unknown and removed ids use the `TYPE_<n>` fallback.
+ *
+ * @param fileType - Numeric file type from the GGUF header.
+ * @returns The display label for that file type.
+ */
+export function describeGgufQuantization(fileType: number): string {
+  return QUANT_NAMES[fileType] ?? `TYPE_${String(fileType)}`;
+}
 
 /**
  * Interprets a GGUF scalar as an enabled boolean flag.
@@ -119,8 +142,7 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
       typeof ffLen === "number" || typeof ffLen === "bigint" ? Number(ffLen) : undefined,
     quantType:
       typeof metadata?.["general.file_type"] === "number"
-        ? QUANT_NAMES[metadata["general.file_type"] as number] ||
-          `TYPE_${String(metadata["general.file_type"])}`
+        ? describeGgufQuantization(metadata["general.file_type"] as number)
         : undefined,
     hasVisionEncoder: hasVision,
     hasAudioEncoder: hasAudio,

@@ -227,6 +227,7 @@ export function ChatView() {
   const { chatId } = useParams({ from: "/chat/$chatId" });
   const messages = useAppStore((s) => s.messages);
   const isGenerating = useAppStore((s) => s.isGenerating);
+  const isSending = useAppStore((s) => s.isSending);
   const isWaitingForToolApproval = useAppStore((s) => s.isWaitingForToolApproval);
   const generationStats = useAppStore((s) => s.generationStats);
   const serverStatus = useAppStore((s) => s.serverStatus);
@@ -446,8 +447,11 @@ export function ChatView() {
     const container = scrollContainerRef.current;
     const previousHeight = container?.scrollHeight ?? 0;
     const previousTop = container?.scrollTop ?? 0;
+    const chatIdAtStart = currentChatId;
     await loadMoreMessages();
+    if (useAppStore.getState().currentChatId !== chatIdAtStart) return;
     requestAnimationFrame(() => {
+      if (useAppStore.getState().currentChatId !== chatIdAtStart) return;
       const node = scrollContainerRef.current;
       if (!node) return;
       node.style.scrollBehavior = "auto";
@@ -1120,6 +1124,7 @@ export function ChatView() {
             conversationId={chatId}
             onSend={(content, files) => sendMessage(content, files, activeInfPreset?.id)}
             isGenerating={isGenerating || isWaitingForToolApproval}
+            isSending={isSending}
             isActive={active}
             historyLocked={isSyncingHistory}
             onStop={stopGeneration}

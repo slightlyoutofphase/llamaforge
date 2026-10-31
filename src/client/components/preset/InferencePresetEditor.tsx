@@ -39,6 +39,26 @@ import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { useResolvedTheme } from "../../useResolvedTheme";
 
+/**
+ * Parses the structured-output schema editor text.
+ *
+ * @param text - Current schema draft.
+ * @returns The object schema, or the inline error to show.
+ */
+function readSchemaDraft(
+  text: string,
+): { ok: true; schema: Record<string, unknown> } | { ok: false; error: string } {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { ok: false, error: "JSON schema must be an object." };
+    }
+    return { ok: true, schema: parsed as Record<string, unknown> };
+  } catch {
+    return { ok: false, error: "JSON schema must be valid JSON." };
+  }
+}
+
 type CatalogTool = ToolDefinition & {
   source?: AvailableTool["source"];
 };
@@ -130,6 +150,7 @@ export function InferencePresetEditor() {
   const loadedConfig = useAppStore((s) => s.loadedConfig);
   const serverStatus = useAppStore((s) => s.serverStatus);
   const [schemaDraft, setSchemaDraft] = useState("{}");
+  const [schemaError, setSchemaError] = useState<string | null>(null);
   const createMut = useCreateInferencePreset();
   const updateMut = useUpdateInferencePreset();
   const deleteMut = useDeleteInferencePreset();
@@ -165,6 +186,7 @@ export function InferencePresetEditor() {
         ? JSON.stringify(localState.structuredOutput.schema, null, 2)
         : "{}",
     );
+    setSchemaError(null);
   }, [localState?.id, localState?.structuredOutput?.schema]);
 
   if (!localState) return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
@@ -220,6 +242,15 @@ export function InferencePresetEditor() {
    */
   const handleSave = () => {
     if (!localState.id) return;
+    if (localState.structuredOutput?.enabled) {
+      const schema = readSchemaDraft(schemaDraft);
+      if (!schema.ok) {
+        setSchemaError(schema.error);
+        setSaveError(true);
+        setSaveMessage("Fix the JSON schema before saving.");
+        return;
+      }
+    }
     if (!fieldValid) {
       setSaveError(true);
       setSaveMessage("Fix the highlighted field before saving.");
@@ -570,13 +601,14 @@ export function InferencePresetEditor() {
                 {localState.repeatLastN ?? 64}
               </span>
             </label>
-            <input
+            <NumberDraftInput
               id="repeatLastNInput"
-              type="number"
-              min="-1"
-              step="1"
+              integer
+              min={-1}
               value={localState.repeatLastN ?? 64}
-              onChange={(e) => updateField("repeatLastN", parseInt(e.target.value, 10))}
+              onCommit={(value) =>
+                updateField("repeatLastN", value ?? localState.repeatLastN ?? 64)
+              }
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
             />
           </div>
@@ -653,12 +685,10 @@ export function InferencePresetEditor() {
                 <label htmlFor="dryBase" className="text-sm font-medium">
                   Base
                 </label>
-                <input
+                <NumberDraftInput
                   id="dryBase"
-                  type="number"
-                  step="0.05"
                   value={localState.dryBase ?? 1.75}
-                  onChange={(e) => updateField("dryBase", parseFloat(e.target.value))}
+                  onCommit={(value) => updateField("dryBase", value ?? localState.dryBase ?? 1.75)}
                   className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs"
                 />
               </div>
@@ -735,11 +765,12 @@ export function InferencePresetEditor() {
                 <label htmlFor="mirostatTau" className="text-sm font-medium">
                   Tau
                 </label>
-                <input
+                <NumberDraftInput
                   id="mirostatTau"
-                  type="number"
                   value={localState.mirostatTau ?? 5.0}
-                  onChange={(e) => updateField("mirostatTau", parseFloat(e.target.value))}
+                  onCommit={(value) =>
+                    updateField("mirostatTau", value ?? localState.mirostatTau ?? 5.0)
+                  }
                   className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
                 />
               </div>
@@ -747,11 +778,12 @@ export function InferencePresetEditor() {
                 <label htmlFor="mirostatEta" className="text-sm font-medium">
                   Eta
                 </label>
-                <input
+                <NumberDraftInput
                   id="mirostatEta"
-                  type="number"
                   value={localState.mirostatEta ?? 0.1}
-                  onChange={(e) => updateField("mirostatEta", parseFloat(e.target.value))}
+                  onCommit={(value) =>
+                    updateField("mirostatEta", value ?? localState.mirostatEta ?? 0.1)
+                  }
                   className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
                 />
               </div>
@@ -763,12 +795,12 @@ export function InferencePresetEditor() {
               <label htmlFor="dynaTempRange" className="text-sm font-medium">
                 DynaTemp Range
               </label>
-              <input
+              <NumberDraftInput
                 id="dynaTempRange"
-                type="number"
-                step="0.1"
                 value={localState.dynaTempRange ?? 0.0}
-                onChange={(e) => updateField("dynaTempRange", parseFloat(e.target.value))}
+                onCommit={(value) =>
+                  updateField("dynaTempRange", value ?? localState.dynaTempRange ?? 0.0)
+                }
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
               />
             </div>
@@ -776,12 +808,12 @@ export function InferencePresetEditor() {
               <label htmlFor="dynaTempExp" className="text-sm font-medium">
                 Exp
               </label>
-              <input
+              <NumberDraftInput
                 id="dynaTempExp"
-                type="number"
-                step="0.1"
                 value={localState.dynaTempExponent ?? 1.0}
-                onChange={(e) => updateField("dynaTempExponent", parseFloat(e.target.value))}
+                onCommit={(value) =>
+                  updateField("dynaTempExponent", value ?? localState.dynaTempExponent ?? 1.0)
+                }
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
               />
             </div>
@@ -927,16 +959,17 @@ export function InferencePresetEditor() {
             <fieldset
               className="border border-[var(--color-border)] rounded-md overflow-hidden"
               onBlur={() => {
-                try {
-                  const parsed = JSON.parse(schemaDraft);
-                  updateField("structuredOutput", {
-                    enabled: true,
-                    schema: parsed,
-                    grammar: undefined,
-                  });
-                } catch {
-                  // keep the draft until it is valid JSON
+                const schema = readSchemaDraft(schemaDraft);
+                if (!schema.ok) {
+                  setSchemaError(schema.error);
+                  return;
                 }
+                setSchemaError(null);
+                updateField("structuredOutput", {
+                  enabled: true,
+                  schema: schema.schema,
+                  grammar: localState.structuredOutput?.grammar,
+                });
               }}>
               <CodeMirror
                 value={schemaDraft}
@@ -945,6 +978,11 @@ export function InferencePresetEditor() {
                 onChange={(val) => setSchemaDraft(val)}
                 className="text-xs h-40"
               />
+              {schemaError ? (
+                <p className="px-2 py-1 text-xs text-[var(--color-error)]" role="alert">
+                  {schemaError}
+                </p>
+              ) : null}
             </fieldset>
           )}
         </section>

@@ -4,6 +4,8 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { spawn, type Subprocess } from "bun";
+import { Database } from "bun:sqlite";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,15 +15,18 @@ import {
   getProc,
   getRecentServerLogs,
   getServerStatus,
+  LoadCancelledError,
   loadModel,
+  requestUnloadModel,
   unloadModel,
 } from "../../src/server/llamaServer";
 import { buildContentParts } from "../../src/server/multimodal";
 import { addMessage, createChat, getChat, updateChat } from "../../src/server/persistence/chatRepo";
 import { initDb, resetDb } from "../../src/server/persistence/db";
 import { createInferencePreset, createSystemPreset } from "../../src/server/persistence/presetRepo";
-import { saveSettings } from "../../src/server/persistence/settingsRepo";
-import { proxyCompletion } from "../../src/server/streamProxy";
+import { loadSettings, saveSettings } from "../../src/server/persistence/settingsRepo";
+import { parseWindowsProcessSnapshot } from "../../src/server/processUsage";
+import { abortGeneration, proxyCompletion } from "../../src/server/streamProxy";
 import type {
   AppSettings,
   GgufDisplayMetadata,
@@ -278,6 +283,182 @@ async function waitForTerminalFrame(
   }
 
   throw new Error(`Timed out waiting for a terminal frame for message ${messageId}.`);
+}
+
+async function waitForTokenFrame(
+  broadcastSpy: ReturnType<typeof spyOn>,
+  chatId: string,
+  messageId: string,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const sawToken = broadcastSpy.mock.calls.some((call: unknown[]) => {
+      const frame = call[0] as WsFrame | undefined;
+      return frame?.type === "token" && frame.chatId === chatId && frame.messageId === messageId;
+    });
+    if (sawToken) return;
+    await Bun.sleep(50);
+  }
+  throw new Error(`Timed out waiting for a token from message ${messageId}.`);
+}
+
+/**
+ * Accumulates a child process's stdout and stderr while the test is running.
+ *
+ * @param child - Spawned LlamaForge server.
+ * @returns A buffer that grows as the child prints.
+ */
+function collectProcessOutput(child: Subprocess): { text: string; drained: Promise<void> } {
+  const logs = { text: "" };
+  const decoder = new TextDecoder();
+  const pumps: Promise<void>[] = [];
+  const pump = async (stream: ReadableStream<Uint8Array> | undefined) => {
+    if (!stream) return;
+    const reader = stream.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) logs.text += decoder.decode(value);
+    }
+  };
+  const consume = (source: ReadableStream<Uint8Array> | number | null | undefined) => {
+    if (source instanceof ReadableStream) {
+      pumps.push(pump(source));
+      return;
+    }
+    if (typeof source === "number") {
+      pumps.push(pump(Bun.file(source).stream()));
+    }
+  };
+  consume(child.stdout);
+  consume(child.stderr);
+  return {
+    get text() {
+      return logs.text;
+    },
+    drained: Promise.all(pumps).then(() => undefined),
+  };
+}
+
+/**
+ * Finds a llama-server process descended from `rootPid`.
+ *
+ * One CIM query returns the process list. The walk stays in this process.
+ *
+ * @param rootPid - LlamaForge server process id.
+ * @returns The descendant pid, or `null` when llama-server has not spawned.
+ */
+async function findDescendantLlamaServer(rootPid: number): Promise<number | null> {
+  const proc = spawn({
+    cmd: [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress",
+    ],
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const text = await new Response(proc.stdout).text();
+  await proc.exited;
+  const records = parseWindowsProcessSnapshot(text);
+  const children = new Map<number, number[]>();
+  const names = new Map<number, string>();
+  for (const record of records) {
+    names.set(record.pid, record.name);
+    const siblings = children.get(record.parentPid);
+    if (siblings) siblings.push(record.pid);
+    else children.set(record.parentPid, [record.pid]);
+  }
+
+  const queue = [...(children.get(rootPid) ?? [])];
+  const seen = new Set<number>();
+  while (queue.length > 0) {
+    const pid = queue.shift();
+    if (pid === undefined || seen.has(pid)) continue;
+    seen.add(pid);
+    if (/llama-server/i.test(names.get(pid) ?? "")) return pid;
+    for (const child of children.get(pid) ?? []) queue.push(child);
+  }
+  return null;
+}
+
+/**
+ * Writes the database file `startServer` opens under `LLAMAFORGE_APP_DATA_DIR`.
+ *
+ * The in-process suite uses `real-llama-integration.db`. A spawned `index.ts`
+ * always opens `llamaforge.db`, so autoload settings have to live in that file.
+ *
+ * @param settings - Settings the child server should load, including autoload.
+ * @returns No return value.
+ */
+async function writeSpawnedServerDatabase(settings: AppSettings): Promise<void> {
+  const dbPath = path.join(TEST_APP_DATA_DIR, "llamaforge.db");
+  await removeWhenReleased(dbPath);
+  await removeWhenReleased(`${dbPath}-wal`);
+  await removeWhenReleased(`${dbPath}-shm`);
+  const db = new Database(dbPath);
+  try {
+    db.exec("PRAGMA journal_mode = WAL;");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        settings_json TEXT NOT NULL
+      );
+    `);
+    db.prepare("INSERT OR REPLACE INTO settings (id, settings_json) VALUES (1, ?)").run(
+      JSON.stringify(settings),
+    );
+    db.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Returns whether a process id is still running.
+ *
+ * @param pid - Process to check.
+ * @returns `true` when the process still exists.
+ */
+async function processIsAlive(pid: number): Promise<boolean> {
+  const proc = spawn({
+    cmd: [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      `if (Get-Process -Id ${pid} -ErrorAction SilentlyContinue) { 'alive' } else { 'dead' }`,
+    ],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const text = await new Response(proc.stdout).text();
+  await proc.exited;
+  return text.includes("alive");
+}
+
+/**
+ * Deletes a file that a just-exited child may still have open.
+ *
+ * Windows releases the child's handle a moment after the process exits, so an immediate
+ * delete can fail with EBUSY. Retries for up to five seconds, then rethrows.
+ *
+ * @param filePath - Absolute path to delete. Missing files are ignored.
+ * @returns No return value.
+ */
+async function removeWhenReleased(filePath: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (true) {
+    try {
+      await fs.rm(filePath, { force: true });
+      return;
+    } catch (err: unknown) {
+      const code = (err as { code?: unknown }).code;
+      if (code !== "EBUSY" || Date.now() > deadline) throw err;
+      await Bun.sleep(100);
+    }
+  }
 }
 
 describeReal("llamaServer real integration", () => {
@@ -908,4 +1089,139 @@ describeReal("llamaServer real integration", () => {
       }
     }, 180_000);
   });
+
+  it("stops a real generation after the first tokens arrive", async () => {
+    const loadRequest = buildLoadRequest(fixture.loadPreset);
+    const wsHubModule = await import("../../src/server/wsHub");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast");
+    let port: number | null = null;
+    try {
+      port = await loadModel(
+        loadRequest.config,
+        fixture.settings.llamaServerPath,
+        TEST_PORT_MIN,
+        TEST_PORT_MAX,
+        loadRequest.thinkingTagOverride,
+      );
+      await assertHealthy(port);
+      const chat = await createChat("Stop mid-stream", fixture.loadPreset.modelPath);
+      await updateChat(chat.id, { inferencePresetId: fixture.inferencePreset.id });
+      const assistantId = await proxyCompletion({
+        chatId: chat.id,
+        content: "Count slowly from one to thirty, one number per line.",
+        attachments: [],
+      });
+      await waitForTokenFrame(broadcastSpy, chat.id, assistantId);
+      abortGeneration(chat.id, "cancelled");
+      const frame = await waitForTerminalFrame(broadcastSpy, chat.id, assistantId, 30_000);
+      expect(frame.type).toBe("stop");
+      if (frame.type === "stop") expect(frame.stopReason).toBe("cancelled");
+      expect(getServerStatus().status).toBe("running");
+    } finally {
+      broadcastSpy.mockRestore();
+      await unloadModel();
+    }
+  }, 120_000);
+
+  it("cancels a real Qwen load before the server is ready", async () => {
+    const loadRequest = buildLoadRequest(fixture.loadPreset);
+    const pending = loadModel(
+      loadRequest.config,
+      fixture.settings.llamaServerPath,
+      TEST_PORT_MIN,
+      TEST_PORT_MAX,
+      loadRequest.thinkingTagOverride,
+    );
+    const deadline = Date.now() + 20_000;
+    while (getServerStatus().status !== "loading" && Date.now() < deadline) {
+      await Bun.sleep(20);
+    }
+    expect(getServerStatus().status).toBe("loading");
+    await requestUnloadModel();
+    await expect(pending).rejects.toBeInstanceOf(LoadCancelledError);
+    expect(getServerStatus().status).toBe("idle");
+  }, 60_000);
+
+  it("stops llama-server when the app is interrupted during autoload", async () => {
+    await unloadModel();
+    const loadRequest = buildLoadRequest(fixture.loadPreset);
+    const current = await loadSettings();
+    const childSettings: AppSettings = {
+      ...current,
+      autoloadLastModel: true,
+      lastLoadConfig: loadRequest.config,
+      llamaServerPath: fixture.settings.llamaServerPath,
+      modelsPath: path.dirname(fixture.loadPreset.modelPath),
+      serverPort: 18147,
+      llamaPortRangeMin: 18150,
+      llamaPortRangeMax: 18160,
+      logLevel: "info",
+    };
+    if (loadRequest.thinkingTagOverride) {
+      childSettings.lastLoadThinkingTagOverride = loadRequest.thinkingTagOverride;
+    }
+    await writeSpawnedServerDatabase(childSettings);
+
+    const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const child = spawn({
+      cmd: [process.execPath, path.join("src", "server", "index.ts")],
+      cwd: repoRoot,
+      // bun test sets NODE_ENV=test, which silences the child's logger and empties the
+      // failure output below. Override it so the child logs the way `bun run` does.
+      env: {
+        ...process.env,
+        NODE_ENV: "development",
+        LLAMAFORGE_APP_DATA_DIR: TEST_APP_DATA_DIR,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+    });
+    const logs = collectProcessOutput(child);
+    let llamaPid: number | null = null;
+    try {
+      const appeared = Date.now() + 90_000;
+      while (llamaPid === null && Date.now() < appeared) {
+        if (child.exitCode !== null) {
+          await Promise.race([logs.drained, Bun.sleep(1_000)]);
+          throw new Error(
+            `Autoload server exited early (code ${child.exitCode}):\n${logs.text.slice(-6000)}`,
+          );
+        }
+        llamaPid = await findDescendantLlamaServer(child.pid);
+        if (llamaPid === null) await Bun.sleep(250);
+      }
+      if (llamaPid === null) {
+        throw new Error(`llama-server did not start during autoload:\n${logs.text.slice(-4000)}`);
+      }
+      child.kill("SIGINT");
+      const exited = await Promise.race([
+        child.exited.then(() => true),
+        Bun.sleep(20_000).then(() => false),
+      ]);
+      if (!exited) {
+        child.kill();
+        throw new Error(`Server ignored SIGINT:\n${logs.text.slice(-4000)}`);
+      }
+      const stopDeadline = Date.now() + 15_000;
+      while ((await processIsAlive(llamaPid)) && Date.now() < stopDeadline) {
+        await Bun.sleep(250);
+      }
+      expect(await processIsAlive(llamaPid)).toBe(false);
+    } finally {
+      if (child.exitCode === null) child.kill();
+      await child.exited.catch(() => undefined);
+      if (llamaPid !== null && (await processIsAlive(llamaPid))) {
+        const cleanup = spawn({
+          cmd: ["taskkill", "/PID", String(llamaPid), "/F", "/T"],
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+        await cleanup.exited;
+      }
+      await removeWhenReleased(path.join(TEST_APP_DATA_DIR, "llamaforge.db"));
+      await removeWhenReleased(path.join(TEST_APP_DATA_DIR, "llamaforge.db-wal"));
+      await removeWhenReleased(path.join(TEST_APP_DATA_DIR, "llamaforge.db-shm"));
+    }
+  }, 180_000);
 });

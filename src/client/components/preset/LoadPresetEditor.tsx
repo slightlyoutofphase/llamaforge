@@ -292,10 +292,11 @@ export function LoadPresetEditor() {
 
   useEffect(() => {
     const config = localState?.config;
-    if (!config) return;
+    if (!config || models.length === 0) return;
     const matching = models.find(
       (m) => m.primaryPath === config.modelPath || m.primaryPath === localState.modelPath,
     );
+    if (matching === undefined) return;
     const availability = getSpeculativeDecodingAvailability(matching, models);
     const currentType = config.specType ?? "off";
     if (isSpecModeAvailable(currentType, availability)) return;
@@ -403,7 +404,10 @@ export function LoadPresetEditor() {
     setLocalState(next);
     pendingSavedJson.current = JSON.stringify(next);
     updateMut.mutate(
-      { id: localState.id, updates: next },
+      {
+        id: localState.id,
+        updates: { ...next, chatTemplateOverride: next.chatTemplateOverride ?? null },
+      },
       {
         onSuccess: () => {
           setSaveError(false);

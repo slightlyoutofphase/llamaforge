@@ -7,6 +7,94 @@ import type { ChatMessage } from "../shared/types";
 import { parseToolCallsJson } from "../shared/toolCalls";
 
 const tokenCountCache = new Map<string, number>();
+/** Increments whenever the loaded tokenizer may have changed. */
+let tokenizerEpoch = 0;
+/** Characters per token observed from the latest exact `/tokenize` result. */
+let calibratedCharsPerToken = 3.5;
+/** Tokenizer epoch that {@link calibratedCharsPerToken} belongs to. */
+let calibratedCharsPerTokenEpoch = -1;
+
+/**
+ * Returns the current tokenizer generation.
+ *
+ * The count increases when a model finishes loading and when llama-server exits,
+ * so cached token counts from a previous model are not reused.
+ *
+ * @returns Monotonic epoch for the active tokenizer.
+ */
+export function getTokenizerEpoch(): number {
+  return tokenizerEpoch;
+}
+
+/**
+ * Drops cached token counts and advances {@link getTokenizerEpoch}.
+ *
+ * Call this after a model becomes ready and after llama-server exits. The port
+ * stays in each cache key; this reset is what makes a reused port safe.
+ *
+ * @returns No return value.
+ */
+export function resetTokenCountCache(): void {
+  tokenCountCache.clear();
+  tokenizerEpoch += 1;
+  calibratedCharsPerToken = 3.5;
+  calibratedCharsPerTokenEpoch = tokenizerEpoch;
+}
+
+/**
+ * Returns the characters-per-token ratio for the active tokenizer.
+ *
+ * The ratio starts at 3.5 and is replaced by `text.length / tokens` after each
+ * exact `/tokenize` result. A model change resets it.
+ *
+ * @returns Characters represented by one token.
+ */
+function currentCharsPerToken(): number {
+  if (calibratedCharsPerTokenEpoch !== tokenizerEpoch) {
+    calibratedCharsPerTokenEpoch = tokenizerEpoch;
+    calibratedCharsPerToken = 3.5;
+  }
+  return calibratedCharsPerToken;
+}
+
+/**
+ * Records the characters-per-token ratio from an exact token count.
+ *
+ * @param text - Text that was tokenized.
+ * @param tokens - Token count returned by `/tokenize`.
+ * @returns No return value.
+ */
+function observeExactTokenCount(text: string, tokens: number): void {
+  if (text.length === 0 || tokens <= 0) return;
+  calibratedCharsPerTokenEpoch = tokenizerEpoch;
+  calibratedCharsPerToken = text.length / tokens;
+}
+
+/**
+ * Estimates tokens from text length using the calibrated ratio.
+ *
+ * @param text - Text to estimate.
+ * @returns A non-negative token estimate.
+ */
+function estimateTextTokens(text: string): number {
+  if (text.length === 0) return 0;
+  return Math.ceil(text.length / currentCharsPerToken());
+}
+
+/**
+ * Estimates the tokens in one atomic message group from text length and media budgets.
+ *
+ * @param group - Messages that must be kept or dropped together.
+ * @returns Estimated tokens for the group.
+ */
+function estimateGroupTokens(group: readonly ChatMessage[]): number {
+  let tokens = 0;
+  for (const message of group) {
+    tokens += estimateTextTokens(`${message.role}\n${message.content}`);
+    tokens += estimateAttachmentMediaTokens([message]);
+  }
+  return tokens;
+}
 const DEFAULT_CTX_SIZE = 4096;
 const DEFAULT_RESERVED_TOKENS = 512;
 const MIN_RESERVED_TOKENS = 128;
@@ -138,7 +226,9 @@ async function fetchTokenCount(text: string, port?: number): Promise<number> {
       "tokens" in data &&
       Array.isArray((data as { tokens: unknown }).tokens)
     ) {
-      return (data as { tokens: unknown[] }).tokens.length;
+      const tokens = (data as { tokens: unknown[] }).tokens.length;
+      observeExactTokenCount(text, tokens);
+      return tokens;
     }
   } catch {
     // Fallback to heuristic token count
@@ -381,6 +471,31 @@ export async function truncateMessages(
   const keepLastCount = 1;
   const groups = groupMessagesAtomically(messages);
 
+  const overheadTokens = tokenOptions?.buildPromptText
+    ? estimateTextTokens(await tokenOptions.buildPromptText([]))
+    : 0;
+  const estimateScale = tokenOptions?.buildPromptText ? 1.25 : 1;
+
+  /**
+   * Estimates the token cost of the groups that would remain after a cut.
+   *
+   * Prefix sums are taken from the groups still present, so a later pass does not
+   * reuse sums from groups that have already been removed.
+   *
+   * @param startGroupIndex - First group that may be removed.
+   * @param removeCount - How many groups to drop from that point.
+   * @returns Estimated tokens, including constant request overhead.
+   */
+  const estimateRemaining = (startGroupIndex: number, removeCount: number): number => {
+    const estimates = groups.map((group) => estimateGroupTokens(group));
+    const prefix: number[] = [0];
+    for (const estimate of estimates) prefix.push((prefix.at(-1) ?? 0) + estimate);
+    const afterIndex = Math.min(groups.length, startGroupIndex + removeCount);
+    const keptBefore = prefix[startGroupIndex] ?? 0;
+    const keptAfter = (prefix[groups.length] ?? 0) - (prefix[afterIndex] ?? 0);
+    return overheadTokens + Math.ceil((keptBefore + keptAfter) * estimateScale);
+  };
+
   const removeGroupsUntilFit = async (
     startGroupIndex: number,
     minRemainingGroups: number,
@@ -395,25 +510,27 @@ export async function truncateMessages(
     );
     if (maxK <= 0) return;
 
-    let lo = 1;
-    let hi = maxK;
-    let answer = maxK;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      const candidate = [
-        ...groups.slice(0, startGroupIndex),
-        ...groups.slice(startGroupIndex + mid),
-      ];
-      const tokens = await getPromptTokens(candidate.flat(), port, tokenOptions);
-      if (tokens <= maxPromptTokens) {
-        answer = mid;
-        hi = mid - 1;
-      } else {
-        lo = mid + 1;
+    let removeCount = maxK;
+    for (let count = 1; count <= maxK; count++) {
+      if (estimateRemaining(startGroupIndex, count) <= maxPromptTokens) {
+        removeCount = count;
+        break;
       }
     }
-    groups.splice(startGroupIndex, answer);
+    groups.splice(startGroupIndex, removeCount);
+
+    let corrections = 0;
     currentTokens = await getPromptTokens(groups.flat(), port, tokenOptions);
+    while (currentTokens > maxPromptTokens && corrections < 3) {
+      const nextLastRemovable =
+        keepLastCount > 0 ? Math.max(startGroupIndex, groups.length - 1) - 1 : groups.length - 1;
+      const canDrop =
+        startGroupIndex <= nextLastRemovable && groups.length - 1 >= minRemainingGroups;
+      if (!canDrop || startGroupIndex >= groups.length) break;
+      groups.splice(startGroupIndex, 1);
+      corrections += 1;
+      currentTokens = await getPromptTokens(groups.flat(), port, tokenOptions);
+    }
   };
 
   if (overflowPolicy === "TruncateMiddle") {

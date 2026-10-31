@@ -188,4 +188,17 @@ describe("App shell settings", () => {
     expect(statusBar.textContent).toContain("System RAM:");
     expect(statusBar.textContent).toContain("VRAM:");
   });
+
+  it("keeps every line of a multi-line error in the banner", async () => {
+    const lines = Array.from({ length: 12 }, (_unused, index) => `log line ${index + 1}`);
+    useAppStore.setState({
+      ...defaultAppState,
+      errorMessage: lines.join("\n"),
+    });
+
+    await renderApp();
+
+    const banner = document.querySelector(".whitespace-pre-wrap");
+    expect(banner?.textContent).toBe(lines.join("\n"));
+  });
 });

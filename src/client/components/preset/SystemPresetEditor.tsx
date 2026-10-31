@@ -11,6 +11,7 @@ import { Copy, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   allocateUniqueName,
+  validatePresetName,
   duplicatePresetName,
   presetMenuLabels,
 } from "../../../shared/presetNames";
@@ -86,6 +87,12 @@ export function SystemPresetEditor() {
    */
   const handleApplyToChat = async () => {
     if (!currentChatId || !localState?.id) return;
+    const nameError = validatePresetName(localState.name ?? "");
+    if (nameError) {
+      setSaveError(true);
+      setSaveMessage(nameError);
+      return;
+    }
     const name = allocateUniqueName(
       localState.name ?? "",
       (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
@@ -115,14 +122,14 @@ export function SystemPresetEditor() {
    */
   const handleSave = () => {
     if (!localState?.id) return;
-    const trimmedName = localState.name?.trim() ?? "";
-    if (!trimmedName) {
+    const nameError = validatePresetName(localState.name ?? "");
+    if (nameError) {
       setSaveError(true);
-      setSaveMessage("Preset name cannot be empty.");
+      setSaveMessage(nameError);
       return;
     }
     const name = allocateUniqueName(
-      trimmedName,
+      localState.name?.trim() ?? "",
       (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
     );
     const next = { ...localState, name };

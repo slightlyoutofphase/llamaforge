@@ -5,7 +5,7 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
 import { asFetch } from "../fixtures";
@@ -138,7 +138,7 @@ describe("Layout regression tests", () => {
     expect(outletHost?.className).toContain("min-h-0");
   });
 
-  it("renders ModelSelector with a responsive shrink container and long path wrapping styles", () => {
+  it("renders ModelSelector with a responsive shrink container and long path wrapping styles", async () => {
     useAppStore.setState({
       models: [
         {
@@ -183,6 +183,7 @@ describe("Layout regression tests", () => {
         <ModelSelector />
       </QueryClientProvider>,
     );
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
     const wrapper = container.querySelector("div[class*='min-w-0'][class*='overflow-y-auto']");
     expect(wrapper).toBeTruthy();
 
@@ -192,7 +193,7 @@ describe("Layout regression tests", () => {
     expect(pathElement.className).toContain("whitespace-pre-wrap");
   });
 
-  it("renders ModelLibraryPanel cards with wrapping classes instead of truncation", () => {
+  it("renders ModelLibraryPanel cards with wrapping classes instead of truncation", async () => {
     useAppStore.setState({
       models: [
         {
@@ -237,6 +238,7 @@ describe("Layout regression tests", () => {
         <ModelLibraryPanel />
       </QueryClientProvider>,
     );
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
 
     const nameElement = screen.getByText("Long Model Name Example");
     expect(nameElement.className).toContain("break-words");

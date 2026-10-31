@@ -13,7 +13,9 @@ import {
   deleteChat,
   deleteMessageAndSubsequent,
   deleteMessagesAfter,
+  __setExportAttachmentReadObserver,
   getChat,
+  getChatForPrompt,
   getChats,
   getLastMessageId,
   updateChat,
@@ -126,6 +128,43 @@ describe("chatRepo", () => {
     expect(retrieved?.messages?.length).toBe(1);
     expect(retrieved?.messages?.[0]?.content).toBe("Hello");
     expect(retrieved?.messages?.[0]?.metrics?.tokensPerSecond).toBe(21.5);
+  });
+
+  it("loads the same prompt messages as getChat, including attachments and omitting metrics", async () => {
+    const chat = await createChat("Prompt Load");
+    await addMessage({
+      id: "prompt-user",
+      chatId: chat.id,
+      role: "user",
+      content: "See the file",
+      rawContent: "See the file",
+      position: 0,
+      createdAt: 1,
+    });
+    await addMessage({
+      id: "prompt-plain",
+      chatId: chat.id,
+      role: "assistant",
+      content: "No file",
+      rawContent: "No file",
+      position: 1,
+      createdAt: 2,
+    });
+    getDb()
+      .prepare(
+        "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("att-prompt", "prompt-user", "text/plain", "attachments/prompt.txt", "notes.txt", 3);
+
+    const full = await getChat(chat.id);
+    const prompt = await getChatForPrompt(chat.id);
+    expect(prompt?.messages?.map((message) => message.content)).toEqual(
+      full?.messages?.map((message) => message.content),
+    );
+    expect(prompt?.messages?.[0]?.attachments?.[0]?.fileName).toBe("notes.txt");
+    expect(prompt?.messages?.[1]?.attachments).toEqual([]);
+    expect(full?.messages?.[0]?.attachments?.[0]?.fileName).toBe("notes.txt");
+    expect(prompt?.messages?.[0]?.metrics).toBeUndefined();
   });
 
   it("updates and deletes messages", async () => {
@@ -342,6 +381,78 @@ describe("chatRepo", () => {
     expect(importedChat?.name).toContain("Exchange");
     expect(importedChat?.messages?.length).toBe(1);
     expect(importedChat?.messages?.[0]?.content).toBe("Export test");
+  });
+
+  it("reads export attachments one at a time and round-trips both files", async () => {
+    const chat = await createChat("Two files");
+    await addMessage({
+      id: "file-msg-1",
+      chatId: chat.id,
+      role: "user",
+      content: "first",
+      rawContent: "first",
+      position: 0,
+      createdAt: 1,
+    });
+    await addMessage({
+      id: "file-msg-2",
+      chatId: chat.id,
+      role: "user",
+      content: "second",
+      rawContent: "second",
+      position: 1,
+      createdAt: 2,
+    });
+    const firstRelative = "attachments/two-files/file-msg-1/one.bin";
+    const secondRelative = "attachments/two-files/file-msg-2/two.bin";
+    const firstAbsolute = path.join(getAppDataDir(), firstRelative);
+    const secondAbsolute = path.join(getAppDataDir(), secondRelative);
+    await fs.mkdir(path.dirname(firstAbsolute), { recursive: true });
+    await fs.mkdir(path.dirname(secondAbsolute), { recursive: true });
+    await Bun.write(firstAbsolute, "one-file");
+    await Bun.write(secondAbsolute, "two-file");
+    getDb()
+      .prepare(
+        "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("att-one", "file-msg-1", "application/octet-stream", firstRelative, "one.bin", 1);
+    getDb()
+      .prepare(
+        "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("att-two", "file-msg-2", "application/octet-stream", secondRelative, "two.bin", 2);
+
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const order: string[] = [];
+    __setExportAttachmentReadObserver({
+      enter: (filePath) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        order.push(filePath);
+      },
+      leave: () => {
+        inFlight -= 1;
+      },
+    });
+    try {
+      const json = await exportChat(chat.id, "json");
+      expect(maxInFlight).toBe(1);
+      expect(order).toEqual([firstAbsolute, secondAbsolute]);
+      const importedId = await importChat(json);
+      const imported = await getChat(importedId);
+      const files = imported?.messages?.flatMap((message) => message.attachments ?? []) ?? [];
+      expect(files.map((file) => file.fileName).sort()).toEqual(["one.bin", "two.bin"]);
+      const texts = await Promise.all(
+        files.map(async (file) => {
+          const absolute = path.join(getAppDataDir(), file.filePath);
+          return Bun.file(absolute).text();
+        }),
+      );
+      expect(texts.sort()).toEqual(["one-file", "two-file"]);
+    } finally {
+      __setExportAttachmentReadObserver(null);
+    }
   });
 
   it("imports extracted soundtracks larger than 10MB and keeps them paired to the video", async () => {

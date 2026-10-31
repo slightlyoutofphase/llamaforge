@@ -14,6 +14,7 @@ import { isGemma4Architecture } from "../shared/thinkingTags";
 import type { LlamaServerStatus, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
 import { parseGgufMetadata } from "./ggufReader";
 import { logDebug, logError, logInfo, logWarn, shouldEmitLog } from "./logger";
+import { resetTokenCountCache } from "./overflow";
 import { attachChildProcessToParentLifetime } from "./windowsLifetime";
 import { getAppDataDir } from "./persistence/db";
 import { findFreePort } from "./utils/network";
@@ -28,11 +29,30 @@ let currentThinkingTagOverride: ThinkingTagConfig | undefined;
 let activeTempJinjaPath: string | undefined;
 let currentStatus: LlamaServerStatus = "idle";
 let loadingLock = false;
+/** Set when unload is requested while a model load is still waiting to become ready. */
+let loadCancelRequested = false;
+
+/**
+ * Thrown when the user unloads llama-server before the in-flight load becomes ready.
+ */
+export class LoadCancelledError extends Error {
+  /**
+   * Creates the cancellation error returned to the load request.
+   */
+  constructor() {
+    super("Model load was cancelled.");
+    this.name = "LoadCancelledError";
+  }
+}
 let unloadPromise: Promise<void> | null = null;
 // M2 fix: ring buffer for boot logs to prevent O(n) shift operations during long loads
 const BOOT_LOG_CAPACITY = 1000;
 let bootLogBuffer: string[] = [];
 let bootLogWriteIndex = 0;
+/** Lines ever appended since the last clear. Not capped, so a full ring buffer still counts as progress. */
+let bootLogTotal = 0;
+/** A load is not treated as stalled until it has been running longer than this. */
+const LOAD_START_GRACE_MS = 60_000;
 
 // Load-progress tracking state
 let currentLoadPhase: "spawning" | "loading_weights" | "offloading" | "initializing" | "ready" =
@@ -120,18 +140,65 @@ function trackLoadProgressFromLog(line: string): void {
 }
 
 /**
+ * Inputs for {@link isLoadStalled}.
+ */
+export interface LoadStallInput {
+  /** Current time in milliseconds. */
+  now: number;
+  /** Time when the readiness poll started, in milliseconds. */
+  startedAt: number;
+  /** Time of the latest boot-log line, in milliseconds. */
+  lastProgressAt: number;
+  /** How long a load may stay quiet after the start grace before it is failed. */
+  quietFailMs: number;
+}
+
+/**
+ * Reports whether a model load should be aborted because boot logs stopped moving.
+ *
+ * The first minute is always treated as healthy so a slow start is not failed
+ * immediately. After that, the load is stalled only once it has been quiet for
+ * longer than `quietFailMs`. An elapsed time that lands exactly on either
+ * boundary is still healthy.
+ *
+ * @param input - Clock readings for the load being polled.
+ * @returns `true` when the load has gone quiet long enough to fail.
+ */
+export function isLoadStalled(input: LoadStallInput): boolean {
+  if (input.now - input.startedAt <= LOAD_START_GRACE_MS) {
+    return false;
+  }
+  return input.now - input.lastProgressAt > input.quietFailMs;
+}
+
+/**
  * Appends a line to the in-memory boot log ring buffer.
+ *
+ * The visible buffer stays capped, but {@link getBootLogTotal} keeps increasing
+ * so a long healthy load is not mistaken for a stall.
  *
  * @param line - Log line emitted while llama-server is starting.
  * @returns No return value.
  */
-function pushBootLog(line: string): void {
+export function pushBootLog(line: string): void {
   if (bootLogBuffer.length < BOOT_LOG_CAPACITY) {
     bootLogBuffer.push(line);
   } else {
     bootLogBuffer[bootLogWriteIndex] = line;
   }
   bootLogWriteIndex = (bootLogWriteIndex + 1) % BOOT_LOG_CAPACITY;
+  bootLogTotal += 1;
+}
+
+/**
+ * Returns how many boot-log lines have been recorded since the last clear.
+ *
+ * Unlike {@link getBootLogs}, this count is not limited by the ring buffer.
+ *
+ * @returns Monotonic line count for the current load.
+ */
+export function getBootLogTotal(): number {
+  return bootLogTotal;
 }
 
 /**
@@ -139,7 +206,7 @@ function pushBootLog(line: string): void {
  *
  * @returns Boot log lines ordered from oldest to newest.
  */
-function getBootLogs(): string[] {
+export function getBootLogs(): string[] {
   if (bootLogBuffer.length < BOOT_LOG_CAPACITY) {
     return bootLogBuffer.slice();
   }
@@ -152,9 +219,10 @@ function getBootLogs(): string[] {
  *
  * @returns No return value.
  */
-function clearBootLogs(): void {
+export function clearBootLogs(): void {
   bootLogBuffer = [];
   bootLogWriteIndex = 0;
+  bootLogTotal = 0;
 }
 
 type ActiveReader = {
@@ -505,15 +573,20 @@ export function buildArgs(
 }
 
 /**
- * Reads `general.architecture` from a GGUF header without failing the load sequence.
+ * Reads architecture and chat template from one GGUF parse.
  *
  * @param modelPath - Absolute path to the model being spawned.
- * @returns Architecture string when the header is readable, otherwise `undefined`.
+ * @returns Header fields, or `undefined` when the file cannot be parsed.
  */
-async function readModelArchitecture(modelPath: string): Promise<string | undefined> {
+async function readModelHeader(
+  modelPath: string,
+): Promise<{ architecture: string | undefined; chatTemplate: string | null } | undefined> {
   try {
     const metadata = await parseGgufMetadata(modelPath);
-    return metadata.architecture;
+    return {
+      architecture: metadata.architecture,
+      chatTemplate: metadata.chatTemplate ?? null,
+    };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logDebug("Could not read GGUF architecture before spawn", { modelPath, message });
@@ -526,26 +599,36 @@ async function readModelArchitecture(modelPath: string): Promise<string | undefi
  *
  * Load-preset overrides win. Gemma 4 also reads the GGUF template when no
  * override is set so {@link ensureGemma4GenerationOpensThought} can open a
- * thought channel on follow-up turns.
+ * thought channel on follow-up turns. Pass `ggufChatTemplate` from a parse that
+ * already happened so the file is not read again. `null` means that parse found
+ * no template. Omit the argument to read the GGUF here.
  *
  * @param config - Load configuration for this spawn.
  * @param architecture - GGUF `general.architecture`, when readable.
+ * @param ggufChatTemplate - Template from an earlier parse, or `null` when that parse had none.
  * @returns Template source to write, or `undefined` to use llama-server's GGUF default.
  */
 export async function resolveChatTemplateForSpawn(
   config: ModelLoadConfig,
   architecture?: string,
+  ggufChatTemplate?: string | null,
 ): Promise<string | undefined> {
   let template = config.chatTemplateContent;
   if (template === undefined && isGemma4Architecture(architecture)) {
-    try {
-      template = (await parseGgufMetadata(config.modelPath)).chatTemplate;
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      logWarn("Could not read Gemma 4 GGUF chat template for follow-up thinking patch", {
-        modelPath: config.modelPath,
-        message,
-      });
+    if (typeof ggufChatTemplate === "string") {
+      template = ggufChatTemplate;
+    } else if (ggufChatTemplate === null) {
+      template = undefined;
+    } else {
+      try {
+        template = (await parseGgufMetadata(config.modelPath)).chatTemplate;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logWarn("Could not read Gemma 4 GGUF chat template for follow-up thinking patch", {
+          modelPath: config.modelPath,
+          message,
+        });
+      }
     }
   }
   if (template === undefined) return undefined;
@@ -590,6 +673,7 @@ async function validateBinary(absolutePath: string): Promise<void> {
  * @returns The port number where the newly spawned server is listening.
  * @throws {Error} If the server binary cannot be validated, if the model fails to load,
  *         or if the process exits or stops making progress before it is healthy.
+ * @throws {LoadCancelledError} If unload is requested while this load is still waiting to become ready.
  */
 export async function loadModel(
   config: ModelLoadConfig,
@@ -608,6 +692,7 @@ export async function loadModel(
   if (loadingLock) {
     throw new Error("Model loading in progress. Please wait.");
   }
+  loadCancelRequested = false;
   loadingLock = true;
   clearBootLogs();
   resetLoadProgress();
@@ -643,9 +728,14 @@ export async function loadModel(
 
     currentConfig = persistedConfig;
     currentThinkingTagOverride = thinkingTagOverride;
-    const architecture = await readModelArchitecture(persistedConfig.modelPath);
+    const header = await readModelHeader(persistedConfig.modelPath);
+    const architecture = header?.architecture;
     const args = [...buildArgs(persistedConfig, port, architecture)];
-    const templateToLoad = await resolveChatTemplateForSpawn(persistedConfig, architecture);
+    const templateToLoad = await resolveChatTemplateForSpawn(
+      persistedConfig,
+      architecture,
+      header ? header.chatTemplate : undefined,
+    );
     if (templateToLoad !== undefined) {
       tempJinjaPath = path.join(os.tmpdir(), `llamaforge-chat-template-${Date.now()}.jinja`);
       await Bun.write(tempJinjaPath, templateToLoad);
@@ -680,11 +770,17 @@ export async function loadModel(
     const isReady = await waitForHealthCheck(targetProc, port);
     if (!isReady) {
       const lastError = getBootLogs().slice(-10).join("\n");
-      logError("Server failed to reach ready state");
+      const cancelled = loadCancelRequested;
+      loadCancelRequested = false;
       await unloadModel();
+      if (cancelled) {
+        throw new LoadCancelledError();
+      }
+      logError("Server failed to reach ready state");
       throw new Error(`llama-server failed to become ready. Last logs:\n${lastError}`);
     }
 
+    resetTokenCountCache();
     broadcastLoadProgress("ready", 100, "Model server ready");
     setStatus("running");
     logInfo("Model server running", { port, model: config.modelPath });
@@ -736,7 +832,7 @@ async function waitForHealthCheck(
   const READY_CEILING_MS = 10 * 60 * 1000;
   const QUIET_FAIL_MS = 3 * 60 * 1000;
   const startedAt = Date.now();
-  let lastLogCount = getBootLogs().length;
+  let lastLogCount = bootLogTotal;
   let lastProgressAt = startedAt;
   let attempt = 0;
 
@@ -752,11 +848,12 @@ async function waitForHealthCheck(
       // Ignore network errors while booting
     }
 
-    const logCount = getBootLogs().length;
+    const now = Date.now();
+    const logCount = bootLogTotal;
     if (logCount !== lastLogCount) {
       lastLogCount = logCount;
-      lastProgressAt = Date.now();
-    } else if (Date.now() - startedAt > 60_000 && Date.now() - lastProgressAt > QUIET_FAIL_MS) {
+      lastProgressAt = now;
+    } else if (isLoadStalled({ now, startedAt, lastProgressAt, quietFailMs: QUIET_FAIL_MS })) {
       logWarn("llama-server stopped reporting load progress before it became ready", { port });
       return false;
     }
@@ -840,21 +937,28 @@ async function handleUnexpectedServerExit(
  * @param port - Localhost port exposed by the candidate llama-server process.
  * @returns `true` when the health endpoint responds with a 2xx status.
  */
-function probeHealthEndpoint(port: number): Promise<boolean> {
+export function probeHealthEndpoint(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
-    const finish = (ok: boolean) => {
+    let opened: { terminate: () => void } | null = null;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const finish = (ok: boolean): void => {
       if (settled) {
         return;
       }
       settled = true;
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
       resolve(ok);
     };
 
     let received = "";
     const request = `GET /health HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nConnection: close\r\n\r\n`;
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
+      const current = opened;
       finish(false);
+      current?.terminate();
     }, 1000);
 
     void Bun.connect({
@@ -862,6 +966,11 @@ function probeHealthEndpoint(port: number): Promise<boolean> {
       port,
       socket: {
         open(socket) {
+          opened = socket;
+          if (settled) {
+            socket.terminate();
+            return;
+          }
           socket.write(request);
         },
         data(_socket, data) {
@@ -911,20 +1020,78 @@ function httpStatusIsSuccess(raw: string): boolean {
   return code >= 200 && code < 300;
 }
 
+/** Log level used when a llama-server line has no structured level of its own. */
+type ServerLogLevel = "server" | "info" | "warn" | "error" | "debug";
+
+/**
+ * Records one llama-server log line and broadcasts it when the level is enabled.
+ *
+ * Blank lines are ignored. Complete lines and a final partial line share this path
+ * so boot-log accounting stays the same for both.
+ *
+ * @param line - One log line, without a trailing newline.
+ * @param defaultLevel - Level used when the line is not structured JSON.
+ * @returns No return value.
+ */
+function handleLogLine(line: string, defaultLevel: ServerLogLevel): void {
+  if (!line.trim()) return;
+
+  pushBootLog(line);
+  trackLoadProgressFromLog(line);
+
+  if (line.startsWith("{") && line.endsWith("}")) {
+    try {
+      const parsed: unknown = JSON.parse(line);
+      const record =
+        typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
+      const rawLevel = record?.["level"];
+      const level =
+        typeof rawLevel === "string" && rawLevel.length > 0 ? rawLevel.toLowerCase() : defaultLevel;
+      const rawMessage = record?.["msg"];
+      const message = typeof rawMessage === "string" && rawMessage.length > 0 ? rawMessage : line;
+
+      if (
+        level === "info" ||
+        level === "warn" ||
+        level === "error" ||
+        level === "debug" ||
+        level === "server"
+      ) {
+        if (shouldEmitLog(level)) {
+          broadcastLog(level, message);
+        }
+      } else if (shouldEmitLog(defaultLevel)) {
+        broadcastLog(defaultLevel, message);
+      }
+      return;
+    } catch {
+      if (shouldEmitLog(defaultLevel)) {
+        broadcastLog(defaultLevel, line);
+      }
+      return;
+    }
+  }
+
+  if (shouldEmitLog(defaultLevel)) {
+    broadcastLog(defaultLevel, line);
+  }
+}
+
 /**
  * Streams llama-server log output into the WebSocket log broadcast channel.
+ *
+ * A final line that arrives without a trailing newline is still recorded.
  *
  * @param stream - Process output stream to consume.
  * @param defaultLevel - Log level used when the stream line does not contain structured metadata.
  * @returns A promise that settles once the stream is fully consumed or cancelled.
  */
-async function consumeLogs(
+export async function consumeLogs(
   stream: ReadableStream<Uint8Array> | null,
-  defaultLevel: "server" | "info" | "warn" | "error" | "debug",
-) {
+  defaultLevel: ServerLogLevel,
+): Promise<void> {
   if (!stream) return;
   const reader = stream.getReader();
-  // S9 fix: track the reader for cancellation
   activeReaders.add(reader);
   const decoder = new TextDecoder();
   let buffer = "";
@@ -945,45 +1112,16 @@ async function consumeLogs(
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const line of lines) {
-        if (!line.trim()) continue;
-
-        // Rolling buffer for boot error reporting
-        pushBootLog(line);
-
-        // Derive load-progress from structured or unstructured boot logs
-        trackLoadProgressFromLog(line);
-
-        if (line.startsWith("{") && line.endsWith("}")) {
-          try {
-            const parsed = JSON.parse(line);
-            const level = parsed.level?.toLowerCase() || defaultLevel;
-
-            if (["info", "warn", "error", "debug", "server"].includes(level)) {
-              const normalizedLevel = level as "info" | "warn" | "error" | "debug" | "server";
-              if (shouldEmitLog(normalizedLevel)) {
-                broadcastLog(normalizedLevel, parsed.msg || line);
-              }
-            } else {
-              if (shouldEmitLog(defaultLevel)) {
-                broadcastLog(defaultLevel, parsed.msg || line);
-              }
-            }
-          } catch {
-            if (shouldEmitLog(defaultLevel)) {
-              broadcastLog(defaultLevel, line);
-            }
-          }
-        } else {
-          if (shouldEmitLog(defaultLevel)) {
-            broadcastLog(defaultLevel, line);
-          }
-        }
+        handleLogLine(line, defaultLevel);
       }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      handleLogLine(buffer, defaultLevel);
     }
   } catch {
     // Ignore stream closed errors
   } finally {
-    // S9 fix: remove reader from tracking set
     activeReaders.delete(reader);
   }
 }
@@ -1003,6 +1141,9 @@ export async function unloadModel(): Promise<void> {
  * @returns A promise that resolves when the active process has been stopped and cleanup is complete.
  */
 export function requestUnloadModel(): Promise<void> {
+  if (currentStatus === "loading") {
+    loadCancelRequested = true;
+  }
   if (unloadPromise) {
     return unloadPromise;
   }
@@ -1019,6 +1160,7 @@ export function requestUnloadModel(): Promise<void> {
     cancelPendingApprovals(undefined, "unloaded");
     if (!proc) {
       resetLoadedModelState();
+      resetTokenCountCache();
       const tempPath = activeTempJinjaPath;
       activeTempJinjaPath = undefined;
       if (tempPath) {
@@ -1053,6 +1195,7 @@ export function requestUnloadModel(): Promise<void> {
       }
     } finally {
       activeServerPid = null;
+      resetTokenCountCache();
       const tempPath = activeTempJinjaPath;
       activeTempJinjaPath = undefined;
       if (tempPath) {

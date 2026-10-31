@@ -300,7 +300,9 @@ export default function App() {
           {errorMessage ? (
             <div className="shrink-0 relative z-20 p-4 bg-[var(--color-error)] text-white flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md">
               <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium truncate">{errorMessage}</div>
+                <div className="text-sm font-medium max-h-40 overflow-y-auto whitespace-pre-wrap break-words">
+                  {errorMessage}
+                </div>
               </div>
               <div className="flex items-center gap-2">
                 {errorActionLabel && errorAction ? (

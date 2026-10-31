@@ -3,14 +3,14 @@
  * Tests for preset editor components and their form interactions.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { EditorView } from "@codemirror/view";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { queryKeys } from "../../src/client/queries";
 import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
-import { ggufDisplayMetadata } from "../fixtures";
+import { asFetch, ggufDisplayMetadata } from "../fixtures";
 
 let InferencePresetEditor: typeof import("../../src/client/components/preset/InferencePresetEditor").InferencePresetEditor;
 let LoadPresetEditor: typeof import("../../src/client/components/preset/LoadPresetEditor").LoadPresetEditor;
@@ -402,6 +402,87 @@ describe("Preset Editors Integration", () => {
     expect(preserveCheckbox.checked).toBe(false);
   });
 
+  it("LoadPresetEditor: Reset Default then Save clears the template and stays clean", async () => {
+    const saved = {
+      ...mockLoadPreset,
+      chatTemplateOverride: "custom jinja",
+    };
+    queryClient.setQueryData(queryKeys.presetsLoad(), [saved]);
+    useUiStore.setState({ activePresetId: "test-load-id" });
+    const cleared = { ...mockLoadPreset, preserveThinking: false };
+    let putBody: { chatTemplateOverride?: string | null } | undefined;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/api/presets/load/") && init?.method === "PUT") {
+        putBody = JSON.parse(String(init.body)) as { chatTemplateOverride?: string | null };
+        return new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url.includes("/api/presets/load")) {
+        return new Response(JSON.stringify([cleared]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    const confirmSpy = spyOn(window, "confirm").mockReturnValue(false);
+
+    try {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <LoadPresetEditor />
+        </QueryClientProvider>,
+      );
+      expect(await screen.findByText("Test Load (Default)")).toBeDefined();
+      fireEvent.click(screen.getByText("Reset Default"));
+      fireEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
+      expect(await screen.findByText("Saved.")).toBeDefined();
+      await waitFor(() => {
+        expect(putBody?.chatTemplateOverride).toBeNull();
+      });
+      const deleteButton = screen.getByTitle("Delete");
+      const closeButton = deleteButton.nextElementSibling;
+      expect(closeButton).toBeInstanceOf(HTMLButtonElement);
+      fireEvent.click(closeButton as HTMLButtonElement);
+      expect(confirmSpy).not.toHaveBeenCalled();
+    } finally {
+      confirmSpy.mockRestore();
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("LoadPresetEditor: shows the server validation message when a save is rejected", async () => {
+    useUiStore.setState({ activePresetId: "test-load-id" });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetch(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/api/presets/load/") && init?.method === "PUT") {
+        return new Response(JSON.stringify({ error: "contextSize must be >= 1" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+
+    try {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <LoadPresetEditor />
+        </QueryClientProvider>,
+      );
+      expect(await screen.findByText("Test Load (Default)")).toBeDefined();
+      fireEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
+      expect(await screen.findByText("contextSize must be >= 1")).toBeDefined();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("LoadPresetEditor: enables MTP for a gemma4-assistant companion without listing the draft GGUF", async () => {
     useAppStore.setState({
       models: [
@@ -685,5 +766,91 @@ describe("Preset Editors Integration", () => {
     );
     expect((screen.getByLabelText(/MMProj Path/i) as HTMLInputElement).value).toBe("");
     expect((screen.getByLabelText("Preset Name") as HTMLInputElement).value).toBe("Test Load");
+  });
+
+  it("LoadPresetEditor: keeps MTP until models are loaded and the companion is missing", async () => {
+    queryClient.setQueryData(queryKeys.presetsLoad(), [
+      {
+        ...mockLoadPreset,
+        config: { ...mockLoadPreset.config, specType: "draft-mtp" },
+      },
+    ]);
+    useAppStore.setState({ models: [], loadedModel: null, loadedConfig: null });
+    useUiStore.setState({ activePresetId: "test-load-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LoadPresetEditor />
+      </QueryClientProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Speculative Decoding" }));
+    const mode = (await screen.findByLabelText("Mode")) as HTMLSelectElement;
+    expect(mode.value).toBe("draft-mtp");
+
+    act(() => {
+      useAppStore.setState({
+        models: [
+          {
+            publisher: "test",
+            modelName: "test-model",
+            primaryPath: "/models/test.gguf",
+            metadata: { name: "test-model" } as any,
+          },
+        ],
+      });
+    });
+    await waitFor(() => {
+      expect((screen.getByLabelText("Mode") as HTMLSelectElement).value).toBe("off");
+    });
+  });
+
+  it("InferencePresetEditor: blocks save on invalid schema and restores a cleared number", async () => {
+    useUiStore.setState({ activePresetId: "test-inf-id" });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InferencePresetEditor />
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("Test Inference (Default)")).toBeDefined();
+
+    const base = screen.getByLabelText("Base") as HTMLInputElement;
+    expect(base.value).toBe("1.75");
+    fireEvent.change(base, { target: { value: "" } });
+    fireEvent.blur(base);
+    expect(base.value).toBe("1.75");
+
+    fireEvent.click(screen.getByLabelText("Structured Output"));
+    const editorRoot = document.querySelector(".cm-editor");
+    if (!(editorRoot instanceof HTMLElement)) {
+      throw new Error("expected the schema editor");
+    }
+    const view = EditorView.findFromDOM(editorRoot);
+    if (!view) throw new Error("expected a CodeMirror view");
+    act(() => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: "{" },
+      });
+    });
+    const fieldset = editorRoot.closest("fieldset");
+    if (!fieldset) throw new Error("expected the schema fieldset");
+    fireEvent.blur(fieldset);
+    fireEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
+    expect(await screen.findByText("Fix the JSON schema before saving.")).toBeDefined();
+  });
+
+  it("SystemPresetEditor: applying an empty name shows the same message as Save", async () => {
+    useAppStore.setState({ currentChatId: "chat-1" });
+    useUiStore.setState({ activePresetId: "test-sys-id" });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <SystemPresetEditor />
+      </QueryClientProvider>,
+    );
+    const name = (await screen.findByLabelText("Preset Name")) as HTMLInputElement;
+    fireEvent.change(name, { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: /Use in Active Chat/i }));
+    expect(await screen.findByText("Preset name cannot be empty.")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: /Save Changes/i }));
+    expect(screen.getByText("Preset name cannot be empty.")).toBeDefined();
   });
 });

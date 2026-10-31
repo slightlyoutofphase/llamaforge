@@ -9,6 +9,7 @@ import type {
   AvailableTool,
   InferencePreset,
   LoadPreset,
+  LoadPresetUpdate,
   SystemPromptPreset,
 } from "../shared/types";
 import { request, responseErrorMessage } from "./http";
@@ -37,7 +38,7 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(preset),
   });
-  if (!res.ok) throw new Error("Failed to create load preset");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to create load preset"));
 }
 
 /**
@@ -47,13 +48,13 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
  * @param updates - Partial object containing fields to change.
  * @returns A promise that resolves when the update is complete.
  */
-export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>): Promise<void> {
+export async function updateLoadPreset(id: string, updates: LoadPresetUpdate): Promise<void> {
   const res = await request(`/api/presets/load/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
   });
-  if (!res.ok) throw new Error("Failed to update load preset");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to update load preset"));
 }
 
 /**
@@ -64,7 +65,7 @@ export async function updateLoadPreset(id: string, updates: Partial<LoadPreset>)
  */
 export async function deleteLoadPreset(id: string): Promise<void> {
   const res = await request(`/api/presets/load/${id}`, { method: "DELETE" });
-  if (!res.ok) throw new Error("Failed to delete load preset");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to delete load preset"));
 }
 
 /**
@@ -113,7 +114,8 @@ export async function createInferencePreset(preset: InferencePreset): Promise<vo
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(preset),
   });
-  if (!res.ok) throw new Error("Failed to create inference preset");
+  if (!res.ok)
+    throw new Error(await responseErrorMessage(res, "Failed to create inference preset"));
 }
 
 /**
@@ -127,12 +129,16 @@ export async function updateInferencePreset(
   id: string,
   updates: Partial<InferencePreset>,
 ): Promise<void> {
+  const writable: Record<string, unknown> = { ...updates };
+  delete writable["isDefault"];
+  delete writable["sourceModelPath"];
   const res = await request(`/api/presets/inference/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(updates),
+    body: JSON.stringify(writable),
   });
-  if (!res.ok) throw new Error("Failed to update inference preset");
+  if (!res.ok)
+    throw new Error(await responseErrorMessage(res, "Failed to update inference preset"));
 }
 
 /**
@@ -143,7 +149,8 @@ export async function updateInferencePreset(
  */
 export async function deleteInferencePreset(id: string): Promise<void> {
   const res = await request(`/api/presets/inference/${id}`, { method: "DELETE" });
-  if (!res.ok) throw new Error("Failed to delete inference preset");
+  if (!res.ok)
+    throw new Error(await responseErrorMessage(res, "Failed to delete inference preset"));
 }
 
 /**
@@ -368,7 +375,7 @@ export async function createSystemPreset(preset: SystemPromptPreset): Promise<vo
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(preset),
   });
-  if (!res.ok) throw new Error("Failed to create system preset");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to create system preset"));
 }
 
 /**
@@ -387,7 +394,7 @@ export async function updateSystemPreset(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
   });
-  if (!res.ok) throw new Error("Failed to update system preset");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to update system preset"));
 }
 
 /**
@@ -398,7 +405,7 @@ export async function updateSystemPreset(
  */
 export async function deleteSystemPreset(id: string): Promise<void> {
   const res = await request(`/api/presets/system/${id}`, { method: "DELETE" });
-  if (!res.ok) throw new Error("Failed to delete system preset");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to delete system preset"));
 }
 
 // --- Settings ---

@@ -7,10 +7,20 @@ import { describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import * as ggufReader from "../../src/server/ggufReader";
 import {
   buildArgs,
+  clearBootLogs,
+  consumeLogs,
+  getBootLogs,
+  getBootLogTotal,
   getServerStatus,
+  isLoadStalled,
+  LoadCancelledError,
   loadModel,
+  probeHealthEndpoint,
+  pushBootLog,
+  requestUnloadModel,
   resolveChatTemplateForSpawn,
 } from "../../src/server/llamaServer";
 import { getAppDataDir } from "../../src/server/persistence/db";
@@ -264,6 +274,50 @@ describe("llamaServer", () => {
     expect(resolved).toBe(template);
   });
 
+  it("reads a Gemma 4 GGUF template once when the header was already parsed", async () => {
+    const template = "{%- if add_generation_prompt -%}{{ bos_token }}{%- endif -%}";
+    const spy = spyOn(ggufReader, "parseGgufMetadata").mockResolvedValue({
+      architecture: "gemma4",
+      name: "gemma",
+      fileSizeBytes: 1,
+      contextLength: 4096,
+      embeddingLength: 1,
+      attentionHeadCount: 1,
+      attentionHeadCountKv: 1,
+      blockCount: 1,
+      feedForwardLength: 1,
+      quantType: "Q4",
+      hasVisionEncoder: false,
+      hasAudioEncoder: false,
+      hasToolCalling: false,
+      isDraftModel: false,
+      defaultTemperature: undefined,
+      defaultTopK: undefined,
+      defaultTopP: undefined,
+      defaultMinP: undefined,
+      defaultRepeatPenalty: undefined,
+      chatTemplate: template,
+    });
+    try {
+      const { chatTemplateContent: _template, ...configWithoutTemplate } = baseConfig;
+      const fromHeader = await resolveChatTemplateForSpawn(
+        { ...configWithoutTemplate, modelPath: "gemma.gguf" },
+        "gemma4",
+        template,
+      );
+      expect(fromHeader).toContain(template);
+      expect(spy).not.toHaveBeenCalled();
+
+      await resolveChatTemplateForSpawn(
+        { ...configWithoutTemplate, modelPath: "gemma.gguf" },
+        "gemma4",
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("emits an explicit image-min-tokens override alongside image-max-tokens", () => {
     const withBoth: ModelLoadConfig = {
       ...baseConfig,
@@ -343,4 +397,124 @@ describe("llamaServer", () => {
       await fs.unlink(dummyBin).catch(() => undefined);
     }
   });
+
+  it("keeps counting boot logs after the ring buffer is full", () => {
+    clearBootLogs();
+    try {
+      for (let index = 0; index < 1000; index += 1) {
+        pushBootLog(`boot ${index}`);
+      }
+      expect(getBootLogs()).toHaveLength(1000);
+      expect(getBootLogTotal()).toBe(1000);
+
+      pushBootLog("boot past the cap");
+      expect(getBootLogs()).toHaveLength(1000);
+      expect(getBootLogs()).toContain("boot past the cap");
+      expect(getBootLogTotal()).toBe(1001);
+    } finally {
+      clearBootLogs();
+    }
+  });
+
+  it("treats the stall boundaries as still healthy", () => {
+    const quietFailMs = 3 * 60 * 1000;
+    const startedAt = 1_000_000;
+
+    expect(
+      isLoadStalled({
+        now: startedAt + 60_000,
+        startedAt,
+        lastProgressAt: startedAt - quietFailMs - 1,
+        quietFailMs,
+      }),
+    ).toBe(false);
+
+    expect(
+      isLoadStalled({
+        now: startedAt + 60_001,
+        startedAt,
+        lastProgressAt: startedAt - quietFailMs,
+        quietFailMs,
+      }),
+    ).toBe(true);
+
+    const now = startedAt + 5 * 60 * 1000;
+    expect(
+      isLoadStalled({
+        now,
+        startedAt,
+        lastProgressAt: now - quietFailMs,
+        quietFailMs,
+      }),
+    ).toBe(false);
+    expect(
+      isLoadStalled({
+        now: now + 1,
+        startedAt,
+        lastProgressAt: now - quietFailMs,
+        quietFailMs,
+      }),
+    ).toBe(true);
+  });
+
+  it("records a final log line that has no trailing newline", async () => {
+    clearBootLogs();
+    try {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("partial line without newline"));
+          controller.close();
+        },
+      });
+      await consumeLogs(stream, "info");
+      expect(getBootLogs()).toContain("partial line without newline");
+      expect(getBootLogTotal()).toBe(1);
+    } finally {
+      clearBootLogs();
+    }
+  });
+
+  it("closes a health probe when the server never writes", async () => {
+    let closed = false;
+    const server = Bun.listen({
+      hostname: "127.0.0.1",
+      port: 0,
+      socket: {
+        open() {},
+        data() {},
+        close() {
+          closed = true;
+        },
+      },
+    });
+    try {
+      const started = Date.now();
+      const healthy = await probeHealthEndpoint(server.port);
+      expect(healthy).toBe(false);
+      expect(Date.now() - started).toBeLessThan(2_000);
+      const deadline = Date.now() + 500;
+      while (!closed && Date.now() < deadline) {
+        await Bun.sleep(10);
+      }
+      expect(closed).toBe(true);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  it("returns a cancelled error when unload interrupts a load", async () => {
+    const script = path.join(os.tmpdir(), `llamaforge-sleep-${Date.now()}.cmd`);
+    await Bun.write(script, "@echo off\r\nping -n 30 127.0.0.1 >nul\r\n");
+    const pending = loadModel({ ...baseConfig, modelPath: script }, script, 19100, 19120);
+    const deadline = Date.now() + 4000;
+    while (getServerStatus().status !== "loading" && Date.now() < deadline) {
+      await Bun.sleep(10);
+    }
+    await requestUnloadModel();
+    await expect(pending).rejects.toBeInstanceOf(LoadCancelledError);
+    expect(getServerStatus().status).toBe("idle");
+    await Bun.file(script)
+      .delete()
+      .catch(() => undefined);
+  }, 20000);
 });

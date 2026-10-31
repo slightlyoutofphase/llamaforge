@@ -115,25 +115,27 @@ export function cancelPendingApprovals(
  * @param toolCallId - Explicit lookup identifier mapped to pending interaction.
  * @param approved - Action explicitly sanctioned by the user natively.
  * @param editedArguments - Parameter string mapped for execution bypass/override.
- * @returns No return value.
+ * @param chatId - Chat that must own the pending approval when the caller supplies one.
+ * @returns `resolved` when the pending approval was settled, `not_found` when none is waiting, or `chat_mismatch` when the chat does not own it.
  */
 export function resolveToolApproval(
   toolCallId: string,
   approved: boolean,
   editedArguments?: string | undefined,
   chatId?: string,
-) {
+): "resolved" | "not_found" | "chat_mismatch" {
   const pending = pendingApprovals.get(toolCallId);
-  if (!pending) return;
+  if (!pending) return "not_found";
   if (chatId && pending.chatId !== chatId) {
     logError("Rejected tool approval for mismatched chat", { toolCallId, chatId });
-    return;
+    return "chat_mismatch";
   }
   settlePendingApproval(toolCallId, {
     approved,
     editedArguments,
     reason: approved ? "approved" : "rejected",
   });
+  return "resolved";
 }
 
 /**

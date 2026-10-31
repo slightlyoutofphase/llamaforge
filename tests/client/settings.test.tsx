@@ -13,8 +13,11 @@ const mockSettings = {
   theme: "dark",
   autonameEnabled: true,
   fontSize: 16,
+  serverPort: 11435,
   lastLoadConfig: { modelPath: "/models/loaded.gguf", contextSize: 8192 },
 };
+
+let settingsSnapshot = mockSettings;
 
 describe("SettingsPanel", () => {
   let SettingsPanel: typeof import("../../src/client/SettingsPanel").SettingsPanel;
@@ -28,8 +31,9 @@ describe("SettingsPanel", () => {
       return undefined;
     });
 
+    settingsSnapshot = { ...mockSettings, lastLoadConfig: mockSettings.lastLoadConfig };
     await mock.module("../../src/client/queries", () => ({
-      useSettings: () => ({ data: mockSettings, isLoading: false }),
+      useSettings: () => ({ data: settingsSnapshot, isLoading: false }),
       useUpdateSettings: () => ({ mutate: updateSettingsMutate, isPending: false }),
     }));
 
@@ -85,6 +89,43 @@ describe("SettingsPanel", () => {
     const payload = updateSettingsMutate.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload["lastLoadConfig"]).toBeUndefined();
     expect(payload["modelsPath"]).toBeUndefined();
+  });
+
+  it("keeps text typed while a settings refetch arrives", async () => {
+    let view: ReturnType<typeof render> | undefined;
+    await act(async () => {
+      view = render(<SettingsPanel />);
+    });
+    const llamaInput = await screen.findByDisplayValue("/usr/bin/llama-server");
+    await act(async () => {
+      fireEvent.change(llamaInput, { target: { value: "/typed-during-save" } });
+    });
+    settingsSnapshot = { ...settingsSnapshot, llamaServerPath: "/from-server" };
+    await act(async () => {
+      view?.rerender(<SettingsPanel />);
+    });
+    expect((llamaInput as HTMLInputElement).value).toBe("/typed-during-save");
+  });
+
+  it("saves the server port only after blur", async () => {
+    await act(async () => {
+      render(<SettingsPanel />);
+    });
+    const portInput = await screen.findByLabelText("Bun Server Port");
+    await act(async () => {
+      fireEvent.change(portInput, { target: { value: "1" } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(updateSettingsMutate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.blur(portInput);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(updateSettingsMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ serverPort: 1 }),
+      expect.anything(),
+    );
   });
 
   it("saves a models path on blur instead of on each keystroke", async () => {
@@ -169,6 +210,12 @@ describe("SettingsPanel", () => {
 
     await act(async () => {
       fireEvent.change(serverPortInput, { target: { value: "12001" } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+    expect(updateSettingsMutate).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.blur(serverPortInput);
       await new Promise((resolve) => setTimeout(resolve, 300));
     });
 

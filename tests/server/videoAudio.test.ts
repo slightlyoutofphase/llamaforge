@@ -9,7 +9,10 @@ import os from "node:os";
 import path from "node:path";
 import { initDb, resetDb } from "../../src/server/persistence/db";
 import {
+  __expireFfprobeMissForTests,
+  __ffprobeSearchCount,
   __resetVideoAudioState,
+  __setFfprobeAvailabilityForTests,
   __setVideoAudioExtract,
   __setVideoAudioProbe,
   buildFfmpegExtractAudioArgs,
@@ -21,6 +24,7 @@ import {
   NO_AUDIO_MARKER_SUFFIX,
   resolveVideoAudioSidecar,
   videoAudioSidecarCopyPlan,
+  videoProbeFailedMarkerPath,
   videoAudioSidecarOwnerStem,
   videoAudioSidecarPaths,
 } from "../../src/server/videoAudio";
@@ -217,6 +221,43 @@ describe("videoAudio", () => {
 
     expect(await resolveVideoAudioSidecar(videoPath)).toBeNull();
     expect(await Bun.file(videoAudioSidecarPaths(videoPath).markerPath).exists()).toBe(false);
+  });
+
+  it("writes a probe-failed marker and does not probe that file again", async () => {
+    const videoPath = path.join(tmpDir, "broken.mp4");
+    await Bun.write(videoPath, "video");
+    __setFfprobeAvailabilityForTests("present");
+    let probed = 0;
+    __setVideoAudioProbe(async () => {
+      probed += 1;
+      return null;
+    });
+
+    expect(await resolveVideoAudioSidecar(videoPath)).toBeNull();
+    expect(probed).toBe(1);
+    expect(await Bun.file(videoProbeFailedMarkerPath(videoPath)).exists()).toBe(true);
+
+    __setVideoAudioProbe(async () => {
+      throw new Error("probe should not run while the failure marker is current");
+    });
+    expect(await resolveVideoAudioSidecar(videoPath)).toBeNull();
+  });
+
+  it("searches for a missing ffprobe again only after the miss expires", async () => {
+    const videoPath = path.join(tmpDir, "unprobed.mp4");
+    await Bun.write(videoPath, "video");
+    __setFfprobeAvailabilityForTests("missing");
+
+    expect(await resolveVideoAudioSidecar(videoPath)).toBeNull();
+    const searches = __ffprobeSearchCount();
+    expect(searches).toBeGreaterThan(0);
+    expect(await resolveVideoAudioSidecar(videoPath)).toBeNull();
+    expect(__ffprobeSearchCount()).toBe(searches);
+
+    __expireFfprobeMissForTests();
+    expect(await resolveVideoAudioSidecar(videoPath)).toBeNull();
+    expect(__ffprobeSearchCount()).toBeGreaterThan(searches);
+    expect(await Bun.file(videoProbeFailedMarkerPath(videoPath)).exists()).toBe(false);
   });
 
   it("extracts a WAV sidecar once after a positive probe", async () => {

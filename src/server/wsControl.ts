@@ -9,6 +9,7 @@
 
 import type { ServerWebSocket } from "bun";
 import type { GenerationAbortReason } from "./generationRegistry";
+import { logError } from "./logger";
 import { getConnectionCount, recordActivity } from "./wsHub";
 
 /**
@@ -40,6 +41,21 @@ async function abortIfNoClients(reason: GenerationAbortReason): Promise<void> {
   const { cancelPendingApprovals } = await import("./tools");
   if (getConnectionCount() !== 0) return;
   cancelPendingApprovals(undefined, reason === "unloaded" ? "unloaded" : "disconnected");
+}
+
+/**
+ * Logs a WebSocket handler failure without closing the socket.
+ *
+ * The Bun server does not catch promise rejections from `message` or `close`.
+ * Attaching this keeps a bad frame from becoming an unhandled rejection.
+ *
+ * @param task - Handler promise that may reject.
+ * @returns No return value.
+ */
+export function observeWebSocketTask(task: Promise<void>): void {
+  void task.catch((err: unknown) => {
+    logError("WebSocket frame handling failed", err);
+  });
 }
 
 /**
@@ -84,19 +100,6 @@ export async function dispatchClientFrame(
     // The follow-up after a tool call uses a new generation id. Stop must
     // reach that generation even when the client still has the previous id.
     abortGeneration(chatId, "cancelled");
-    return;
-  }
-  if (frame["type"] === "tool_approval") {
-    const toolCallId = readString(frame, "toolCallId");
-    if (!toolCallId) return;
-    const { resolveToolApproval } = await import("./tools");
-    const edited = frame["editedArguments"];
-    resolveToolApproval(
-      toolCallId,
-      frame["approved"] === true,
-      typeof edited === "string" ? edited : undefined,
-      readString(frame, "chatId") ?? undefined,
-    );
   }
 }
 

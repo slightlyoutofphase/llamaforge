@@ -83,9 +83,10 @@ describe("stores logic", () => {
     }
 
     const state = useAppStore.getState();
-    expect(state.logs).toHaveLength(5000);
-    expect(state.logs[0]).toBe("[info] line-100");
+    expect(state.logs.length).toBeLessThanOrEqual(5000);
+    expect(state.logs[0]).toBe("[info] line-500");
     expect(state.logs[state.logs.length - 1]).toBe("[info] line-5099");
+    expect(state.logs[1]).toBe("[info] line-501");
   });
 
   it("sendMessage rolls back optimistic message on failure", async () => {
@@ -99,14 +100,14 @@ describe("stores logic", () => {
 
     await act(async () => {
       await expect(useAppStore.getState().sendMessage("Hello world")).rejects.toThrow(
-        "Server returned 500",
+        "Message send failed.",
       );
     });
 
     const state = useAppStore.getState();
     expect(state.messages).toHaveLength(0);
     expect(state.isGenerating).toBe(false);
-    expect(state.errorMessage).toContain("Server returned");
+    expect(state.errorMessage).toBe("Message send failed.");
 
     globalThis.fetch = originalFetch;
   });
@@ -248,6 +249,141 @@ describe("stores logic", () => {
     globalThis.fetch = originalFetch;
   });
 
+  it("sendMessage shows a non-mismatch 409 without reloading the transcript", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url === "/api/chats/chat-1/messages") {
+        return new Response(JSON.stringify({ error: "Llama-server is not running." }), {
+          status: 409,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ messages: [{ id: "should-not-load" }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    globalThis.fetch = asFetch(fetchMock);
+
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [],
+        isGenerating: false,
+        isSyncingHistory: false,
+        errorMessage: null,
+      });
+    });
+
+    await act(async () => {
+      await expect(useAppStore.getState().sendMessage("hello")).rejects.toThrow(
+        "Llama-server is not running.",
+      );
+    });
+
+    const state = useAppStore.getState();
+    expect(state.errorMessage).toBe("Llama-server is not running.");
+    expect(state.messages).toHaveLength(0);
+    expect(
+      fetchMock.mock.calls.some((call) => {
+        const url = typeof call[0] === "string" ? call[0] : (call[0] as Request).url;
+        return url === "/api/chats/chat-1" || url.startsWith("/api/chats/chat-1?");
+      }),
+    ).toBe(false);
+
+    globalThis.fetch = originalFetch;
+  });
+
+  it("does not merge older messages after the chat changes", async () => {
+    let release: (response: Response) => void = () => {};
+    const fetchMock = mock(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    globalThis.fetch = asFetch(fetchMock);
+    const current = {
+      id: "current",
+      chatId: "chat-1",
+      role: "user" as const,
+      content: "current",
+      rawContent: "current",
+      position: 5,
+      createdAt: 1,
+    };
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [current],
+        totalMessages: 10,
+      });
+    });
+
+    const pending = useAppStore.getState().loadMoreMessages();
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-2",
+        messages: [{ ...current, id: "other", chatId: "chat-2", position: 0 }],
+        totalMessages: 1,
+      });
+    });
+    release(
+      new Response(
+        JSON.stringify({
+          messages: [{ ...current, id: "older", position: 1 }],
+          totalMessages: 99,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await pending;
+
+    const state = useAppStore.getState();
+    expect(state.messages.map((message) => message.id)).toEqual(["other"]);
+    expect(state.totalMessages).toBe(1);
+  });
+
+  it("issues one request when older messages are requested twice", async () => {
+    let release: (response: Response) => void = () => {};
+    const fetchMock = mock(
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    globalThis.fetch = asFetch(fetchMock);
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [
+          {
+            id: "current",
+            chatId: "chat-1",
+            role: "user",
+            content: "current",
+            rawContent: "current",
+            position: 5,
+            createdAt: 1,
+          },
+        ],
+        totalMessages: 10,
+      });
+    });
+
+    const first = useAppStore.getState().loadMoreMessages();
+    const second = useAppStore.getState().loadMoreMessages();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    release(
+      new Response(JSON.stringify({ messages: [], totalMessages: 10 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    await Promise.all([first, second]);
+  });
+
   it("unloadModel resets server status on success", async () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = mock().mockResolvedValue(new Response(null, { status: 200 }));
@@ -303,6 +439,28 @@ describe("stores logic", () => {
     act(() => {
       useAppStore.setState({ fetchServerStatus: originalFetchServerStatus });
     });
+    globalThis.fetch = originalFetch;
+  });
+
+  it("leaves no error banner when a model load is cancelled", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetch(
+      mock(async () => {
+        return new Response(
+          JSON.stringify({ error: "Model load was cancelled.", code: "LOAD_CANCELLED" }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      }),
+    );
+    act(() => {
+      useAppStore.setState({ errorMessage: "previous", serverStatus: "idle" });
+    });
+    await act(async () => {
+      const loaded = await useAppStore.getState().loadModel(testLoadConfig("/models/test.gguf"));
+      expect(loaded).toBe(false);
+    });
+    expect(useAppStore.getState().errorMessage).toBeNull();
+    expect(useAppStore.getState().serverStatus).toBe("idle");
     globalThis.fetch = originalFetch;
   });
 
@@ -1227,5 +1385,105 @@ describe("stores logic", () => {
 
     expect(useAppStore.getState().isGenerating).toBe(false);
     globalThis.WebSocket = originalWebSocket;
+  });
+
+  it("removes an empty assistant when a cancelled stop has no content", () => {
+    const originalWebSocket = globalThis.WebSocket;
+    class MockWebSocket {
+      static OPEN = 1;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+      send() {}
+      close() {}
+    }
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    const timings = {
+      tokens_cached: 0,
+      tokens_evaluated: 0,
+      predicted_ms: 0,
+      predicted_n: 0,
+      predicted_per_second: 0,
+      predicted_per_token_ms: 0,
+      prompt_ms: 0,
+      prompt_n: 0,
+      prompt_per_second: 0,
+      prompt_per_token_ms: 0,
+    };
+    const placeholder = {
+      id: "assistant-empty",
+      chatId: "chat-1",
+      role: "assistant" as const,
+      content: "",
+      rawContent: "",
+      position: 1,
+      createdAt: 1,
+    };
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [placeholder],
+        isGenerating: true,
+        isSyncingHistory: false,
+      });
+      useAppStore.getState().connectWs();
+    });
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "stop",
+          chatId: "chat-1",
+          messageId: "assistant-empty",
+          generationId: "gen-1",
+          stopReason: "cancelled",
+          timings,
+        }),
+      });
+    });
+    expect(useAppStore.getState().messages).toHaveLength(0);
+
+    act(() => {
+      useAppStore.setState({
+        messages: [{ ...placeholder, id: "assistant-kept", content: "kept", rawContent: "kept" }],
+        isGenerating: true,
+      });
+    });
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "stop",
+          chatId: "chat-1",
+          messageId: "assistant-kept",
+          generationId: "gen-2",
+          stopReason: "cancelled",
+          fullContent: "kept going",
+          timings,
+        }),
+      });
+    });
+    expect(useAppStore.getState().messages.map((message) => message.content)).toEqual([
+      "kept going",
+    ]);
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  it("keeps at most 5000 log lines and preserves order after a chunk trim", () => {
+    const logs = Array.from({ length: 5000 }, (_, index) => `line-${index}`);
+    act(() => {
+      useAppStore.setState({ logs });
+    });
+    act(() => {
+      useAppStore.getState().addLog("info", "newest");
+    });
+    const stored = useAppStore.getState().logs;
+    expect(stored.length).toBeLessThanOrEqual(5000);
+    expect(stored[0]).toBe("line-500");
+    expect(stored.at(-1)).toBe("[info] newest");
+    expect(stored[1]).toBe("line-501");
   });
 });

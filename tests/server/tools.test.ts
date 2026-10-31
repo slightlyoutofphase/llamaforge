@@ -3,7 +3,12 @@
  * Tests for tool schema generation and response parsing utilities.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import calculateTool, {
+  __armCalculateWorkerDelay,
+  resolveCalculateWorkerUrl,
+  shutdownCalculateWorker,
+} from "../../src/server/builtinTools/calculate";
 import { generateGrammarFromSchema } from "../../src/server/tools";
 
 describe("tools", () => {
@@ -31,6 +36,15 @@ describe("tools", () => {
   });
 
   const { executeTool } = require("../../src/server/tools");
+
+  beforeAll(async () => {
+    const result = await executeTool("calculate", JSON.stringify({ expression: "1+1" }));
+    expect(JSON.parse(result).result).toBe(2);
+  }, 30_000);
+
+  afterAll(() => {
+    shutdownCalculateWorker();
+  });
 
   it("executes get_datetime tool", async () => {
     const result = await executeTool("get_datetime", "{}");
@@ -71,6 +85,99 @@ describe("tools", () => {
     const parsed = JSON.parse(result);
     expect(parsed.error).toContain("expression");
   });
+
+  it("resolves the calculate worker next to source and under the server bundle", () => {
+    const fromSource = resolveCalculateWorkerUrl();
+    expect(fromSource.pathname.replaceAll("\\", "/")).toEndWith("/builtinTools/calculateWorker.ts");
+
+    const fromBundle = resolveCalculateWorkerUrl("file:///D:/app/dist/server/index.js");
+    expect(fromBundle.pathname.replaceAll("\\", "/")).toEndWith(
+      "/dist/server/builtinTools/calculateWorker.js",
+    );
+  });
+
+  it("evaluates 1+1 through the calculate worker", async () => {
+    await expect(calculateTool.execute({ expression: "1+1" })).resolves.toEqual({ result: 2 });
+  });
+
+  it("keeps booleans and formats matrices, complex numbers, and units", async () => {
+    const comparison = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "1 < 2" })),
+    );
+    expect(comparison.result).toBe(true);
+
+    const matrix = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "[[1, 2], [3, 4]]" })),
+    );
+    expect(typeof matrix.result).toBe("string");
+    expect(matrix.result).toContain("1");
+    expect(matrix.result).toContain("4");
+
+    const complex = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "sqrt(-1)" })),
+    );
+    expect(typeof complex.result).toBe("string");
+    expect(complex.error).toBeUndefined();
+
+    const unit = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "2 cm + 3 cm" })),
+    );
+    expect(typeof unit.result).toBe("string");
+    expect(unit.result.toLowerCase()).toContain("cm");
+  });
+
+  it("rejects oversized calculate expressions and allocations without blocking", async () => {
+    const tooLong = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: `1${"0".repeat(1000)}` })),
+    );
+    expect(tooLong.error).toContain("1,000");
+
+    const started = Date.now();
+    const hugeRange = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "range(0, 1e9)" })),
+    );
+    expect(hugeRange.error).toContain("10,000");
+    expect(Date.now() - started).toBeLessThan(1_000);
+
+    const colonRange = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "0:1e9" })),
+    );
+    expect(colonRange.error).toContain("10,000");
+
+    const hugeZeros = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "zeros(1e5, 1e5)" })),
+    );
+    expect(hugeZeros.error).toContain("10,000");
+
+    const recovered = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "1+1" })),
+    );
+    expect(recovered.result).toBe(2);
+  });
+
+  it("times out a stalled calculation and still evaluates the next one", async () => {
+    await __armCalculateWorkerDelay(10_000);
+    const started = Date.now();
+    let ticks = 0;
+    const timer = setInterval(() => {
+      ticks += 1;
+    }, 50);
+    try {
+      const stalled = JSON.parse(
+        await executeTool("calculate", JSON.stringify({ expression: "1+1" })),
+      );
+      expect(stalled.error).toBe("Calculation timed out.");
+      expect(Date.now() - started).toBeLessThan(4_000);
+      expect(ticks).toBeGreaterThan(5);
+    } finally {
+      clearInterval(timer);
+    }
+
+    const recovered = JSON.parse(
+      await executeTool("calculate", JSON.stringify({ expression: "1+1" })),
+    );
+    expect(recovered.result).toBe(2);
+  }, 30_000);
 
   it("executes the in-repo echo_text user tool", async () => {
     const result = await executeTool("echo_text", JSON.stringify({ text: "hello from bun" }));

@@ -82,6 +82,8 @@ interface AppState {
   } | null;
   /** Whether a generation is currently in progress. */
   isGenerating: boolean;
+  /** True from the start of a send until the POST finishes, before generation streaming. */
+  isSending: boolean;
   /** Whether generation is paused pending tool-call approval. */
   isWaitingForToolApproval: boolean;
   /** Real-time statistics for the ongoing or last generation. */
@@ -196,7 +198,7 @@ interface AppState {
     toolCallId: string,
     approved: boolean,
     editedArguments?: string,
-  ) => void;
+  ) => Promise<void>;
 }
 
 let ws: WebSocket | null = null;
@@ -223,6 +225,46 @@ function compactTokenFrame(
 // M6 fix: guard against duplicate sends from rapid clicks
 let sendInProgress = false;
 let activeChatLoadRequestId = 0;
+/** Identifies the newest "load older messages" request so a stale page cannot merge. */
+let olderPageRequestId = 0;
+/** True while one older-page request is waiting on the server. */
+let olderPageInFlight = false;
+/**
+ * Fetches context usage for one chat and writes it when that chat is still current.
+ *
+ * @param targetChatId - Chat to measure, or `null` when nothing is open.
+ * @returns A promise that resolves once the store has been updated or the request failed.
+ */
+async function refreshContextUsageNow(targetChatId: string | null): Promise<void> {
+  if (!targetChatId) {
+    useAppStore.setState({ contextUsage: null });
+    return;
+  }
+  try {
+    const res = await fetch(`/api/chats/${targetChatId}/context-usage`);
+    if (!res.ok) {
+      if (useAppStore.getState().currentChatId === targetChatId) {
+        useAppStore.setState({
+          contextUsage: {
+            usedTokens: 0,
+            contextSize: useAppStore.getState().loadedConfig?.contextSize ?? null,
+          },
+        });
+      }
+      return;
+    }
+    const usage = (await res.json()) as ChatContextUsage;
+    if (useAppStore.getState().currentChatId !== targetChatId) return;
+    useAppStore.setState({ contextUsage: usage });
+  } catch (e: unknown) {
+    logDebug("Context usage refresh failed", e);
+  }
+}
+
+/** Chat id for the context-usage refresh coalesced into the current turn. */
+let pendingContextUsageChatId: string | null | undefined;
+/** In-flight coalesced context-usage refresh, shared by callers in the same turn. */
+let pendingContextUsage: Promise<void> | null = null;
 let latestRequestedChatId: string | null = null;
 let activeChatLoadController: AbortController | null = null;
 
@@ -234,13 +276,57 @@ let activeChatLoadController: AbortController | null = null;
  * @returns A trimmed log buffer containing the new line.
  */
 function appendLogLine(logs: string[], line: string): string[] {
-  if (logs.length < MAX_LOG_LINES) return logs.concat(line);
-  const next = new Array<string>(MAX_LOG_LINES);
-  for (let index = 1; index < logs.length; index++) {
-    next[index - 1] = logs[index] ?? "";
+  const next = logs.concat(line);
+  if (next.length <= MAX_LOG_LINES) return next;
+  const dropCount = Math.max(1, Math.floor(MAX_LOG_LINES * 0.1));
+  return next.slice(dropCount);
+}
+
+const queuedLogLines: string[] = [];
+let liveLogFrameHandle: number | null = null;
+
+/**
+ * Writes queued log lines in one store update.
+ *
+ * @returns No return value.
+ */
+function flushQueuedLogLines(): void {
+  if (liveLogFrameHandle !== null && typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(liveLogFrameHandle);
   }
-  next[MAX_LOG_LINES - 1] = line;
-  return next;
+  liveLogFrameHandle = null;
+  const batch = queuedLogLines.splice(0);
+  if (batch.length === 0) return;
+  useAppStore.setState((state) => {
+    let logs = state.logs;
+    for (const line of batch) logs = appendLogLine(logs, line);
+    return { logs };
+  });
+}
+
+/**
+ * Queues a log line so a burst of log frames becomes one render.
+ *
+ * Tests apply the line immediately because Happy DOM does not flush animation
+ * frames inside `act`.
+ *
+ * @param line - Formatted log line.
+ * @returns No return value.
+ */
+function enqueueLogLine(line: string): void {
+  queuedLogLines.push(line);
+  if (liveLogFrameHandle !== null) return;
+  const immediate =
+    typeof requestAnimationFrame !== "function" ||
+    Boolean((globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT);
+  if (immediate) {
+    flushQueuedLogLines();
+    return;
+  }
+  liveLogFrameHandle = requestAnimationFrame(() => {
+    liveLogFrameHandle = null;
+    flushQueuedLogLines();
+  });
 }
 
 const queuedLiveTokenFrames: WsTokenFrame[] = [];
@@ -709,6 +795,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentChatId: null,
   currentChatMetadata: null,
   isGenerating: false,
+  isSending: false,
   isWaitingForToolApproval: false,
   currentGenerationId: null,
   generationStats: null,
@@ -741,8 +828,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   removeNotification: (id) =>
     set((state) => ({ notifications: state.notifications.filter((note) => note.id !== id) })),
-  addLog: (level, body) =>
-    set((state) => ({ logs: appendLogLine(state.logs, `[${level}] ${body}`) })),
+  addLog: (level, body) => {
+    enqueueLogLine(`[${level}] ${body}`);
+  },
   clearUnreadChat: (chatId) =>
     set((state) => ({ unreadChatIds: state.unreadChatIds.filter((id) => id !== chatId) })),
 
@@ -905,7 +993,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             };
           });
         } else if (frame.type === "log") {
-          set((state) => ({ logs: appendLogLine(state.logs, `[${frame.level}] ${frame.body}`) }));
+          enqueueLogLine(`[${frame.level}] ${frame.body}`);
         } else if (frame.type === "token") {
           enqueueLiveTokenFrame(frame);
         } else if (frame.type === "stop") {
@@ -938,13 +1026,34 @@ export const useAppStore = create<AppState>((set, get) => ({
               },
             );
             if (targetIndex >= 0) {
-              const nextMsg = { ...nextMessages[targetIndex] } as ChatMessage;
-              if (frame.fullContent !== undefined) nextMsg.content = frame.fullContent;
-              if (frame.fullRawContent !== undefined) nextMsg.rawContent = frame.fullRawContent;
-              if (frame.fullThinking !== undefined) nextMsg.thinkingContent = frame.fullThinking;
-              nextMsg.metrics = messageMetrics;
-              nextMessages[targetIndex] = nextMsg;
-            } else if (state.isGenerating) {
+              const existing = nextMessages[targetIndex];
+              const incomingContent = frame.fullContent ?? "";
+              const incomingThinking = frame.fullThinking ?? "";
+              const removeEmptyCancel =
+                frame.stopReason === "cancelled" &&
+                incomingContent.length === 0 &&
+                incomingThinking.length === 0 &&
+                existing?.role === "assistant" &&
+                existing.content.length === 0 &&
+                !existing.thinkingContent;
+              if (removeEmptyCancel) {
+                nextMessages.splice(targetIndex, 1);
+              } else if (existing) {
+                const nextMsg = { ...existing };
+                if (frame.fullContent !== undefined) nextMsg.content = frame.fullContent;
+                if (frame.fullRawContent !== undefined) nextMsg.rawContent = frame.fullRawContent;
+                if (frame.fullThinking !== undefined) nextMsg.thinkingContent = frame.fullThinking;
+                nextMsg.metrics = messageMetrics;
+                nextMessages[targetIndex] = nextMsg;
+              }
+            } else if (
+              state.isGenerating &&
+              !(
+                frame.stopReason === "cancelled" &&
+                (frame.fullContent ?? "").length === 0 &&
+                (frame.fullThinking ?? "").length === 0
+              )
+            ) {
               nextMessages.push({
                 id: frame.messageId,
                 chatId: frame.chatId,
@@ -1194,6 +1303,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         },
       ],
       isGenerating: true,
+      isSending: true,
       isWaitingForToolApproval: false,
       generationStats: null,
       totalMessages: s.totalMessages + 1,
@@ -1254,17 +1364,32 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       if (!res.ok) {
         const errorBody = await res.text().catch(() => "");
+        let parsedError: string | undefined;
+        let parsedCode: string | undefined;
+        if (errorBody.length > 0) {
+          try {
+            const parsed = JSON.parse(errorBody) as { error?: unknown; code?: unknown };
+            if (typeof parsed.error === "string" && parsed.error.length > 0) {
+              parsedError = parsed.error;
+            }
+            if (typeof parsed.code === "string") {
+              parsedCode = parsed.code;
+            }
+          } catch {
+            parsedError = undefined;
+          }
+        }
         logWarn("Message send returned non-OK response", {
           url: requestUrl,
           hasAttachments,
           status: res.status,
           bodyLength: errorBody.length,
         });
-        if (res.status === 409) {
+        if (parsedCode === "TRANSCRIPT_MISMATCH") {
           await get().loadChat(chatId);
           throw new Error("Chat history was out of date and has been reloaded. Please send again.");
         }
-        throw new Error(`Server returned ${res.status}${errorBody ? `: ${errorBody}` : ""}`);
+        throw new Error(parsedError ?? "Message send failed.");
       }
       set({ errorMessage: null });
     } catch (err: unknown) {
@@ -1291,8 +1416,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       }));
       throw err;
     } finally {
-      // M6 fix: always clear the send guard
       sendInProgress = false;
+      set({ isSending: false });
     }
   },
 
@@ -1500,8 +1625,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadMoreMessages: async () => {
+    if (olderPageInFlight) return;
     const state = get();
-    if (!state.currentChatId) return;
+    const chatId = state.currentChatId;
+    if (!chatId) return;
     const currentCount = state.messages.length;
     if (currentCount >= state.totalMessages) return;
     const oldestPosition = state.messages.reduce(
@@ -1509,15 +1636,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       Number.POSITIVE_INFINITY,
     );
     if (!Number.isFinite(oldestPosition)) return;
+    const requestId = ++olderPageRequestId;
+    olderPageInFlight = true;
     try {
       const res = await fetch(
-        `/api/chats/${state.currentChatId}?messageLimit=500&beforePosition=${oldestPosition}`,
+        `/api/chats/${chatId}?messageLimit=500&beforePosition=${oldestPosition}`,
       );
       if (!res.ok) return;
-      const chat = await res.json();
-      const olderMessages = (chat.messages || []) as ChatMessage[];
+      const chat = (await res.json()) as { messages?: ChatMessage[]; totalMessages?: number };
+      const olderMessages = chat.messages ?? [];
       if (olderMessages.length === 0) return;
+      if (requestId !== olderPageRequestId || get().currentChatId !== chatId) return;
       set((s) => {
+        if (s.currentChatId !== chatId) return s;
         const existingIds = new Set(s.messages.map((m) => m.id));
         const unique = olderMessages.filter((m) => !existingIds.has(m.id));
         return {
@@ -1527,6 +1658,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     } catch (e) {
       logError("Failed to load more messages", e);
+    } finally {
+      olderPageInFlight = false;
     }
   },
 
@@ -1703,31 +1836,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  refreshContextUsage: async (chatId?: string | null) => {
-    const targetChatId = chatId === undefined ? get().currentChatId : chatId;
-    if (!targetChatId) {
-      set({ contextUsage: null });
-      return;
-    }
-    try {
-      const res = await fetch(`/api/chats/${targetChatId}/context-usage`);
-      if (!res.ok) {
-        if (get().currentChatId === targetChatId) {
-          set({
-            contextUsage: {
-              usedTokens: 0,
-              contextSize: get().loadedConfig?.contextSize ?? null,
-            },
-          });
-        }
-        return;
-      }
-      const usage = (await res.json()) as ChatContextUsage;
-      if (get().currentChatId !== targetChatId) return;
-      set({ contextUsage: usage });
-    } catch (e: unknown) {
-      logDebug("Context usage refresh failed", e);
-    }
+  refreshContextUsage: (chatId?: string | null) => {
+    pendingContextUsageChatId = chatId;
+    if (pendingContextUsage) return pendingContextUsage;
+    pendingContextUsage = Promise.resolve().then(async () => {
+      const targetChatId =
+        pendingContextUsageChatId === undefined ? get().currentChatId : pendingContextUsageChatId;
+      pendingContextUsage = null;
+      await refreshContextUsageNow(targetChatId);
+    });
+    return pendingContextUsage;
   },
 
   refreshProcessUsage: async () => {
@@ -1785,7 +1903,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         body: JSON.stringify(config),
       });
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
+        const body = (await res.json().catch(() => ({}))) as { error?: unknown; code?: unknown };
+        if (body.code === "LOAD_CANCELLED") {
+          set({
+            serverStatus: "idle",
+            loadProgress: 0,
+            loadProgressPhase: null,
+            loadProgressDetail: null,
+            errorMessage: null,
+            errorActionLabel: null,
+            errorAction: null,
+          });
+          restoreGenerationFence();
+          return false;
+        }
         const errorMessage = body?.error
           ? String(body.error)
           : `Failed to load model: ${res.status}`;
@@ -1878,24 +2009,41 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  approveToolCall: (
-    messageId: string,
-    toolCallId: string,
-    approved: boolean,
-    editedArguments?: string,
-  ) => {
-    const state = get();
-    if (ws && ws.readyState === WebSocket.OPEN && state.currentChatId) {
-      ws.send(
-        JSON.stringify({
-          type: "tool_approval",
-          chatId: state.currentChatId,
-          messageId,
-          toolCallId,
-          approved,
-          editedArguments,
-        }),
+  approveToolCall: async (_messageId, toolCallId, approved, editedArguments) => {
+    const chatId = get().currentChatId;
+    if (!chatId) {
+      get().addNotification("No chat is open for this tool approval.", "error");
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/chats/${encodeURIComponent(chatId)}/tool-approvals/${encodeURIComponent(toolCallId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            approved,
+            ...(editedArguments !== undefined ? { editedArguments } : {}),
+          }),
+        },
       );
+      if (res.ok) return;
+      const errorBody = await res.text().catch(() => "");
+      let message = "Tool approval failed.";
+      if (errorBody.length > 0) {
+        try {
+          const parsed = JSON.parse(errorBody) as { error?: unknown };
+          if (typeof parsed.error === "string" && parsed.error.length > 0) {
+            message = parsed.error;
+          }
+        } catch {
+          message = errorBody;
+        }
+      }
+      get().addNotification(message, "error");
+    } catch (err: unknown) {
+      logError("Tool approval failed", err);
+      get().addNotification(err instanceof Error ? err.message : "Tool approval failed.", "error");
     }
   },
 }));

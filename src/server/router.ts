@@ -14,14 +14,14 @@ import type {
 } from "../shared/types";
 import { serveAttachmentFile } from "./attachmentServe";
 import { getHardwareInfo } from "./hardwareProbe";
-import { getServerStatus, loadModel, requestUnloadModel } from "./llamaServer";
+import { getServerStatus, LoadCancelledError, loadModel, requestUnloadModel } from "./llamaServer";
 import { logAccess, logError, logInfo, logWarn } from "./logger";
 import { populateMetadata, scanModels } from "./modelScanner";
 import { isAllowedMutationOrigin, isAllowedWebSocketOrigin, isMutatingMethod } from "./origin";
-import { getAppDataDir } from "./persistence/db";
+import { getAppDataDir, getDb } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
 import { getUserToolDirectories, listAvailableTools } from "./toolRegistry";
-import { dispatchClientFrame, handleClientSocketClosed } from "./wsControl";
+import { dispatchClientFrame, handleClientSocketClosed, observeWebSocketTask } from "./wsControl";
 import { addConnection, recordPong, removeConnection } from "./wsHub";
 
 /**
@@ -285,6 +285,28 @@ function resolveContainedPath(root: string, relativePath: string): string | null
   const relative = path.relative(absRoot, absPath);
   if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
   return absPath;
+}
+
+/**
+ * Reads the human-readable name stored for an attachment path.
+ *
+ * @param storedPath - `file_path` from the request, matching the attachments row.
+ * @returns The original file name, or `null` when no row matches.
+ */
+function lookupAttachmentFileName(storedPath: string): string | null {
+  const filePath = storedPath.replace(/\\/g, "/");
+  try {
+    const row = getDb()
+      .query<{ file_name: string }, [string]>(
+        "SELECT file_name FROM attachments WHERE file_path = ? LIMIT 1",
+      )
+      .get(filePath);
+    const name = row?.file_name?.trim();
+    return name ? name : null;
+  } catch (err: unknown) {
+    logError("Attachment name lookup failed", err);
+    return null;
+  }
 }
 
 /**
@@ -574,6 +596,9 @@ export function createRouter() {
           );
           return jsonResponse({ port });
         } catch (err: unknown) {
+          if (err instanceof LoadCancelledError) {
+            return jsonResponse({ error: err.message, code: "LOAD_CANCELLED" }, 409);
+          }
           const errorMsg = err instanceof Error ? err.message : String(err);
           return jsonResponse({ error: errorMsg, code: "LOAD_FAILED" }, 500);
         }
@@ -753,10 +778,7 @@ export function createRouter() {
             });
             return jsonResponse({ messageId });
           } catch (e: unknown) {
-            return jsonResponse(
-              { error: e instanceof Error ? e.message : "Chat message send failed." },
-              500,
-            );
+            return routeErrorResponse(e, "Chat message send failed.");
           }
         }
       }
@@ -883,6 +905,13 @@ export function createRouter() {
             const body = await readJsonObject(req);
             if (body instanceof Response) return body;
             const format = getStringField(body, "format") === "markdown" ? "markdown" : "json";
+            if (format === "json") {
+              const stream = await chatRepo.openChatJsonExport(id);
+              if (!stream) return new Response("Not Found", { status: 404 });
+              return new Response(stream, {
+                headers: { "Content-Type": "application/json; charset=utf-8" },
+              });
+            }
             const exported = await chatRepo.exportChat(id, format);
             return new Response(exported, {
               headers: {
@@ -1116,6 +1145,35 @@ export function createRouter() {
             return jsonResponse({ success: true });
           }
         }
+        if (req.method === "POST" && parts.length === 6 && parts[4] === "tool-approvals") {
+          const toolCallId = parts[5] as string;
+          if (!toolCallId) {
+            return badRequest("Tool approval requires a tool call id.");
+          }
+          const body = await readJsonObject(req);
+          if (body instanceof Response) return body;
+          if (typeof body["approved"] !== "boolean") {
+            return badRequest("Tool approval requires an approved boolean.");
+          }
+          const edited = body["editedArguments"];
+          if (edited !== undefined && typeof edited !== "string") {
+            return badRequest("editedArguments must be a string.");
+          }
+          const { resolveToolApproval } = await import("./tools");
+          const outcome = resolveToolApproval(
+            toolCallId,
+            body["approved"],
+            typeof edited === "string" ? edited : undefined,
+            id,
+          );
+          if (outcome === "not_found") {
+            return jsonResponse({ error: "No tool approval is pending." }, 404);
+          }
+          if (outcome === "chat_mismatch") {
+            return jsonResponse({ error: "Tool approval does not belong to this chat." }, 409);
+          }
+          return jsonResponse({ success: true });
+        }
       }
       if (req.method === "POST" && url.pathname === "/api/chats/import") {
         const contentLength = Number(req.headers.get("content-length") || "0");
@@ -1177,13 +1235,29 @@ export function createRouter() {
               throw err;
             }
           } else if (type === "inference") {
-            await presetRepo.createInferencePreset(
-              body as unknown as import("../shared/types").InferencePreset,
-            );
+            try {
+              presetRepo.assertWritableInferencePreset(body);
+              await presetRepo.createInferencePreset(
+                body as unknown as import("../shared/types").InferencePreset,
+              );
+            } catch (err: unknown) {
+              if (err instanceof presetRepo.PresetValidationError) {
+                return badRequest(err.message);
+              }
+              throw err;
+            }
           } else {
-            await presetRepo.createSystemPreset(
-              body as unknown as import("../shared/types").SystemPromptPreset,
-            );
+            try {
+              presetRepo.assertWritableSystemPreset(body);
+              await presetRepo.createSystemPreset(
+                body as unknown as import("../shared/types").SystemPromptPreset,
+              );
+            } catch (err: unknown) {
+              if (err instanceof presetRepo.PresetValidationError) {
+                return badRequest(err.message);
+              }
+              throw err;
+            }
           }
           return jsonResponse({ success: true });
         }
@@ -1197,6 +1271,13 @@ export function createRouter() {
           let result: import("./persistence/presetRepo").PresetMutationResult = "updated";
           if (type === "load") {
             try {
+              if (
+                Object.hasOwn(body, "chatTemplateOverride") &&
+                body["chatTemplateOverride"] !== null &&
+                typeof body["chatTemplateOverride"] !== "string"
+              ) {
+                return badRequest("chatTemplateOverride must be a string or null.");
+              }
               if (body["config"] !== undefined) {
                 presetRepo.assertWritableLoadPresetConfig(body["config"]);
               }
@@ -1208,12 +1289,31 @@ export function createRouter() {
               throw err;
             }
           } else if (type === "inference") {
-            result = await presetRepo.updateInferencePreset(id, body);
+            const rejected = ["isDefault", "sourceModelPath"].filter((key) =>
+              Object.hasOwn(body, key),
+            );
+            if (rejected.length > 0) {
+              return badRequest(
+                `${rejected.join(" and ")} cannot be changed through the inference preset update.`,
+              );
+            }
+            try {
+              presetRepo.assertWritableInferencePreset(body);
+              result = await presetRepo.updateInferencePreset(id, body);
+            } catch (err: unknown) {
+              if (err instanceof presetRepo.PresetValidationError) {
+                return badRequest(err.message);
+              }
+              throw err;
+            }
           } else {
             result = await presetRepo.updateSystemPreset(id, body);
           }
           if (result === "not_found") {
             return jsonResponse({ error: "Preset not found." }, 404);
+          }
+          if (result === "protected") {
+            return jsonResponse({ error: "Preset is protected and cannot be modified." }, 403);
           }
           return jsonResponse({ success: true });
         }
@@ -1274,7 +1374,9 @@ export function createRouter() {
         }
         const file = Bun.file(absPath);
         if (await file.exists()) {
-          return serveAttachmentFile(absPath, req);
+          return serveAttachmentFile(absPath, req, {
+            downloadName: lookupAttachmentFileName(attachPath),
+          });
         }
         return new Response("Not Found", { status: 404 });
       }
@@ -1290,7 +1392,7 @@ export function createRouter() {
        * @returns No return value.
        */
       message(ws: ServerWebSocket<unknown>, message: string | Buffer) {
-        void dispatchClientFrame(ws, message);
+        observeWebSocketTask(dispatchClientFrame(ws, message));
       },
       /**
        * Registers a newly opened WebSocket connection.
@@ -1319,7 +1421,7 @@ export function createRouter() {
        */
       close(ws: ServerWebSocket<unknown>) {
         removeConnection(ws);
-        void handleClientSocketClosed();
+        observeWebSocketTask(handleClientSocketClosed());
       },
     },
   };

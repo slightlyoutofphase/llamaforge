@@ -61,4 +61,20 @@ describe("attachmentServe", () => {
     expect(Number(full.headers.get("Content-Length"))).toBe(file.size);
     expect((await full.arrayBuffer()).byteLength).toBe(file.size);
   });
+
+  it("uses the original file name and falls back to the basename when none is stored", async () => {
+    const named = await serveAttachmentFile(
+      TEST_VID_PATH,
+      new Request("http://localhost/ignored"),
+      { downloadName: 'holiday".jpg' },
+    );
+    expect(named.headers.get("Content-Disposition")).toContain('filename="holiday.jpg"');
+
+    const missing = await serveAttachmentFile(
+      TEST_VID_PATH,
+      new Request("http://localhost/ignored"),
+      { downloadName: null },
+    );
+    expect(missing.headers.get("Content-Disposition")).toContain('filename="test_vid.mp4"');
+  });
 });

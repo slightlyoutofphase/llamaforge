@@ -3,7 +3,7 @@
  * Provides the main chat input bar, handling file uploads and text entry.
  */
 
-import { Paperclip, Plus, Send, X } from "lucide-react";
+import { Loader2, Paperclip, Plus, Send, X } from "lucide-react";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
@@ -84,6 +84,8 @@ interface InputBarProps {
   onSend: (content: string, files: File[]) => void | Promise<void>;
   /** Whether the model is currently generating a response. */
   isGenerating: boolean;
+  /** True while the send POST is in flight and Stop should not be offered. */
+  isSending?: boolean;
   /** Whether a chat session is currently active and accepts messages. */
   isActive: boolean;
   /** Callback to stop generation. */
@@ -109,6 +111,7 @@ interface InputBarProps {
 export function InputBar({
   onSend,
   isGenerating,
+  isSending = false,
   isActive,
   onStop,
   conversationId,
@@ -192,7 +195,7 @@ export function InputBar({
     onDropRejected,
     noClick: true,
     noKeyboard: true,
-    disabled: composerLocked || isGenerating,
+    disabled: composerLocked || isGenerating || isSending,
     maxFiles: MAX_COMPOSER_FILES,
     accept: {
       "image/*": [],
@@ -209,23 +212,32 @@ export function InputBar({
    * @returns A promise that resolves once the send workflow completes.
    */
   const handleSend = async () => {
-    if (!isActive || historyLocked || isGenerating) return;
+    if (!isActive || historyLocked || isGenerating || isSending) return;
     if (!inputContent.trim() && files.length === 0) return;
 
+    const sentText = inputContent;
     const pendingFiles = [...files];
+    const sentIds = new Set(pendingFiles.map((item) => item.id));
     const filesToSend = await Promise.all(pendingFiles.map(({ file }) => cloneFile(file)));
 
     try {
-      await Promise.resolve(onSend(inputContent, filesToSend));
+      await Promise.resolve(onSend(sentText, filesToSend));
     } catch {
       return;
     }
 
-    for (const file of pendingFiles) {
-      revokePreviewUrl(file.previewUrl);
-    }
-    setInputContent("");
-    setFiles([]);
+    setInputContent((current) => (current === sentText ? "" : current));
+    setFiles((currentFiles) => {
+      const kept: PendingAttachment[] = [];
+      for (const item of currentFiles) {
+        if (sentIds.has(item.id)) {
+          revokePreviewUrl(item.previewUrl);
+          continue;
+        }
+        kept.push(item);
+      }
+      return kept;
+    });
   };
 
   /**
@@ -237,7 +249,7 @@ export function InputBar({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing || e.key === "Process") return;
     if (e.key === "Enter" && !e.shiftKey) {
-      if (isGenerating) return;
+      if (isGenerating || isSending) return;
       e.preventDefault();
       void handleSend();
     }
@@ -304,7 +316,7 @@ export function InputBar({
         <button
           type="button"
           onClick={open}
-          disabled={composerLocked || isGenerating}
+          disabled={composerLocked || isGenerating || isSending}
           className="p-2 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-elevated)] rounded-xl transition-all mr-2 shrink-0 mb-1 disabled:opacity-50 disabled:cursor-not-allowed"
           title="Attach files (Images, Audio, Video, PDF, Text)">
           <Plus size={20} />
@@ -333,16 +345,21 @@ export function InputBar({
 
         <button
           type="button"
-          onClick={isGenerating ? onStop : handleSend}
-          disabled={!isActive || historyLocked}
+          aria-label={isSending ? "Sending" : isGenerating ? "Stop generation" : "Send message"}
+          onClick={isGenerating && !isSending ? onStop : handleSend}
+          disabled={!isActive || historyLocked || isSending}
           className={`p-2 ml-2 rounded-xl transition-all shrink-0 mb-1 disabled:opacity-50 disabled:cursor-not-allowed ${
-            isGenerating
-              ? "bg-[var(--color-error)] text-white shadow-md"
-              : inputContent.trim() || files.length > 0
-                ? "bg-[var(--color-accent)] text-white shadow-md"
-                : "text-[var(--color-text-muted)] bg-[var(--color-surface-elevated)]"
+            isSending
+              ? "bg-[var(--color-accent)] text-white shadow-md"
+              : isGenerating
+                ? "bg-[var(--color-error)] text-white shadow-md"
+                : inputContent.trim() || files.length > 0
+                  ? "bg-[var(--color-accent)] text-white shadow-md"
+                  : "text-[var(--color-text-muted)] bg-[var(--color-surface-elevated)]"
           }`}>
-          {isGenerating ? (
+          {isSending ? (
+            <Loader2 size={20} className="animate-spin" />
+          ) : isGenerating ? (
             <div className="w-5 h-5 flex items-center justify-center">
               <div className="w-2 h-2 bg-white rounded-sm animate-pulse" />
             </div>

@@ -28,20 +28,6 @@ export const queryKeys = {
 // --- Chats ---
 
 /**
- * Hook to retrieve all chat sessions, optionally filtered by a search query.
- *
- * @param q - Optional search string to filter chat names.
- * @returns A query object containing the list of {@link ChatSession} summaries.
- */
-export function useChats(q?: string) {
-  const query = q?.trim() ? q : undefined;
-  return useQuery({
-    queryKey: queryKeys.chats(query),
-    queryFn: () => api.fetchChats(query),
-  });
-}
-
-/**
  * Custom React Query hook to perform infinite querying of chats with support for a search string.
  *
  * @param q - Search query string to filter chats by name.

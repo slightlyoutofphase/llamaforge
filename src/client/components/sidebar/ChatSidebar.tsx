@@ -112,13 +112,18 @@ export function ChatSidebar() {
   const handleSaveRename = async (id: string, e: React.SyntheticEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    if (updateMut.isPending) return;
     const name = editValue.trim();
     if (!name) {
       addNotification("Chat name cannot be empty.", "error");
       return;
     }
-    await updateMut.mutateAsync({ id, updates: { name } });
-    setEditingId(null);
+    try {
+      await updateMut.mutateAsync({ id, updates: { name } });
+      setEditingId(null);
+    } catch (err: unknown) {
+      addNotification(err instanceof Error ? err.message : "Failed to rename chat.", "error");
+    }
   };
 
   /**
@@ -369,12 +374,21 @@ export function ChatSidebar() {
                         onChange={(e) => setEditValue(e.target.value)}
                         className="bg-[var(--color-bg)] border border-[var(--color-accent)] rounded px-1 py-0.5 text-sm w-full outline-none"
                         onClick={(e) => e.stopPropagation()}
-                        onKeyDown={(e) => e.key === "Enter" && handleSaveRename(c.id, e)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void handleSaveRename(c.id, e);
+                          if (e.key === "Escape") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setEditingId(null);
+                          }
+                        }}
                       />
                       <button
                         type="button"
-                        onClick={(e) => handleSaveRename(c.id, e)}
-                        className="p-1 hover:text-[var(--color-success)]">
+                        aria-label="Save rename"
+                        disabled={updateMut.isPending}
+                        onClick={(e) => void handleSaveRename(c.id, e)}
+                        className="p-1 hover:text-[var(--color-success)] disabled:opacity-50">
                         <Check size={12} />
                       </button>
                       <button

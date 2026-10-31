@@ -576,6 +576,85 @@ export async function getChat(
 }
 
 /**
+ * Loads the chat fields the prompt builder reads.
+ *
+ * Message rows omit `metrics_json`. Attachment rows are loaded only for messages
+ * that actually have attachments.
+ *
+ * @param id - Chat session identifier.
+ * @returns The chat and its prompt messages, or `null` when the chat does not exist.
+ */
+export async function getChatForPrompt(id: string): Promise<ChatSession | null> {
+  const db = getDb();
+  const chatRow = db
+    .query<ChatSession, [string]>(
+      "SELECT id, name, created_at as createdAt, updated_at as updatedAt, parent_id as parentId, is_branch as isBranch, model_path as modelPath, system_preset_id as systemPresetId, inference_preset_id as inferencePresetId FROM chats WHERE id = ?",
+    )
+    .get(id);
+  if (!chatRow) return null;
+
+  const chat = {
+    ...chatRow,
+    isBranch: Boolean(chatRow.isBranch),
+  } as ChatSession;
+  const messages = db
+    .query<ChatMessageRow, [string]>(
+      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson FROM messages WHERE chat_id = ? ORDER BY position ASC",
+    )
+    .all(id)
+    .map(hydrateChatMessage);
+  chat.messages = messages;
+
+  const attached = db
+    .query<{ messageId: string }, [string]>(
+      "SELECT DISTINCT message_id as messageId FROM attachments WHERE message_id IN (SELECT id FROM messages WHERE chat_id = ?)",
+    )
+    .all(id);
+  if (attached.length === 0) {
+    for (const message of messages) message.attachments = [];
+    return chat;
+  }
+
+  const placeholders = attached.map(() => "?").join(",");
+  const attachmentRows = db
+    .query<
+      {
+        id: string;
+        messageId: string;
+        mimeType: string;
+        filePath: string;
+        fileName: string;
+        virBudget: number | null;
+        createdAt: number;
+        textTruncated: number;
+      },
+      string[]
+    >(
+      `SELECT id, message_id as messageId, mime_type as mimeType, file_path as filePath, file_name as fileName, vir_budget as virBudget, created_at as createdAt, text_truncated as textTruncated FROM attachments WHERE message_id IN (${placeholders})`,
+    )
+    .all(...attached.map((row) => row.messageId));
+  const attachmentsByMessage = new Map<string, Attachment[]>();
+  for (const row of attachmentRows) {
+    const list = attachmentsByMessage.get(row.messageId) ?? [];
+    list.push({
+      id: row.id,
+      messageId: row.messageId,
+      mimeType: row.mimeType,
+      filePath: row.filePath,
+      fileName: row.fileName,
+      virBudget: row.virBudget ?? undefined,
+      createdAt: row.createdAt,
+      ...(row.textTruncated ? { textTruncated: true } : {}),
+    });
+    attachmentsByMessage.set(row.messageId, list);
+  }
+  for (const message of messages) {
+    message.attachments = attachmentsByMessage.get(message.id) ?? [];
+  }
+  return chat;
+}
+
+/**
  * Updates metadata for an existing chat session.
  *
  * @param id - The unique UUID of the chat session.
@@ -1087,66 +1166,145 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
  * @param format - Export format: "json" (full object) or "markdown" (formatted text).
  * @returns The stringified representation of the chat.
  */
-export async function exportChat(chatId: string, format: "json" | "markdown"): Promise<string> {
+/**
+ * Opens a JSON export that encodes one attachment at a time.
+ *
+ * @param chatId - Chat to export.
+ * @returns A UTF-8 stream of pretty-printed chat JSON, or `null` when the chat is missing.
+ */
+export async function openChatJsonExport(
+  chatId: string,
+): Promise<ReadableStream<Uint8Array> | null> {
   const chat = await getChat(chatId);
-  if (!chat) throw new Error("Chat not found");
+  if (!chat) return null;
+  const messages = chat.messages ?? [];
+  const shell = { ...chat, messages: [] as ChatMessage[] };
+  const skeleton = JSON.stringify(shell, null, 2);
+  const token = '  "messages": []';
+  const tokenAt = skeleton.lastIndexOf(token);
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    async start(controller) {
+      if (tokenAt < 0) {
+        controller.enqueue(encoder.encode(JSON.stringify(chat, null, 2)));
+        controller.close();
+        return;
+      }
+      controller.enqueue(encoder.encode(`${skeleton.slice(0, tokenAt)}  "messages": [`));
+      for (let index = 0; index < messages.length; index++) {
+        const message = messages[index];
+        if (!message) continue;
+        const exported = await messageForExport(message);
+        const block = JSON.stringify(exported, null, 2)
+          .split("\n")
+          .map((line) => (line.length === 0 ? line : `    ${line}`))
+          .join("\n");
+        controller.enqueue(encoder.encode(`${index === 0 ? "\n" : ",\n"}${block}`));
+      }
+      controller.enqueue(encoder.encode(`\n  ]${skeleton.slice(tokenAt + token.length)}`));
+      controller.close();
+    },
+  });
+}
 
+/** Observes each attachment file read during export. Tests use this to prove reads do not overlap. */
+let exportAttachmentReadObserver: {
+  enter: (filePath: string) => void;
+  leave: (filePath: string) => void;
+} | null = null;
+
+/**
+ * Records when an export reads an attachment file.
+ *
+ * @param observer - Enter and leave callbacks around the file read, or `null` to stop recording.
+ * @returns No return value.
+ * @internal
+ */
+export function __setExportAttachmentReadObserver(
+  observer: { enter: (filePath: string) => void; leave: (filePath: string) => void } | null,
+): void {
+  exportAttachmentReadObserver = observer;
+}
+
+/**
+ * Copies one message and base64-encodes its attachments one file at a time.
+ *
+ * @param message - Stored message whose files should be embedded.
+ * @returns A message object safe to JSON-encode and then discard.
+ */
+async function messageForExport(message: ChatMessage): Promise<ChatMessage> {
   const db = getDb();
-  if (chat.messages) {
-    for (const m of chat.messages) {
-      const attachments = db
-        .query<
-          {
-            id: string;
-            message_id: string;
-            mime_type: string;
-            file_path: string;
-            file_name: string;
-            vir_budget: number | null;
-            created_at: number;
-            text_truncated: number;
-          },
-          [string]
-        >("SELECT * FROM attachments WHERE message_id = ?")
-        .all(m.id);
-      if (attachments.length > 0) {
-        m.attachments = await Promise.all(
-          attachments.map(async (att) => {
-            const fp = resolveAttachmentPath(att.file_path);
-            let b64 = "";
-            if (fp) {
-              try {
-                const bytes = await Bun.file(fp).bytes();
-                b64 = bytesToBase64(bytes);
-              } catch (_e) {
-                logWarn("[chatRepo] Missing attachment file during export", {
-                  filePath: att.file_path,
-                  messageId: m.id,
-                  attachmentId: att.id,
-                });
-                // ignore missing
-              }
-            }
-            return {
-              id: att.id,
-              messageId: m.id,
-              fileName: att.file_name,
-              mimeType: att.mime_type,
-              filePath: att.file_path,
-              createdAt: att.created_at,
-              virBudget: att.vir_budget ?? undefined,
-              ...(att.text_truncated ? { textTruncated: true } : {}),
-              base64Data: b64,
-            };
-          }),
-        );
+  const attachments = db
+    .query<
+      {
+        id: string;
+        message_id: string;
+        mime_type: string;
+        file_path: string;
+        file_name: string;
+        vir_budget: number | null;
+        created_at: number;
+        text_truncated: number;
+      },
+      [string]
+    >("SELECT * FROM attachments WHERE message_id = ?")
+    .all(message.id);
+  if (attachments.length === 0) return message;
+  const encoded = [];
+  for (const att of attachments) {
+    const fp = resolveAttachmentPath(att.file_path);
+    let base64Data = "";
+    if (fp) {
+      exportAttachmentReadObserver?.enter(fp);
+      try {
+        base64Data = bytesToBase64(await Bun.file(fp).bytes());
+      } catch (error) {
+        logWarn("[chatRepo] Missing attachment file during export", {
+          filePath: att.file_path,
+          messageId: message.id,
+          attachmentId: att.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        exportAttachmentReadObserver?.leave(fp);
       }
     }
+    encoded.push({
+      id: att.id,
+      messageId: message.id,
+      fileName: att.file_name,
+      mimeType: att.mime_type,
+      filePath: att.file_path,
+      createdAt: att.created_at,
+      virBudget: att.vir_budget ?? undefined,
+      ...(att.text_truncated ? { textTruncated: true as const } : {}),
+      base64Data,
+    });
+  }
+  return { ...message, attachments: encoded };
+}
+
+/**
+ * Exports one chat as a single string in the requested format.
+ *
+ * JSON comes from the same streaming writer the router serves, collected into one string.
+ * Markdown writes the chat name, then each message under its role heading, with any thinking
+ * content quoted above the reply.
+ *
+ * @param chatId - Chat to export.
+ * @param format - `"json"` for the import-compatible document, or `"markdown"` for a readable transcript.
+ * @returns The exported document text.
+ * @throws {Error} If the chat does not exist.
+ */
+export async function exportChat(chatId: string, format: "json" | "markdown"): Promise<string> {
+  if (format === "json") {
+    const stream = await openChatJsonExport(chatId);
+    if (!stream) throw new Error("Chat not found");
+    return await new Response(stream).text();
   }
 
-  if (format === "json") {
-    return JSON.stringify(chat, null, 2);
-  }
+  const chat = await getChat(chatId);
+  if (!chat) throw new Error("Chat not found");
 
   // markdown
   let md = `# ${chat.name}\n\n`;
@@ -1219,7 +1377,7 @@ export async function importChat(jsonContent: string): Promise<string> {
   // DB records for attachments whose files fail to write to disk.
   const fileWrites: {
     filePath: string;
-    base64Data: string;
+    bytes: Uint8Array;
     attId: string;
     newMsgId: string;
     mimeType: string;
@@ -1273,8 +1431,11 @@ export async function importChat(jsonContent: string): Promise<string> {
             }));
           const copiedNames = allocateCopiedAttachmentNames(importable);
           for (const att of importable) {
-            const decodedBytes = base64ToBytes(att.base64Data).byteLength;
-            if (decodedBytes > MAX_ATTACHMENT_SIZE_BYTES && !isExtractedVideoAudioAttachment(att)) {
+            const decoded = base64ToBytes(att.base64Data);
+            if (
+              decoded.byteLength > MAX_ATTACHMENT_SIZE_BYTES &&
+              !isExtractedVideoAudioAttachment(att)
+            ) {
               throw new Error(
                 `Imported attachment ${att.fileName || "unnamed"} exceeds the 10MB limit.`,
               );
@@ -1290,7 +1451,7 @@ export async function importChat(jsonContent: string): Promise<string> {
 
             fileWrites.push({
               filePath,
-              base64Data: att.base64Data,
+              bytes: decoded,
               attId,
               newMsgId,
               mimeType: att.mimeType,
@@ -1312,7 +1473,7 @@ export async function importChat(jsonContent: string): Promise<string> {
   for (const fw of fileWrites) {
     try {
       await fs.mkdir(path.dirname(fw.filePath), { recursive: true });
-      await Bun.write(fw.filePath, base64ToBytes(fw.base64Data));
+      await Bun.write(fw.filePath, fw.bytes);
       // File written successfully — now insert the DB record
       insertAttachment.run(
         fw.attId,

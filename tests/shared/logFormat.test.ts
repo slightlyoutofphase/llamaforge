@@ -19,4 +19,13 @@ describe("formatLogArgument", () => {
     box.self = box;
     expect(formatLogArgument(box)).toContain("[Circular]");
   });
+
+  it("prints a repeated sibling reference in full", () => {
+    const shared = { n: 1 };
+    const formatted = formatLogArgument({ a: shared, b: shared });
+    expect(formatted).not.toContain("[Circular]");
+    const parsed = JSON.parse(formatted) as { a: { n: number }; b: { n: number } };
+    expect(parsed.a).toEqual({ n: 1 });
+    expect(parsed.b).toEqual({ n: 1 });
+  });
 });

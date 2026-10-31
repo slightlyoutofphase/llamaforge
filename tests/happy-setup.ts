@@ -60,6 +60,13 @@ try {
   GlobalRegistrator.register();
 } catch (_e) {}
 
+// index.html starts with <!doctype html>, so browsers report standards mode. happy-dom
+// never sets compatMode. KaTeX reads it at import time and replaces its render() with a
+// throwing stub in quirks mode, so report standards mode here as the app page does.
+if (typeof document !== "undefined" && document.compatMode !== "CSS1Compat") {
+  Object.defineProperty(document, "compatMode", { value: "CSS1Compat", configurable: true });
+}
+
 // Happy DOM replaces web globals like fetch/Request/Response with its own
 // implementations. Server tests must keep Bun's native networking stack.
 restoreNativeWebGlobals();

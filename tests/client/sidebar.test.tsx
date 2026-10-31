@@ -217,6 +217,46 @@ describe("ChatSidebar Component", () => {
     expect(linkClickSpy).not.toHaveBeenCalled();
   });
 
+  it("shows a notification and stays in edit mode when rename fails", async () => {
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: {
+          pages: [[{ id: "chat-1", name: "First Chat", createdAt: 1000 }]],
+        },
+        isLoading: false,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), mutateAsync: mock(), isPending: false }),
+      useDeleteChat: () => ({ mutate: mock(), mutateAsync: mock(), isPending: false }),
+      useUpdateChat: () => ({
+        mutate: mock(),
+        mutateAsync: mock().mockRejectedValue(new Error("rename failed")),
+        isPending: false,
+      }),
+    }));
+    useAppStore.setState({ notifications: [], unreadChatIds: [] });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(screen.getByTitle("Rename"));
+    const renameInput = screen.getAllByRole("textbox").at(-1);
+    if (!renameInput) throw new Error("expected a rename input");
+    fireEvent.change(renameInput, { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save rename" }));
+    await waitFor(() => {
+      expect(
+        useAppStore.getState().notifications.some((note) => note.message.includes("rename failed")),
+      ).toBe(true);
+    });
+    expect(screen.getByDisplayValue("Renamed")).toBeTruthy();
+  });
+
   it("shows empty sidebar state when there are no chats", () => {
     mock.module("../../src/client/queries", () => ({
       useInfiniteChats: () => ({

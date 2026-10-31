@@ -246,7 +246,7 @@ interface NumberDraftInputProps {
  * Number input whose visible text is independent of the last valid value.
  *
  * Clearing the field or typing `-` stays on screen. The parsed number is written
- * on blur. An incomplete draft restores the previous value instead of storing `NaN`.
+ * on blur or Enter. An incomplete draft restores the previous value instead of storing `NaN`.
  *
  * @param props - Bound value and commit callback.
  * @returns The draft number field.
@@ -284,6 +284,11 @@ export function NumberDraftInput({
       onChange={(event) => {
         const next = event.target.value;
         if (isPermittedNumberDraft(next, integer)) setDraft(next);
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        event.currentTarget.blur();
       }}
       onBlur={() => {
         focusedRef.current = false;

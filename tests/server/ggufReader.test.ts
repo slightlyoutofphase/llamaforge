@@ -71,7 +71,7 @@ mock.module("@huggingface/gguf", () => {
   };
 });
 
-import { parseGgufMetadata } from "../../src/server/ggufReader";
+import { describeGgufQuantization, parseGgufMetadata } from "../../src/server/ggufReader";
 
 describe("ggufReader", () => {
   it("successfully parses mock metadata", async () => {
@@ -113,12 +113,18 @@ describe("ggufReader", () => {
     expect(meta.hasAudioEncoder).toBe(false);
   });
 
+  it("uses llama.cpp file-type names for the corrected quantization ids", () => {
+    expect(describeGgufQuantization(7)).toBe("Q8_0");
+    expect(describeGgufQuantization(8)).toBe("Q5_0");
+    expect(describeGgufQuantization(9)).toBe("Q5_1");
+    expect(describeGgufQuantization(27)).toBe("IQ3_M");
+    expect(describeGgufQuantization(28)).toBe("IQ2_S");
+    expect(describeGgufQuantization(30)).toBe("IQ4_XS");
+    expect(describeGgufQuantization(32)).toBe("BF16");
+    expect(describeGgufQuantization(6)).toBe("TYPE_6");
+  });
+
   it("throws on failure", async () => {
-    try {
-      await parseGgufMetadata("fail.gguf");
-      expect(true).toBe(false); // should not reach
-    } catch (e: any) {
-      expect(e.message).toBe("Parse failed");
-    }
+    await expect(parseGgufMetadata("fail.gguf")).rejects.toThrow("Parse failed");
   });
 });

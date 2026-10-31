@@ -4,8 +4,13 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { initDb, resetDb } from "../../src/server/persistence/db";
 import {
+  __resetProcessUsageCache,
+  __resetWindowsGpuCounterCache,
+  __setProcessSpawnObserver,
   attributeGpuMemoryBytes,
+  getAppProcessUsage,
   isLlamaServerProcessName,
   parseGpuMemoryBytes,
   parseNvidiaSmiComputeAppRows,
@@ -15,7 +20,9 @@ import {
   parseTasklistRow,
   parseTasklistWorkingSetBytes,
   parseWindowsGpuProcessMemory,
+  parseWindowsProcessSnapshot,
   shouldSkipLiveProcessSample,
+  summarizeWindowsProcessSnapshot,
 } from "../../src/server/processUsage";
 
 describe("processUsage parsers", () => {
@@ -93,6 +100,65 @@ describe("processUsage parsers", () => {
     expect(parseGpuMemoryBytes("[N/A]")).toBeNull();
     expect(parseGpuMemoryBytes("1.5 GiB")).toBe(1.5 * 1024 * 1024 * 1024);
   });
+
+  it("builds a Windows process tree and totals from one CIM snapshot", () => {
+    const json = JSON.stringify([
+      { ProcessId: 10, ParentProcessId: 1, Name: "bun.exe", WorkingSetSize: 1000 },
+      { ProcessId: 20, ParentProcessId: 10, Name: "llama-server.exe", WorkingSetSize: 5000 },
+      { ProcessId: 30, ParentProcessId: 20, Name: "ffmpeg.exe", WorkingSetSize: 2000 },
+      { ProcessId: 40, ParentProcessId: 1, Name: "notepad.exe", WorkingSetSize: 9000 },
+    ]);
+    const records = parseWindowsProcessSnapshot(json);
+    const summary = summarizeWindowsProcessSnapshot(records, 10);
+    expect(summary.treePids).toEqual([10, 20, 30]);
+    expect(summary.treeRssBytes).toBe(8000);
+    expect(summary.llamaServer.get(20)).toBe(5000);
+    expect(summary.llamaServer.has(40)).toBe(false);
+
+    const single = parseWindowsProcessSnapshot(
+      JSON.stringify({
+        ProcessId: 7,
+        ParentProcessId: 1,
+        Name: "llama-server.exe",
+        WorkingSetSize: 42,
+      }),
+    );
+    expect(single).toEqual([
+      { pid: 7, parentPid: 1, name: "llama-server.exe", workingSetBytes: 42 },
+    ]);
+  });
+
+  it("samples Windows processes with one CIM query and no tasklist", async () => {
+    if (process.platform !== "win32") return;
+    await initDb(":memory:");
+    __resetProcessUsageCache();
+    __resetWindowsGpuCounterCache();
+    const commands: string[][] = [];
+    __setProcessSpawnObserver((command) => {
+      commands.push([...command]);
+    });
+    try {
+      const usage = await getAppProcessUsage();
+      expect(usage.ramBytes).toBeGreaterThan(0);
+      const joined = commands.map((command) => command.join(" "));
+      const cim = joined.filter((command) => command.includes("Get-CimInstance Win32_Process"));
+      const tasklist = commands.filter((command) =>
+        (command[0] ?? "").toLowerCase().includes("tasklist"),
+      );
+      const wmic = commands.filter((command) => (command[0] ?? "").toLowerCase() === "wmic");
+      expect(cim).toHaveLength(1);
+      expect(tasklist).toHaveLength(0);
+      expect(wmic).toHaveLength(0);
+      const powershell = commands.filter((command) =>
+        (command[0] ?? "").toLowerCase().includes("powershell"),
+      );
+      expect(powershell.length).toBeLessThanOrEqual(2);
+    } finally {
+      __setProcessSpawnObserver(null);
+      __resetProcessUsageCache();
+      resetDb();
+    }
+  }, 30_000);
 
   it("skips live sampling only when a generation is in flight and a snapshot exists", () => {
     expect(shouldSkipLiveProcessSample(0, true)).toBe(false);

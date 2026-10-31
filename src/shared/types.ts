@@ -790,6 +790,16 @@ export interface LoadPreset {
 }
 
 /**
+ * Partial load-preset write.
+ *
+ * `chatTemplateOverride: null` clears a saved Jinja override. Omitting the key
+ * leaves the stored override unchanged. A string replaces it.
+ */
+export type LoadPresetUpdate = Omit<Partial<LoadPreset>, "chatTemplateOverride"> & {
+  chatTemplateOverride?: string | null;
+};
+
+/**
  * Parameter mapping binding internal templates wrapping specifically how initial system configurations set context for initial chat nodes natively.
  */
 export interface SystemPromptPreset {

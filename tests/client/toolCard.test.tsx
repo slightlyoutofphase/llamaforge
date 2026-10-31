@@ -3,11 +3,12 @@
  * Tests for tool-call cards, including argument editing after delayed payloads.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { ChatMessage } from "@shared/types";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ToolCard } from "../../src/client/components/chat/ToolCard";
 import { useAppStore } from "../../src/client/store";
+import { asFetch } from "../fixtures";
 
 const assistantMessage: ChatMessage = {
   id: "asst-1",
@@ -34,7 +35,12 @@ function enableToolApproval() {
 describe("ToolCard", () => {
   afterEach(() => {
     cleanup();
-    useAppStore.setState({ isWaitingForToolApproval: false, messages: [] });
+    useAppStore.setState({
+      isWaitingForToolApproval: false,
+      messages: [],
+      notifications: [],
+      currentChatId: null,
+    });
   });
 
   it("shows arguments that arrived after the card first mounted", () => {
@@ -117,5 +123,48 @@ describe("ToolCard", () => {
     fireEvent.click(screen.getByRole("button", { name: /cancel edit/i }));
 
     expect(screen.getByTestId("tool-args-preview").textContent).toBe('{"expression":"2+2"}');
+  });
+
+  it("shows a notification and keeps the buttons when approval fails", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetch(
+      mock(
+        async () =>
+          new Response(JSON.stringify({ error: "No tool approval is pending." }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    useAppStore.setState({
+      isWaitingForToolApproval: true,
+      currentChatId: "c1",
+      messages: [assistantMessage],
+      notifications: [],
+    });
+    render(
+      <ToolCard
+        messageId="asst-1"
+        toolCall={{
+          id: "tc-1",
+          type: "function",
+          function: { name: "calculate", arguments: "{}" },
+        }}
+        onApprove={(id, args) => {
+          void useAppStore.getState().approveToolCall("asst-1", id, true, args);
+        }}
+        onReject={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    await waitFor(() => {
+      expect(
+        useAppStore.getState().notifications.some((note) => note.message.includes("pending")),
+      ).toBe(true);
+    });
+    expect(screen.getByRole("button", { name: /approve/i })).toBeDefined();
+    expect(screen.getByText("Awaiting Action")).toBeDefined();
+    globalThis.fetch = originalFetch;
   });
 });

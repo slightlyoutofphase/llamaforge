@@ -7,11 +7,11 @@ import { useNavigate } from "@tanstack/react-router";
 import { clsx } from "clsx";
 import { ChevronDown, Cpu, Database, Play, Square } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { createDefaultLoadConfig, resolveSpecDraftModelPath } from "../shared/defaults";
 import { modelOptionLabel, presetMenuLabels } from "../shared/presetNames";
 import { loadPresetsForModel, pickLoadPresetForModel } from "../shared/presetScope";
 import { metadataHasToolCalling } from "../shared/templateCapabilities";
-import type { ChatMessage, LoadModelRequest, ModelEntry, ModelLoadConfig } from "../shared/types";
+import type { ChatMessage, LoadModelRequest, ModelEntry } from "../shared/types";
+import { planModelLoad } from "./loadRequest";
 import { MultimodalGuardModal } from "./components/sidebar/MultimodalGuardModal";
 import { logError } from "./logger";
 import { useCreateChat, useLoadPresets, useSettings } from "./queries";
@@ -30,7 +30,7 @@ export function ModelSelector() {
   const serverStatus = useAppStore((s) => s.serverStatus);
   const loadedModel = useAppStore((s) => s.loadedModel);
   const isGenerating = useAppStore((s) => s.isGenerating);
-  const { data: loadPresets } = useLoadPresets();
+  const { data: loadPresets, isPending: loadPresetsPending } = useLoadPresets();
   const { data: settings } = useSettings();
   const createChatMut = useCreateChat();
   const navigate = useNavigate();
@@ -65,74 +65,25 @@ export function ModelSelector() {
   const handleLoadGuard = async (model: ModelEntry) => {
     if (serverStatus !== "idle" || isGenerating) return;
 
+    if (loadPresetsPending || loadPresets === undefined) return;
     const preset = pickLoadPresetForModel(
-      loadPresets ?? [],
+      loadPresets,
       model.primaryPath,
       selectedPresets[model.primaryPath],
     );
+    if (!preset) return;
 
-    const config: ModelLoadConfig = preset?.config
-      ? { ...preset.config }
-      : createDefaultLoadConfig(model.primaryPath);
-
-    // Always override the path to the selected model
-    config.modelPath = model.primaryPath;
-
-    const request: LoadModelRequest = {
-      ...config,
-      ...(preset?.id ? { presetId: preset.id } : {}),
-      ...(preset?.thinkingTagOverride ? { thinkingTagOverride: preset.thinkingTagOverride } : {}),
-    };
-
-    const resolvedDraftPath = resolveSpecDraftModelPath(
-      config.specType,
-      config.specDraftModelPath,
-      model.draftModelPath,
-      model.draftSpecType,
-    );
-    if (resolvedDraftPath) {
-      request.specDraftModelPath = resolvedDraftPath;
-    }
-
-    const defaultTemplate = model.metadata?.chatTemplate;
-    if (
-      preset?.chatTemplateOverride &&
-      preset.chatTemplateOverride.length > 0 &&
-      preset.chatTemplateOverride !== defaultTemplate
-    ) {
-      request.chatTemplateContent = preset.chatTemplateOverride;
-    }
-
-    // Check for multimodal incompatibility
-    const hasVision = !!model.metadata?.hasVisionEncoder;
-    const hasAudio = !!model.metadata?.hasAudioEncoder;
-
-    const messages = useAppStore.getState().messages;
-    const visionMsgs = messages.filter((m) =>
-      m.attachments?.some(
-        (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("video/"),
-      ),
-    );
-    const audioMsgs = messages.filter((m) =>
-      m.attachments?.some((a) => a.mimeType.startsWith("audio/")),
-    );
-
-    if (!hasVision && visionMsgs.length > 0 && !hasAudio && audioMsgs.length > 0) {
+    const plan = planModelLoad(model, preset, useAppStore.getState().messages);
+    if (plan.kind === "guard") {
       setGuardModal({
-        reason: "both",
-        messages: [...visionMsgs, ...audioMsgs],
-        configToLoad: request,
+        reason: plan.reason,
+        messages: plan.messages,
+        configToLoad: plan.request,
       });
       return;
-    } else if (!hasVision && visionMsgs.length > 0) {
-      setGuardModal({ reason: "vision", messages: visionMsgs, configToLoad: request });
-      return;
-    } else if (!hasAudio && audioMsgs.length > 0) {
-      setGuardModal({ reason: "audio", messages: audioMsgs, configToLoad: request });
-      return;
     }
 
-    const success = await loadModel(request);
+    const success = await loadModel(plan.request);
     if (success) {
       // Just keep them on the registry, the card will show 'ACTIVE'
     }
@@ -303,26 +254,40 @@ export function ModelSelector() {
                       />
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => handleLoadGuard(model)}
-                      disabled={serverStatus !== "idle" || isLoaded}
-                      className={clsx(
-                        "inline-flex items-center justify-center w-full sm:w-auto px-6 py-2 rounded-xl font-bold text-sm transition-all",
-                        isLoaded
-                          ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)] cursor-default"
-                          : "bg-[var(--color-accent)] text-white hover:shadow-lg hover:shadow-[var(--color-accent)]/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed",
-                      )}
-                      title="Load weights">
-                      {isLoaded ? (
-                        "LOADED"
-                      ) : (
-                        <div className="flex items-center gap-2">
-                          <Play size={14} fill="currentColor" />
-                          <span>LOAD</span>
-                        </div>
-                      )}
-                    </button>
+                    {loadPresetsPending ? (
+                      <span className="inline-flex items-center justify-center w-full sm:w-auto px-6 py-2 text-sm font-bold text-[var(--color-text-muted)]">
+                        Loading presets…
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => handleLoadGuard(model)}
+                        disabled={
+                          serverStatus !== "idle" ||
+                          isLoaded ||
+                          pickLoadPresetForModel(
+                            loadPresets ?? [],
+                            model.primaryPath,
+                            selectedPresets[model.primaryPath],
+                          ) === undefined
+                        }
+                        className={clsx(
+                          "inline-flex items-center justify-center w-full sm:w-auto px-6 py-2 rounded-xl font-bold text-sm transition-all",
+                          isLoaded
+                            ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)] cursor-default"
+                            : "bg-[var(--color-accent)] text-white hover:shadow-lg hover:shadow-[var(--color-accent)]/20 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed",
+                        )}
+                        title="Load weights">
+                        {isLoaded ? (
+                          "LOADED"
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <Play size={14} fill="currentColor" />
+                            <span>LOAD</span>
+                          </div>
+                        )}
+                      </button>
+                    )}
                   </div>
                 </div>
               );

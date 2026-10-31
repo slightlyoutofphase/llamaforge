@@ -124,6 +124,17 @@ export function parseLegacyAutoPresetName(name: string): LegacyAutoPresetName | 
 }
 
 /**
+ * Returns the editor message for a preset name that cannot be saved.
+ *
+ * @param name - Name currently in the editor.
+ * @returns `"Preset name cannot be empty."` when the trimmed name is empty, otherwise `null`.
+ */
+export function validatePresetName(name: string): string | null {
+  if (name.trim().length === 0) return "Preset name cannot be empty.";
+  return null;
+}
+
+/**
  * Picks a name that is not already in `taken`.
  *
  * Comparison ignores case and surrounding whitespace. A taken `Name` becomes

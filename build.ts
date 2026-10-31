@@ -27,7 +27,7 @@ async function buildServer() {
   await rm("dist/server", { recursive: true, force: true });
 
   await Bun.build({
-    entrypoints: ["./src/server/index.ts"],
+    entrypoints: ["./src/server/index.ts", "./src/server/builtinTools/calculateWorker.ts"],
     outdir: "./dist/server",
     target: "bun", // same as: bun build ... --target bun
     format: "esm", // default

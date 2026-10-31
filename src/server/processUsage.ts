@@ -239,6 +239,157 @@ export function attributeGpuMemoryBytes(rows: GpuProcessUsage[], ownedPids: Set<
 }
 
 /**
+ * One Windows process row from `Get-CimInstance Win32_Process`.
+ */
+export interface WindowsProcessRecord {
+  /** Process identifier. */
+  pid: number;
+  /** Parent process identifier. `0` when the snapshot omitted it. */
+  parentPid: number;
+  /** Executable image name, such as `llama-server.exe`. */
+  name: string;
+  /** Working set in bytes. */
+  workingSetBytes: number;
+}
+
+/**
+ * Tree and llama-server totals derived from one Windows process snapshot.
+ */
+export interface WindowsProcessSnapshotSummary {
+  /** Root PID plus every descendant found in the snapshot. */
+  treePids: number[];
+  /** Working set bytes for every PID in the snapshot. */
+  rssByPid: Map<number, number>;
+  /** `llama-server` processes and their working sets. */
+  llamaServer: Map<number, number>;
+  /** Sum of working sets for {@link WindowsProcessSnapshotSummary.treePids}. */
+  treeRssBytes: number;
+}
+
+/**
+ * Parses `ConvertTo-Json` output from a Win32_Process listing.
+ *
+ * PowerShell emits one object when only one process matches and an array otherwise.
+ *
+ * @param jsonText - Compressed JSON from `Get-CimInstance Win32_Process`.
+ * @returns Process rows. Invalid JSON yields an empty list.
+ */
+export function parseWindowsProcessSnapshot(jsonText: string): WindowsProcessRecord[] {
+  const trimmed = jsonText.trim();
+  if (!trimmed) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return [];
+  }
+  const rows = Array.isArray(parsed) ? parsed : [parsed];
+  const records: WindowsProcessRecord[] = [];
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const record = row as Record<string, unknown>;
+    const pid = Number(record["ProcessId"]);
+    const parentPid = Number(record["ParentProcessId"]);
+    const name = typeof record["Name"] === "string" ? record["Name"] : "";
+    const workingSet = Number(record["WorkingSetSize"]);
+    if (!Number.isInteger(pid) || pid <= 0 || !name) continue;
+    records.push({
+      pid,
+      parentPid: Number.isInteger(parentPid) && parentPid > 0 ? parentPid : 0,
+      name,
+      workingSetBytes: Number.isFinite(workingSet) && workingSet > 0 ? workingSet : 0,
+    });
+  }
+  return records;
+}
+
+/**
+ * Builds a process tree and llama-server totals from one Windows process snapshot.
+ *
+ * @param records - Parsed Win32_Process rows.
+ * @param rootPid - Root process to expand, or `null` when only name matches matter.
+ * @returns Descendant PIDs, working sets, and llama-server rows.
+ */
+export function summarizeWindowsProcessSnapshot(
+  records: readonly WindowsProcessRecord[],
+  rootPid: number | null,
+): WindowsProcessSnapshotSummary {
+  const rssByPid = new Map<number, number>();
+  const children = new Map<number, number[]>();
+  const llamaServer = new Map<number, number>();
+  for (const record of records) {
+    rssByPid.set(record.pid, record.workingSetBytes);
+    const siblings = children.get(record.parentPid);
+    if (siblings) siblings.push(record.pid);
+    else children.set(record.parentPid, [record.pid]);
+    if (isLlamaServerProcessName(record.name)) {
+      llamaServer.set(record.pid, record.workingSetBytes);
+    }
+  }
+
+  const treePids: number[] = [];
+  if (rootPid !== null && Number.isInteger(rootPid) && rootPid > 0) {
+    const seen = new Set<number>();
+    const queue = [rootPid];
+    while (queue.length > 0) {
+      const pid = queue.shift();
+      if (pid === undefined || seen.has(pid)) continue;
+      seen.add(pid);
+      treePids.push(pid);
+      for (const child of children.get(pid) ?? []) queue.push(child);
+    }
+  }
+
+  let treeRssBytes = 0;
+  for (const pid of treePids) treeRssBytes += rssByPid.get(pid) ?? 0;
+  return { treePids, rssByPid, llamaServer, treeRssBytes };
+}
+
+/** When true, the Windows GPU-counter fallback already returned nothing. */
+let windowsGpuCounterUnavailable = false;
+/** Records each command `execQuiet` launches. Tests use this to count PowerShell and tasklist. */
+let processSpawnObserver: ((command: readonly string[]) => void) | null = null;
+
+/**
+ * Records every process launched while sampling RAM and VRAM.
+ *
+ * @param observer - Callback invoked with the command argv, or `null` to stop recording.
+ * @returns No return value.
+ * @internal
+ */
+export function __setProcessSpawnObserver(
+  observer: ((command: readonly string[]) => void) | null,
+): void {
+  processSpawnObserver = observer;
+}
+
+/**
+ * Clears the remembered Windows GPU-counter miss. Intended for tests.
+ *
+ * @returns No return value.
+ * @internal
+ */
+export function __resetWindowsGpuCounterCache(): void {
+  windowsGpuCounterUnavailable = false;
+}
+
+/**
+ * Loads every Windows process in one PowerShell query.
+ *
+ * @param powershellPath - PowerShell executable from settings.
+ * @returns Parsed process rows. An empty list means the query failed.
+ */
+async function loadWindowsProcessRecords(powershellPath: string): Promise<WindowsProcessRecord[]> {
+  const output = await execQuiet([
+    powershellPath,
+    "-NoProfile",
+    "-Command",
+    "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,WorkingSetSize | ConvertTo-Json -Compress",
+  ]);
+  return parseWindowsProcessSnapshot(output);
+}
+
+/**
  * Executes a command and returns stdout, treating launch failures as empty output.
  *
  * Stderr is drained in parallel so nvidia-smi cannot deadlock on a full pipe.
@@ -250,6 +401,7 @@ export function attributeGpuMemoryBytes(rows: GpuProcessUsage[], ownedPids: Set<
  * @returns Captured standard output, or an empty string on failure.
  */
 async function execQuiet(command: string[], timeoutMs = 8000): Promise<string> {
+  processSpawnObserver?.(command);
   try {
     const proc = spawn(command, {
       stdout: "pipe",
@@ -446,14 +598,20 @@ async function collectGpuProcessUsage(
     }
   }
 
-  if (process.platform === "win32" && !rows.some((row) => (row.memoryBytes ?? 0) > 0)) {
+  if (
+    process.platform === "win32" &&
+    !windowsGpuCounterUnavailable &&
+    !rows.some((row) => (row.memoryBytes ?? 0) > 0)
+  ) {
     const counterText = await execQuiet([
       powershellPath,
       "-NoProfile",
       "-Command",
       "$ErrorActionPreference='SilentlyContinue'; Get-Counter '\\GPU Process Memory(*)\\Local Usage' | Select-Object -ExpandProperty CounterSamples | ForEach-Object { '{0} {1}' -f $_.InstanceName, $_.CookedValue }",
     ]);
-    for (const [pid, bytes] of parseWindowsGpuProcessMemory(counterText)) {
+    const counters = parseWindowsGpuProcessMemory(counterText);
+    if (counters.size === 0) windowsGpuCounterUnavailable = true;
+    for (const [pid, bytes] of counters) {
       rows.push({ pid, memoryBytes: bytes });
     }
   }
@@ -512,7 +670,13 @@ export async function getAppProcessUsage(): Promise<AppProcessUsage> {
 async function sampleAppProcessUsage(): Promise<AppProcessUsage> {
   const bunPid = process.pid;
   const llamaPid = getActiveServerPid();
-  const namedLlama = await findLlamaServerProcessesByName();
+  const settings = await loadSettings();
+  const powershellPath = settings.powershellPath || "powershell";
+  const windowsRecords =
+    process.platform === "win32" ? await loadWindowsProcessRecords(powershellPath) : null;
+  const namedLlama = windowsRecords
+    ? summarizeWindowsProcessSnapshot(windowsRecords, null).llamaServer
+    : await findLlamaServerProcessesByName();
 
   if (!llamaPid && namedLlama.size === 0) {
     lastProcessUsage = {
@@ -524,10 +688,15 @@ async function sampleAppProcessUsage(): Promise<AppProcessUsage> {
     return lastProcessUsage;
   }
 
-  const settings = await loadSettings();
-  const powershellPath = settings.powershellPath || "powershell";
   const nvidiaSmi = settings.nvidiaSmiPath || "nvidia-smi";
-  const llamaTree = llamaPid ? await collectProcessTree(llamaPid, powershellPath) : [];
+  const windowsSummary = windowsRecords
+    ? summarizeWindowsProcessSnapshot(windowsRecords, llamaPid)
+    : null;
+  const llamaTree = windowsSummary
+    ? windowsSummary.treePids
+    : llamaPid
+      ? await collectProcessTree(llamaPid, powershellPath)
+      : [];
   const ramPids = new Set<number>([bunPid, ...llamaTree, ...namedLlama.keys()]);
   const gpuRows = await collectGpuProcessUsage(nvidiaSmi, powershellPath);
   for (const row of gpuRows) {
@@ -543,13 +712,16 @@ async function sampleAppProcessUsage(): Promise<AppProcessUsage> {
 
   for (const [pid, workingSet] of namedLlama) {
     if (countedRam.has(pid)) continue;
-    ramBytes += workingSet > 0 ? workingSet : await readProcessRssBytes(pid);
+    const known = windowsSummary?.rssByPid.get(pid);
+    ramBytes +=
+      workingSet > 0 ? workingSet : known && known > 0 ? known : await readProcessRssBytes(pid);
     countedRam.add(pid);
   }
 
   for (const pid of ramPids) {
     if (countedRam.has(pid)) continue;
-    ramBytes += await readProcessRssBytes(pid);
+    const known = windowsSummary?.rssByPid.get(pid);
+    ramBytes += known && known > 0 ? known : await readProcessRssBytes(pid);
     countedRam.add(pid);
   }
 

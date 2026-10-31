@@ -5,21 +5,16 @@
  */
 
 import { createDefaultInferenceSampling } from "../shared/defaults";
-import { isExtractedVideoAudioAttachment } from "../shared/extractedAudio";
 import { buildMessageMetrics, contextOccupancyTokens } from "../shared/generationMetrics";
 import { resolveInferencePreset } from "../shared/inferencePresetResolve";
-import { parseToolCallsJson, toApiToolCalls } from "../shared/toolCalls";
-import { toStoredToolDefinition } from "../shared/toolModule";
 import type { ChatMessage, LlamaTimings } from "../shared/types";
-import { triggerAutoname } from "./autoname";
+import { cancelActiveAutoname, triggerAutoname } from "./autoname";
 import {
   applyAssistantStreamDelta,
   type AssistantStreamState,
   detectThinkingConfig,
+  finalizeAssistantStreamState,
   inferNativeReasoningReuse,
-  reconstructPreservedAssistantContent,
-  shouldReconstructPreservedAssistantContent,
-  shouldSendAssistantReasoningContent,
 } from "./chatTemplateEngine";
 import {
   type GenerationAbortReason,
@@ -39,12 +34,25 @@ import {
   processUpload,
 } from "./multimodal";
 import { ContextOverflowError, getTokens, truncateMessages } from "./overflow";
-import { addMessage, getChat, getMetadataForPath, updateChat } from "./persistence/chatRepo";
+import {
+  addMessage,
+  getChatForPrompt,
+  getMetadataForPath,
+  updateChat,
+} from "./persistence/chatRepo";
 import { getDb } from "./persistence/db";
 import { getInferencePresets, getSystemPresets } from "./persistence/presetRepo";
 import { loadSettings } from "./persistence/settingsRepo";
 import { updatePromptCacheStats } from "./promptCache";
-import { listAvailableTools } from "./toolRegistry";
+import {
+  type ChatCompletionMessage,
+  buildApiMessages,
+  buildRequestResponseFormat,
+  buildRequestThinkingConfig,
+  buildRequestTools,
+  serializePromptForTokens,
+  withSystemPrompt,
+} from "./promptPayload";
 import { cancelPendingApprovals, executeTool, waitForToolApproval } from "./tools";
 import { broadcast } from "./wsHub";
 
@@ -139,15 +147,6 @@ function finishAbortedGeneration(params: {
     ...(params.fullThinking !== undefined ? { fullThinking: params.fullThinking } : {}),
   });
 }
-
-type ChatCompletionMessage = {
-  role: string;
-  content: unknown;
-  tool_calls?: unknown[];
-  tool_call_id?: string;
-  name?: string;
-  reasoning_content?: string;
-};
 
 type ChatCompletionRequestBody = {
   stream: boolean;
@@ -450,50 +449,6 @@ async function executeToolRespectingAbort(
 }
 
 /**
- * Reads `preserve_thinking` from the load preset that produced the running model.
- *
- * This is a per-request Jinja kwarg, so the saved load preset is consulted on
- * each generation rather than being frozen at spawn time.
- *
- * @param presetId - Load-preset id stored on the running `ModelLoadConfig`.
- * @returns `true` when that load preset has preserve-thinking enabled.
- */
-async function resolveLoadedPreserveThinking(presetId: string | undefined): Promise<boolean> {
-  if (!presetId) return false;
-  const { getLoadPresetPreserveThinking } = await import("./persistence/presetRepo");
-  return getLoadPresetPreserveThinking(presetId);
-}
-
-/**
- * Replaces the textual portion of an OpenAI chat-completion `content` value.
- *
- * Multipart messages keep image/audio/video parts and only the `text` part is
- * updated. String content is replaced entirely.
- *
- * @param content - Current string or multipart content.
- * @param text - Replacement visible or tagged text.
- * @returns The same shape as `content`, with the text part updated.
- */
-function replaceApiMessageText(content: unknown, text: string): unknown {
-  if (!Array.isArray(content)) return text;
-  let replaced = false;
-  const next = content.map((part: unknown) => {
-    if (
-      part &&
-      typeof part === "object" &&
-      "type" in part &&
-      (part as { type: unknown }).type === "text"
-    ) {
-      replaced = true;
-      return { ...(part as object), text };
-    }
-    return part;
-  });
-  if (!replaced) next.push({ type: "text", text });
-  return next;
-}
-
-/**
  * Defines the parameters for proxying completion requests against the backend server.
  */
 export interface ProxyCompletionParams {
@@ -546,6 +501,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     // A pending tool approval can outlive the generation map entry. A new
     // send must resolve it so the old turn cannot continue after the user moved on.
     cancelPendingApprovals(chatId, "cancelled");
+    cancelActiveAutoname();
   }
 
   const server = getServerStatus();
@@ -561,7 +517,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     throw new Error("Llama-server is not running.");
   }
 
-  const chat = await getChat(chatId);
+  const chat = await getChatForPrompt(chatId);
   if (!chat) {
     logError("proxyCompletion failed: chat not found", chatId);
     throw new Error("Chat not found");
@@ -588,1085 +544,1013 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   const userMessageId = Bun.randomUUIDv7();
   const abortController = new AbortController();
   const generationId = Bun.randomUUIDv7();
-  activeGenerations.set(generationId, {
-    chatId,
-    controller: abortController,
-    messageId: assistantMessageId,
-    startedAt: Date.now(),
-  });
-  const [sysPresets, infPresets] = await Promise.all([getSystemPresets(), getInferencePresets()]);
-
-  const sysPreset = sysPresets.find((p) => p.id === chat.systemPresetId);
-  const infPreset = resolveInferencePreset(infPresets, {
-    chatPresetId: chat.inferencePresetId,
-    preferredPresetId: requestedInferencePresetId,
-    modelPath: server.config?.modelPath ?? chat.modelPath,
-  });
-  if (infPreset && infPreset.id !== chat.inferencePresetId && !isToolRecurse) {
-    await updateChat(chatId, { inferencePresetId: infPreset.id });
-    chat.inferencePresetId = infPreset.id;
-  }
-
-  const processedAttachments: ProcessedAttachment[] = [];
-  let userMsg: ChatMessage | null = null;
-  let userMessageInserted = false;
-
-  if (!isContinue && !isRegenerate && !isToolRecurse) {
-    userMsg = {
-      id: userMessageId,
-      chatId,
-      role: "user",
-      content: newMessage,
-      rawContent: newMessage,
-      position: 0,
-      createdAt: Date.now(),
-    };
-    await addMessage(userMsg);
-    userMessageInserted = true;
-  }
-
   try {
-    for (const file of attachments) {
-      if (abortController.signal.aborted) {
-        throw new Error("Generation cancelled.");
-      }
-      const arr = await file.arrayBuffer();
-      processedAttachments.push(
-        await processUpload(chatId, userMessageId, file.name, file.type, arr),
-      );
-    }
-  } catch (err) {
-    activeGenerations.delete(generationId);
-    if (userMessageInserted) {
-      const db = await import("./persistence/db").then((m) => m.getDb());
-      db.prepare("DELETE FROM attachments WHERE message_id = ?").run(userMessageId);
-      db.prepare("DELETE FROM messages WHERE id = ?").run(userMessageId);
-      logError(
-        "[streamProxy] Rolled back partially created user message after attachment processing failed",
-        {
-          chatId,
-          userMessageId,
-          error: err instanceof Error ? err.message : String(err),
-        },
-      );
-    }
-    throw err;
-  }
-
-  if (abortController.signal.aborted) {
-    activeGenerations.delete(generationId);
-    if (userMessageInserted) {
-      const db = getDb();
-      db.prepare("DELETE FROM attachments WHERE message_id = ?").run(userMessageId);
-      db.prepare("DELETE FROM messages WHERE id = ?").run(userMessageId);
-    }
-    throw new Error("Generation cancelled.");
-  }
-
-  // Construct message content parts
-  const dbContent = mergeExtractedAttachmentText(newMessage, processedAttachments);
-
-  const modelMeta = server.config?.modelPath
-    ? await getMetadataForPath(server.config.modelPath)
-    : null;
-  const thinkingTagOverride = getActiveThinkingTagOverride();
-  const thinkingConfig = detectThinkingConfig(modelMeta?.architecture, thinkingTagOverride);
-
-  let rawMessages: ChatMessage[] = [];
-  const sysContent = sysPreset?.content || "";
-
-  if (sysContent) {
-    rawMessages.push({
-      id: "sys",
+    activeGenerations.set(generationId, {
       chatId,
-      role: "system",
-      content: sysContent,
-      rawContent: sysContent,
-      position: 0,
-      createdAt: Date.now(),
+      controller: abortController,
+      messageId: assistantMessageId,
+      startedAt: Date.now(),
     });
-  }
+    const [sysPresets, infPresets] = await Promise.all([getSystemPresets(), getInferencePresets()]);
 
-  rawMessages.push(...(chat.messages || []));
-
-  if (!isContinue && !isRegenerate && !isToolRecurse) {
-    if (userMsg) {
-      userMsg.content = dbContent;
-      userMsg.rawContent = dbContent;
-      userMsg.attachments = processedAttachments;
-      rawMessages.push(userMsg);
-
-      const db = getDb();
-      db.prepare("UPDATE messages SET content = ?, raw_content = ? WHERE id = ?").run(
-        dbContent,
-        dbContent,
-        userMessageId,
-      );
-
-      // Reconcile optimistic client-side temp IDs with the persisted user message ID.
-      broadcast({ type: "message", chatId, message: userMsg });
-    }
-  }
-
-  // --- Overflow Policy Truncation ---
-  // C7 fix: guard against infPreset being undefined (edge case after data wipe)
-  const inferenceDefaults = createDefaultInferenceSampling();
-  const safeInfPreset = infPreset ?? inferenceDefaults;
-  const overflowPolicy = safeInfPreset.contextOverflowPolicy ?? "TruncateMiddle";
-  const ctxSize = server.config?.contextSize || 4096;
-  const useTools = infPreset?.toolCallsEnabled && infPreset.tools && infPreset.tools.length > 0;
-  const liveTools = useTools
-    ? new Map(
-        (await listAvailableTools()).map(
-          (tool) => [tool.name, toStoredToolDefinition(tool)] as const,
-        ),
-      )
-    : undefined;
-  const requestTools = useTools
-    ? infPreset.tools.map((t) => ({
-        type: "function" as const,
-        function: liveTools?.get(t.name) ?? t,
-      }))
-    : undefined;
-  const requestResponseFormat =
-    infPreset?.structuredOutput?.enabled && infPreset.structuredOutput.schema
-      ? {
-          type: "json_schema" as const,
-          schema: infPreset.structuredOutput.schema,
-        }
-      : undefined;
-  const enableThinking = infPreset?.thinkingEnabled ?? true;
-  const requestThinkingConfig = {
-    chat_template_kwargs: {
-      enable_thinking: enableThinking,
-      preserve_thinking: await resolveLoadedPreserveThinking(server.config?.presetId),
-      ...(thinkingTagOverride?.enableToken
-        ? { enable_token: thinkingTagOverride.enableToken }
-        : {}),
-    },
-    // Always `none` so llama-server streams tagged tokens in `delta.content`
-    // instead of buffering the visible answer until native reasoning parsing
-    // finishes. This process splits open/close tags as they arrive so the
-    // reply can start streaming the moment thinking ends.
-    reasoning_format: "none" as const,
-  };
-  const { buildContentParts } = await import("./multimodal");
-
-  /**
-   * Converts persisted chat messages into the OpenAI-compatible message payload sent to llama-server.
-   *
-   * @param messages - Chat history after overflow handling.
-   * @returns OpenAI-style chat completion messages.
-   */
-  const buildApiMessages = async (messages: ChatMessage[]): Promise<ChatCompletionMessage[]> => {
-    const apiMessages: ChatCompletionMessage[] = [];
-    const preserveThinking = Boolean(requestThinkingConfig.chat_template_kwargs.preserve_thinking);
-    let lastUserIdx = -1;
-    for (let i = 0; i < messages.length; i++) {
-      if (messages[i]?.role === "user") lastUserIdx = i;
-    }
-
-    for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
-      const m = messages[messageIndex];
-      if (!m) continue;
-      const mediaAtts =
-        m.attachments?.filter(
-          (a) =>
-            a.mimeType.startsWith("image/") ||
-            a.mimeType.startsWith("audio/") ||
-            a.mimeType.startsWith("video/"),
-        ) || [];
-
-      const hasMediaAttachments = mediaAtts.length > 0;
-      const contentParts = hasMediaAttachments
-        ? await buildContentParts(m.content, m.attachments || [], modelMeta || undefined)
-        : m.content;
-
-      let finalContent: unknown = contentParts;
-
-      const parsedToolCalls = parseToolCallsJson(m.toolCallsJson);
-      const sendReasoningContent =
-        m.role === "assistant" &&
-        Boolean(m.thinkingContent) &&
-        shouldSendAssistantReasoningContent({
-          messageIndex,
-          lastUserIndex: lastUserIdx,
-          preserveThinking,
-          hasToolCalls: Boolean(parsedToolCalls),
-        });
-
-      // Qwen templates (including froggeric) replay traces by splitting think
-      // tags out of `content` when preserve_thinking is on. Putting those traces
-      // in `reasoning_content` on older turns makes llama.cpp treat thinking as
-      // already finished (Gemma follow-up) or stay in a think-only parse (Qwen
-      // shows a trace and no answer). Continue and Gemma tool-call replay still
-      // use the field below.
-      if (
-        shouldReconstructPreservedAssistantContent({
-          preserveThinking,
-          sendReasoningContent,
-          openTag: thinkingConfig.openTag,
-        }) &&
-        m.role === "assistant" &&
-        m.thinkingContent
-      ) {
-        finalContent = replaceApiMessageText(
-          finalContent,
-          reconstructPreservedAssistantContent(m, thinkingConfig),
-        );
-      }
-
-      const hasUnsupportedMedia = mediaAtts.some((a) => {
-        if (isExtractedVideoAudioAttachment(a)) return false;
-        if (a.mimeType.startsWith("image/") && !modelMeta?.hasVisionEncoder) return true;
-        if (a.mimeType.startsWith("audio/") && !modelMeta?.hasAudioEncoder) return true;
-        if (a.mimeType.startsWith("video/") && !modelMeta?.hasVisionEncoder) return true;
-        return false;
-      });
-
-      if (hasUnsupportedMedia) {
-        const warning =
-          "[System info: Some multimodal attachments were removed because the current active model lacks encoders for them.]\n";
-        if (typeof finalContent === "string") {
-          finalContent = warning + finalContent;
-        } else if (Array.isArray(finalContent)) {
-          const textPart = finalContent.find((p) => p.type === "text");
-          if (textPart) {
-            textPart.text = warning + textPart.text;
-          } else {
-            finalContent.push({ type: "text", text: warning });
-          }
-        }
-      }
-
-      const apiMsg: ChatCompletionMessage = { role: m.role, content: finalContent };
-      if (sendReasoningContent && m.thinkingContent) {
-        apiMsg.reasoning_content = m.thinkingContent;
-      }
-      if (parsedToolCalls) {
-        apiMsg.tool_calls = toApiToolCalls(parsedToolCalls);
-      }
-      if (m.toolCallId) {
-        apiMsg.tool_call_id = m.toolCallId;
-        const assistantMsg = messages.find(
-          (prev) =>
-            prev.role === "assistant" &&
-            parseToolCallsJson(prev.toolCallsJson)?.some((tc) => tc.id === m.toolCallId),
-        );
-        const tcs = parseToolCallsJson(assistantMsg?.toolCallsJson);
-        if (tcs) {
-          const matchingTc = tcs.find((tc: { id: string }) => tc.id === m.toolCallId);
-          if (matchingTc) apiMsg.name = matchingTc.function.name;
-        }
-      }
-      apiMessages.push(apiMsg);
-    }
-
-    return apiMessages;
-  };
-
-  /**
-   * Serializes the exact inference payload used for token-budget estimation.
-   *
-   * @param messages - Chat history after overflow handling.
-   * @returns JSON text matching the request payload shape used for prompt tokenization.
-   */
-  const buildPromptText = async (messages: ChatMessage[]): Promise<string> =>
-    JSON.stringify({
-      messages: await buildApiMessages(messages),
-      ...(requestTools ? { tools: requestTools } : {}),
-      ...(requestResponseFormat ? { response_format: requestResponseFormat } : {}),
-      ...(requestThinkingConfig ?? {}),
+    const sysPreset = sysPresets.find((p) => p.id === chat.systemPresetId);
+    const infPreset = resolveInferencePreset(infPresets, {
+      chatPresetId: chat.inferencePresetId,
+      preferredPresetId: requestedInferencePresetId,
+      modelPath: server.config?.modelPath ?? chat.modelPath,
     });
+    if (infPreset && infPreset.id !== chat.inferencePresetId && !isToolRecurse) {
+      await updateChat(chatId, { inferencePresetId: infPreset.id });
+      chat.inferencePresetId = infPreset.id;
+    }
 
-  if (!reuseAssistantRow) {
-    const assistantPlaceholder: ChatMessage = {
-      id: assistantMessageId,
-      chatId,
-      role: "assistant",
-      content: "",
-      rawContent: "",
-      position: 0,
-      createdAt: Date.now(),
-    };
-    await addMessage(assistantPlaceholder);
-    broadcast({ type: "message", chatId, message: assistantPlaceholder });
-  }
+    const processedAttachments: ProcessedAttachment[] = [];
+    let userMsg: ChatMessage | null = null;
+    let userMessageInserted = false;
 
-  /**
-   * Removes the placeholder assistant row when generation fails before any content is written.
-   * Reasoning traces and tool-call metadata are substantive and must not be discarded.
-   *
-   * @returns No return value.
-   */
-  const cleanupEmptyAssistantMessage = () => {
-    if (reuseAssistantRow) return;
+    if (!isContinue && !isRegenerate && !isToolRecurse) {
+      userMsg = {
+        id: userMessageId,
+        chatId,
+        role: "user",
+        content: newMessage,
+        rawContent: newMessage,
+        position: 0,
+        createdAt: Date.now(),
+      };
+      await addMessage(userMsg);
+      userMessageInserted = true;
+    }
 
     try {
-      const row = getDb()
-        .query<
-          { content: string; thinking_content: string | null; tool_calls_json: string | null },
-          [string]
-        >("SELECT content, thinking_content, tool_calls_json FROM messages WHERE id = ?")
-        .get(assistantMessageId);
-      const hasContent = Boolean(row?.content);
-      const hasThinking = Boolean(row?.thinking_content);
-      const hasToolCalls = Boolean(row?.tool_calls_json);
-      if (row && !hasContent && !hasThinking && !hasToolCalls) {
-        getDb().prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
+      for (const file of attachments) {
+        if (abortController.signal.aborted) {
+          throw new Error("Generation cancelled.");
+        }
+        const arr = await file.arrayBuffer();
+        processedAttachments.push(
+          await processUpload(chatId, userMessageId, file.name, file.type, arr),
+        );
       }
-    } catch (cleanupErr) {
-      logError("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
+    } catch (err) {
+      activeGenerations.delete(generationId);
+      if (userMessageInserted) {
+        const db = await import("./persistence/db").then((m) => m.getDb());
+        db.prepare("DELETE FROM attachments WHERE message_id = ?").run(userMessageId);
+        db.prepare("DELETE FROM messages WHERE id = ?").run(userMessageId);
+        logError(
+          "[streamProxy] Rolled back partially created user message after attachment processing failed",
+          {
+            chatId,
+            userMessageId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        );
+      }
+      throw err;
     }
-  };
 
-  /**
-   * Truncates history, tokenises the prompt, and starts the llama-server stream.
-   * Runs after the HTTP handler has already returned the assistant message ID.
-   *
-   * @returns A promise that resolves once the stream has been started or failed.
-   */
-  const runInference = async (): Promise<void> => {
-    logDebug("Truncating message history", { ctxSize, overflowPolicy });
-    rawMessages = await truncateMessages(
-      rawMessages,
-      overflowPolicy,
-      ctxSize,
-      safeInfPreset.maxTokens || 4096,
-      server.port ?? undefined,
-      true,
-      { buildPromptText },
+    if (abortController.signal.aborted) {
+      activeGenerations.delete(generationId);
+      if (userMessageInserted) {
+        const db = getDb();
+        db.prepare("DELETE FROM attachments WHERE message_id = ?").run(userMessageId);
+        db.prepare("DELETE FROM messages WHERE id = ?").run(userMessageId);
+      }
+      throw new Error("Generation cancelled.");
+    }
+
+    // Construct message content parts
+    const dbContent = mergeExtractedAttachmentText(newMessage, processedAttachments);
+
+    const modelMeta = server.config?.modelPath
+      ? await getMetadataForPath(server.config.modelPath)
+      : null;
+    const thinkingTagOverride = getActiveThinkingTagOverride();
+    const thinkingConfig = detectThinkingConfig(modelMeta?.architecture, thinkingTagOverride);
+
+    let rawMessages = withSystemPrompt(
+      chatId,
+      sysPreset?.content || "",
+      chat.messages || [],
+      Date.now(),
     );
-    if (abortController.signal.aborted) {
-      cleanupEmptyAssistantMessage();
-      activeGenerations.delete(generationId);
-      return;
-    }
-    logDebug("Calculating prompt token count");
-    const apiMessages = await buildApiMessages(rawMessages);
-    const promptTokensCount = await getTokens(rawMessages, server.port ?? undefined, {
-      buildPromptText: async () =>
-        JSON.stringify({
-          messages: apiMessages,
-          ...(requestTools ? { tools: requestTools } : {}),
-          ...(requestResponseFormat ? { response_format: requestResponseFormat } : {}),
-          ...(requestThinkingConfig ?? {}),
-        }),
-    });
-    if (abortController.signal.aborted) {
-      cleanupEmptyAssistantMessage();
-      activeGenerations.delete(generationId);
-      return;
-    }
-    logInfo("Prompt prepared", { tokens: promptTokensCount, model: server.config?.modelPath });
-    // --- End Overflow Policy ---
-    // Always use /v1/chat/completions — llama-server is launched with --jinja
-    // and handles chat template rendering natively. The old /completion fallback
-    // used a broken "{{ messages }}" Jinja template that serialized the messages
-    // array as raw JSON, producing garbage output.
 
-    const requestBody: ChatCompletionRequestBody = {
-      stream: true,
-      cache_prompt: true,
-      temperature: infPreset?.temperature ?? inferenceDefaults.temperature,
-      top_k: infPreset?.topK ?? inferenceDefaults.topK,
-      top_p: infPreset?.topP ?? inferenceDefaults.topP,
-      min_p: infPreset?.minP ?? inferenceDefaults.minP,
-      typical_p: infPreset?.typicalP ?? inferenceDefaults.typicalP,
+    if (!isContinue && !isRegenerate && !isToolRecurse) {
+      if (userMsg) {
+        userMsg.content = dbContent;
+        userMsg.rawContent = dbContent;
+        userMsg.attachments = processedAttachments;
+        rawMessages.push(userMsg);
 
-      repeat_penalty: infPreset?.repeatPenalty ?? inferenceDefaults.repeatPenalty,
-      repeat_last_n: infPreset?.repeatLastN ?? inferenceDefaults.repeatLastN,
-      presence_penalty: infPreset?.presencePenalty ?? inferenceDefaults.presencePenalty,
-      frequency_penalty: infPreset?.frequencyPenalty ?? inferenceDefaults.frequencyPenalty,
-      mirostat: infPreset?.mirostat ?? inferenceDefaults.mirostat,
-      mirostat_tau: infPreset?.mirostatTau ?? inferenceDefaults.mirostatTau,
-      mirostat_eta: infPreset?.mirostatEta ?? inferenceDefaults.mirostatEta,
-      dynatemp_range: infPreset?.dynaTempRange ?? inferenceDefaults.dynaTempRange,
-      dynatemp_exponent: infPreset?.dynaTempExponent ?? inferenceDefaults.dynaTempExponent,
-      dry_multiplier: infPreset?.dryMultiplier ?? inferenceDefaults.dryMultiplier ?? 0.0,
-      dry_base: infPreset?.dryBase ?? inferenceDefaults.dryBase ?? 1.75,
-      dry_allowed_length: infPreset?.dryAllowedLength ?? inferenceDefaults.dryAllowedLength ?? 2,
-      dry_penalty_last_n: infPreset?.dryPenaltyLastN ?? inferenceDefaults.dryPenaltyLastN ?? 64,
-      dry_sequence_breakers: infPreset?.drySequenceBreakers ??
-        inferenceDefaults.drySequenceBreakers ?? ["\n", ":", '"', "*"],
-      xtc_probability: infPreset?.xtcProbability ?? inferenceDefaults.xtcProbability ?? 0.0,
-      xtc_threshold: infPreset?.xtcThreshold ?? inferenceDefaults.xtcThreshold ?? 0.1,
-      seed: infPreset?.seed !== undefined && infPreset.seed !== -1 ? infPreset.seed : undefined,
-      n_predict: infPreset?.maxTokens ?? inferenceDefaults.maxTokens,
-      stop: infPreset?.stopStrings ?? inferenceDefaults.stopStrings,
-      messages: apiMessages,
+        const db = getDb();
+        db.prepare("UPDATE messages SET content = ?, raw_content = ? WHERE id = ?").run(
+          dbContent,
+          dbContent,
+          userMessageId,
+        );
+
+        // Reconcile optimistic client-side temp IDs with the persisted user message ID.
+        broadcast({ type: "message", chatId, message: userMsg });
+      }
+    }
+
+    // --- Overflow Policy Truncation ---
+    // C7 fix: guard against infPreset being undefined (edge case after data wipe)
+    const inferenceDefaults = createDefaultInferenceSampling();
+    const safeInfPreset = infPreset ?? inferenceDefaults;
+    const overflowPolicy = safeInfPreset.contextOverflowPolicy ?? "TruncateMiddle";
+    const ctxSize = server.config?.contextSize || 4096;
+    const requestTools = await buildRequestTools(infPreset);
+    const useTools = Boolean(requestTools?.length);
+    const requestResponseFormat = buildRequestResponseFormat(infPreset);
+    const requestThinkingConfig = await buildRequestThinkingConfig(
+      infPreset,
+      server.config?.presetId,
+      thinkingTagOverride?.enableToken,
+    );
+    const apiMessageContext = {
+      preserveThinking: requestThinkingConfig.chat_template_kwargs.preserve_thinking,
+      thinkingConfig,
+      modelMeta,
     };
 
-    if (requestTools) {
-      requestBody.tools = requestTools;
+    /**
+     * Serializes the exact inference payload used for token-budget estimation.
+     *
+     * @param messages - Chat history after overflow handling.
+     * @returns JSON text matching the request payload shape used for prompt tokenization.
+     */
+    const buildPromptText = async (messages: ChatMessage[]): Promise<string> =>
+      serializePromptForTokens(await buildApiMessages(messages, apiMessageContext), {
+        tools: requestTools,
+        responseFormat: requestResponseFormat,
+        thinking: requestThinkingConfig,
+      });
+
+    if (!reuseAssistantRow) {
+      const assistantPlaceholder: ChatMessage = {
+        id: assistantMessageId,
+        chatId,
+        role: "assistant",
+        content: "",
+        rawContent: "",
+        position: 0,
+        createdAt: Date.now(),
+      };
+      await addMessage(assistantPlaceholder);
+      broadcast({ type: "message", chatId, message: assistantPlaceholder });
     }
-
-    if (requestResponseFormat) {
-      requestBody.response_format = requestResponseFormat;
-    }
-
-    if (requestThinkingConfig) {
-      requestBody.chat_template_kwargs = requestThinkingConfig.chat_template_kwargs;
-      if (requestThinkingConfig.reasoning_format) {
-        requestBody.reasoning_format = requestThinkingConfig.reasoning_format;
-      }
-    }
-
-    const endpoint = `http://127.0.0.1:${server.port}/v1/chat/completions`;
-    logDebug("Constructed inference request", {
-      endpoint,
-      promptTokensCount,
-      ctxSize,
-      messagesCount: requestBody.messages.length,
-      messages: summarizeRequestMessages(requestBody.messages),
-    });
-
-    logInfo("Initiating model inference", {
-      chatId,
-      endpoint,
-      messages: requestBody.messages.length,
-      maxTokens: requestBody.n_predict,
-      thinking: requestBody.chat_template_kwargs?.enable_thinking,
-    });
-    logVerbose("Active inference settings", {
-      chatId,
-      generationId,
-      modelPath: server.config?.modelPath,
-      inferencePresetId: infPreset?.id ?? null,
-      inferencePresetName: infPreset?.name ?? null,
-      sampling: {
-        temperature: requestBody.temperature,
-        top_k: requestBody.top_k,
-        top_p: requestBody.top_p,
-        min_p: requestBody.min_p,
-        typical_p: requestBody.typical_p,
-        repeat_penalty: requestBody.repeat_penalty,
-        repeat_last_n: requestBody.repeat_last_n,
-        presence_penalty: requestBody.presence_penalty,
-        frequency_penalty: requestBody.frequency_penalty,
-        mirostat: requestBody.mirostat,
-        mirostat_tau: requestBody.mirostat_tau,
-        mirostat_eta: requestBody.mirostat_eta,
-        dynatemp_range: requestBody.dynatemp_range,
-        dynatemp_exponent: requestBody.dynatemp_exponent,
-        dry_multiplier: requestBody.dry_multiplier,
-        dry_base: requestBody.dry_base,
-        dry_allowed_length: requestBody.dry_allowed_length,
-        dry_penalty_last_n: requestBody.dry_penalty_last_n,
-        dry_sequence_breakers: requestBody.dry_sequence_breakers,
-        xtc_probability: requestBody.xtc_probability,
-        xtc_threshold: requestBody.xtc_threshold,
-        seed: requestBody.seed ?? null,
-        n_predict: requestBody.n_predict,
-        stop: requestBody.stop,
-      },
-      chat_template_kwargs: requestBody.chat_template_kwargs ?? null,
-      reasoning_format: requestBody.reasoning_format ?? null,
-      toolsEnabled: Boolean(requestBody.tools?.length),
-      structuredOutput: Boolean(requestBody.response_format),
-      messageCount: requestBody.messages.length,
-      messages: summarizeRequestMessages(requestBody.messages),
-      promptTokensCount,
-      ctxSize,
-    });
-
-    const settings = await loadSettings();
-    const timeoutSeconds = settings.requestTimeoutSeconds ?? 60;
-    const timeoutMs = timeoutSeconds === 0 ? 0 : timeoutSeconds * 1000;
-    let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
 
     /**
-     * Arms the inactivity timeout after a chunk has arrived.
-     *
-     * The timer stays disarmed until the first SSE chunk. llama-server sends
-     * nothing while it evaluates the prompt, and that silence is not a stalled
-     * generation. `0` disables the timer entirely.
+     * Removes the placeholder assistant row when generation fails before any content is written.
+     * Reasoning traces and tool-call metadata are substantive and must not be discarded.
      *
      * @returns No return value.
      */
-    const resetInactivityTimer = () => {
-      if (timeoutMs <= 0) return;
-      if (inactivityTimer) clearTimeout(inactivityTimer);
-      inactivityTimer = setTimeout(() => {
-        logWarn(`Generation inactivity timeout for generation ${generationId} (${timeoutMs}ms)`);
-        abortGeneration(generationId, "timeout");
-      }, timeoutMs);
+    const cleanupEmptyAssistantMessage = () => {
+      if (reuseAssistantRow) return;
+
+      try {
+        const row = getDb()
+          .query<
+            { content: string; thinking_content: string | null; tool_calls_json: string | null },
+            [string]
+          >("SELECT content, thinking_content, tool_calls_json FROM messages WHERE id = ?")
+          .get(assistantMessageId);
+        const hasContent = Boolean(row?.content);
+        const hasThinking = Boolean(row?.thinking_content);
+        const hasToolCalls = Boolean(row?.tool_calls_json);
+        if (row && !hasContent && !hasThinking && !hasToolCalls) {
+          getDb().prepare("DELETE FROM messages WHERE id = ?").run(assistantMessageId);
+        }
+      } catch (cleanupErr) {
+        logError("[streamProxy] Failed to clean up orphaned assistant message", cleanupErr);
+      }
     };
 
-    fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(requestBody),
-      signal: abortController.signal,
-    })
-      .then(async (res) => {
-        logDebug("Model server response received", { status: res.status });
-        if (!res.ok) {
-          const errorBody = await res.text().catch(() => "");
-          const err = new Error(
-            `Model server request failed: ${res.status}${errorBody ? `: ${errorBody}` : ""}`,
-          );
-          logStreamProxyError("fetch-response", err, {
-            endpoint,
-            chatId,
-            assistantMessageId,
-            generationId,
-            responseStatus: res.status,
-            responseBody: errorBody,
-          });
-          throw err;
+    /**
+     * Truncates history, tokenises the prompt, and starts the llama-server stream.
+     * Runs after the HTTP handler has already returned the assistant message ID.
+     *
+     * @returns A promise that resolves once the stream has been started or failed.
+     */
+    const runInference = async (): Promise<void> => {
+      logDebug("Truncating message history", { ctxSize, overflowPolicy });
+      rawMessages = await truncateMessages(
+        rawMessages,
+        overflowPolicy,
+        ctxSize,
+        safeInfPreset.maxTokens || 4096,
+        server.port ?? undefined,
+        true,
+        { buildPromptText },
+      );
+      if (abortController.signal.aborted) {
+        finishAbortedGeneration({
+          chatId,
+          messageId: assistantMessageId,
+          generationId,
+          reason: takeAbortReason(generationId),
+          contextSize: ctxSize,
+        });
+        cleanupEmptyAssistantMessage();
+        activeGenerations.delete(generationId);
+        return;
+      }
+      logDebug("Calculating prompt token count");
+      const apiMessages = await buildApiMessages(rawMessages, apiMessageContext);
+      const promptTokensCount = await getTokens(rawMessages, server.port ?? undefined, {
+        buildPromptText: async () =>
+          serializePromptForTokens(apiMessages, {
+            tools: requestTools,
+            responseFormat: requestResponseFormat,
+            thinking: requestThinkingConfig,
+          }),
+      });
+      if (abortController.signal.aborted) {
+        finishAbortedGeneration({
+          chatId,
+          messageId: assistantMessageId,
+          generationId,
+          reason: takeAbortReason(generationId),
+          promptTokens: promptTokensCount,
+          contextSize: ctxSize,
+        });
+        cleanupEmptyAssistantMessage();
+        activeGenerations.delete(generationId);
+        return;
+      }
+      logInfo("Prompt prepared", { tokens: promptTokensCount, model: server.config?.modelPath });
+      // --- End Overflow Policy ---
+      // Always use /v1/chat/completions — llama-server is launched with --jinja
+      // and handles chat template rendering natively. The old /completion fallback
+      // used a broken "{{ messages }}" Jinja template that serialized the messages
+      // array as raw JSON, producing garbage output.
+
+      const requestBody: ChatCompletionRequestBody = {
+        stream: true,
+        cache_prompt: true,
+        temperature: infPreset?.temperature ?? inferenceDefaults.temperature,
+        top_k: infPreset?.topK ?? inferenceDefaults.topK,
+        top_p: infPreset?.topP ?? inferenceDefaults.topP,
+        min_p: infPreset?.minP ?? inferenceDefaults.minP,
+        typical_p: infPreset?.typicalP ?? inferenceDefaults.typicalP,
+
+        repeat_penalty: infPreset?.repeatPenalty ?? inferenceDefaults.repeatPenalty,
+        repeat_last_n: infPreset?.repeatLastN ?? inferenceDefaults.repeatLastN,
+        presence_penalty: infPreset?.presencePenalty ?? inferenceDefaults.presencePenalty,
+        frequency_penalty: infPreset?.frequencyPenalty ?? inferenceDefaults.frequencyPenalty,
+        mirostat: infPreset?.mirostat ?? inferenceDefaults.mirostat,
+        mirostat_tau: infPreset?.mirostatTau ?? inferenceDefaults.mirostatTau,
+        mirostat_eta: infPreset?.mirostatEta ?? inferenceDefaults.mirostatEta,
+        dynatemp_range: infPreset?.dynaTempRange ?? inferenceDefaults.dynaTempRange,
+        dynatemp_exponent: infPreset?.dynaTempExponent ?? inferenceDefaults.dynaTempExponent,
+        dry_multiplier: infPreset?.dryMultiplier ?? inferenceDefaults.dryMultiplier ?? 0.0,
+        dry_base: infPreset?.dryBase ?? inferenceDefaults.dryBase ?? 1.75,
+        dry_allowed_length: infPreset?.dryAllowedLength ?? inferenceDefaults.dryAllowedLength ?? 2,
+        dry_penalty_last_n: infPreset?.dryPenaltyLastN ?? inferenceDefaults.dryPenaltyLastN ?? 64,
+        dry_sequence_breakers: infPreset?.drySequenceBreakers ??
+          inferenceDefaults.drySequenceBreakers ?? ["\n", ":", '"', "*"],
+        xtc_probability: infPreset?.xtcProbability ?? inferenceDefaults.xtcProbability ?? 0.0,
+        xtc_threshold: infPreset?.xtcThreshold ?? inferenceDefaults.xtcThreshold ?? 0.1,
+        seed: infPreset?.seed !== undefined && infPreset.seed !== -1 ? infPreset.seed : undefined,
+        n_predict: infPreset?.maxTokens ?? inferenceDefaults.maxTokens,
+        stop: infPreset?.stopStrings ?? inferenceDefaults.stopStrings,
+        messages: apiMessages,
+      };
+
+      if (requestTools) {
+        requestBody.tools = requestTools;
+      }
+
+      if (requestResponseFormat) {
+        requestBody.response_format = requestResponseFormat;
+      }
+
+      if (requestThinkingConfig) {
+        requestBody.chat_template_kwargs = requestThinkingConfig.chat_template_kwargs;
+        if (requestThinkingConfig.reasoning_format) {
+          requestBody.reasoning_format = requestThinkingConfig.reasoning_format;
         }
-        if (!res.body) {
-          const err = new Error("Model server returned an empty response stream.");
-          logStreamProxyError("fetch-empty-body", err, {
-            endpoint,
-            chatId,
-            assistantMessageId,
-            generationId,
-          });
-          throw err;
-        }
+      }
 
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
+      const endpoint = `http://127.0.0.1:${server.port}/v1/chat/completions`;
+      logDebug("Constructed inference request", {
+        endpoint,
+        promptTokensCount,
+        ctxSize,
+        messagesCount: requestBody.messages.length,
+        messages: summarizeRequestMessages(requestBody.messages),
+      });
 
-        const reusedRaw = reuseAssistantRow ? lastMessage?.rawContent || "" : "";
-        const streamState: AssistantStreamState = {
-          fullRawContent: reusedRaw,
-          prevContent: reuseAssistantRow ? lastMessage?.content || "" : "",
-          prevThinking: reuseAssistantRow ? lastMessage?.thinkingContent || "" : "",
-          usedNativeReasoning: Boolean(
-            reuseAssistantRow &&
-            inferNativeReasoningReuse(
-              lastMessage?.thinkingContent,
-              reusedRaw,
-              thinkingConfig.openTag,
-              thinkingConfig.closeTag,
-              lastMessage?.metrics?.thinkingSource,
-            ),
-          ),
-        };
+      logInfo("Initiating model inference", {
+        chatId,
+        endpoint,
+        messages: requestBody.messages.length,
+        maxTokens: requestBody.n_predict,
+        thinking: requestBody.chat_template_kwargs?.enable_thinking,
+      });
+      logVerbose("Active inference settings", {
+        chatId,
+        generationId,
+        modelPath: server.config?.modelPath,
+        inferencePresetId: infPreset?.id ?? null,
+        inferencePresetName: infPreset?.name ?? null,
+        sampling: {
+          temperature: requestBody.temperature,
+          top_k: requestBody.top_k,
+          top_p: requestBody.top_p,
+          min_p: requestBody.min_p,
+          typical_p: requestBody.typical_p,
+          repeat_penalty: requestBody.repeat_penalty,
+          repeat_last_n: requestBody.repeat_last_n,
+          presence_penalty: requestBody.presence_penalty,
+          frequency_penalty: requestBody.frequency_penalty,
+          mirostat: requestBody.mirostat,
+          mirostat_tau: requestBody.mirostat_tau,
+          mirostat_eta: requestBody.mirostat_eta,
+          dynatemp_range: requestBody.dynatemp_range,
+          dynatemp_exponent: requestBody.dynatemp_exponent,
+          dry_multiplier: requestBody.dry_multiplier,
+          dry_base: requestBody.dry_base,
+          dry_allowed_length: requestBody.dry_allowed_length,
+          dry_penalty_last_n: requestBody.dry_penalty_last_n,
+          dry_sequence_breakers: requestBody.dry_sequence_breakers,
+          xtc_probability: requestBody.xtc_probability,
+          xtc_threshold: requestBody.xtc_threshold,
+          seed: requestBody.seed ?? null,
+          n_predict: requestBody.n_predict,
+          stop: requestBody.stop,
+        },
+        chat_template_kwargs: requestBody.chat_template_kwargs ?? null,
+        reasoning_format: requestBody.reasoning_format ?? null,
+        toolsEnabled: Boolean(requestBody.tools?.length),
+        structuredOutput: Boolean(requestBody.response_format),
+        messageCount: requestBody.messages.length,
+        messages: summarizeRequestMessages(requestBody.messages),
+        promptTokensCount,
+        ctxSize,
+      });
 
-        const accumulatedToolCalls: {
-          id: string;
-          type: "function";
-          function: { name: string; arguments: string };
-          index?: number;
-        }[] = [];
-        let lastFlushTime = Date.now();
-        let streamBuffer = "";
-        let thinkingStartedAt: number | null = null;
-        let thinkingEndedAt: number | null = null;
-        let reachedTerminalEvent = false;
-        let interruptedFinalized = false;
+      const settings = await loadSettings();
+      const timeoutSeconds = settings.requestTimeoutSeconds ?? 60;
+      const timeoutMs = timeoutSeconds === 0 ? 0 : timeoutSeconds * 1000;
+      let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
 
-        /**
-         * Saves whatever text has already arrived when llama-server drops the stream.
-         *
-         * A missing finish reason used to leave the UI in `generating` and discard
-         * the last unflushed tokens. This writes the partial reply, then tells the
-         * client the turn stopped with an error.
-         *
-         * @param message - Error text shown for the interrupted turn.
-         * @returns No return value.
-         */
-        const persistInterruptedGeneration = async (message: string): Promise<void> => {
-          if (reachedTerminalEvent || interruptedFinalized) return;
-          interruptedFinalized = true;
-          if (thinkingStartedAt !== null && thinkingEndedAt === null) {
-            thinkingEndedAt = Date.now();
-          }
-          const thinkingDurationMs =
-            thinkingStartedAt !== null
-              ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
-              : undefined;
-          const metrics = buildMessageMetrics(EMPTY_TIMINGS, promptTokensCount, {
-            stopReason: "error",
-            ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
-            ...(streamState.prevThinking
-              ? {
-                  thinkingSource: streamState.usedNativeReasoning
-                    ? ("native" as const)
-                    : ("tags" as const),
-                }
-              : {}),
-          });
-          try {
-            const db = await import("./persistence/db").then((m) => m.getDb());
-            db.prepare(
-              "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
-            ).run(
-              streamState.prevContent,
-              streamState.fullRawContent,
-              streamState.prevThinking || null,
-              JSON.stringify(metrics),
-              assistantMessageId,
+      /**
+       * Arms the inactivity timeout after a chunk has arrived.
+       *
+       * The timer stays disarmed until the first SSE chunk. llama-server sends
+       * nothing while it evaluates the prompt, and that silence is not a stalled
+       * generation. `0` disables the timer entirely.
+       *
+       * @returns No return value.
+       */
+      const resetInactivityTimer = () => {
+        if (timeoutMs <= 0) return;
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(() => {
+          logWarn(`Generation inactivity timeout for generation ${generationId} (${timeoutMs}ms)`);
+          abortGeneration(generationId, "timeout");
+        }, timeoutMs);
+      };
+
+      fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+        signal: abortController.signal,
+      })
+        .then(async (res) => {
+          logDebug("Model server response received", { status: res.status });
+          if (!res.ok) {
+            const errorBody = await res.text().catch(() => "");
+            const err = new Error(
+              `Model server request failed: ${res.status}${errorBody ? `: ${errorBody}` : ""}`,
             );
-          } catch (persistErr) {
-            logStreamProxyError("interrupt-flush", persistErr, {
+            logStreamProxyError("fetch-response", err, {
+              endpoint,
+              chatId,
+              assistantMessageId,
+              generationId,
+              responseStatus: res.status,
+              responseBody: errorBody,
+            });
+            throw err;
+          }
+          if (!res.body) {
+            const err = new Error("Model server returned an empty response stream.");
+            logStreamProxyError("fetch-empty-body", err, {
+              endpoint,
               chatId,
               assistantMessageId,
               generationId,
             });
+            throw err;
           }
-          cleanupEmptyAssistantMessage();
-          broadcast({
-            type: "error",
-            chatId,
-            messageId: assistantMessageId,
-            generationId,
-            message,
-          });
-          broadcast({
-            type: "stop",
-            chatId,
-            messageId: assistantMessageId,
-            generationId,
-            stopReason: "error",
-            timings: EMPTY_TIMINGS,
-            promptTokens: promptTokensCount,
-            contextSize: ctxSize,
-            fullContent: streamState.prevContent,
-            fullRawContent: streamState.fullRawContent,
-            fullThinking: streamState.prevThinking,
-            ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
-          });
-        };
 
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (inactivityTimer) clearTimeout(inactivityTimer);
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
 
-            const chunk = value ? decoder.decode(value, { stream: true }) : "";
-            streamBuffer += chunk;
+          const reusedRaw = reuseAssistantRow ? lastMessage?.rawContent || "" : "";
+          const streamState: AssistantStreamState = {
+            fullRawContent: reusedRaw,
+            prevContent: reuseAssistantRow ? lastMessage?.content || "" : "",
+            prevThinking: reuseAssistantRow ? lastMessage?.thinkingContent || "" : "",
+            usedNativeReasoning: Boolean(
+              reuseAssistantRow &&
+              inferNativeReasoningReuse(
+                lastMessage?.thinkingContent,
+                reusedRaw,
+                thinkingConfig.openTag,
+                thinkingConfig.closeTag,
+                lastMessage?.metrics?.thinkingSource,
+              ),
+            ),
+          };
 
-            const lines = streamBuffer.split("\n");
-            if (!done) {
-              streamBuffer = lines.pop() || "";
-            } else {
-              streamBuffer = "";
+          const accumulatedToolCalls: {
+            id: string;
+            type: "function";
+            function: { name: string; arguments: string };
+            index?: number;
+          }[] = [];
+          let lastFlushTime = Date.now();
+          let streamBuffer = "";
+          let thinkingStartedAt: number | null = null;
+          let thinkingEndedAt: number | null = null;
+          let reachedTerminalEvent = false;
+          let interruptedFinalized = false;
+
+          /**
+           * Saves whatever text has already arrived when llama-server drops the stream.
+           *
+           * A missing finish reason used to leave the UI in `generating` and discard
+           * the last unflushed tokens. This writes the partial reply, then tells the
+           * client the turn stopped with an error.
+           *
+           * @param message - Error text shown for the interrupted turn.
+           * @returns No return value.
+           */
+          const persistInterruptedGeneration = async (message: string): Promise<void> => {
+            if (reachedTerminalEvent || interruptedFinalized) return;
+            interruptedFinalized = true;
+            finalizeAssistantStreamState(
+              streamState,
+              thinkingConfig.openTag,
+              thinkingConfig.closeTag,
+            );
+            if (thinkingStartedAt !== null && thinkingEndedAt === null) {
+              thinkingEndedAt = Date.now();
             }
-
-            let shouldStop = false;
-
-            for (const line of lines) {
-              if (!line.startsWith("data: ")) continue;
-              const dataStr = line.slice(6);
-              if (dataStr === "[DONE]") continue;
-
-              let parsed: {
-                choices?: {
-                  delta?: {
-                    content?: string;
-                    reasoning_content?: string;
-                    tool_calls?: {
-                      index: number;
-                      id: string;
-                      function: { name?: string; arguments?: string };
-                    }[];
-                  };
-                  finish_reason?: string;
-                }[];
-                content?: string;
-                stop?: boolean;
-                timings?: import("../shared/types").LlamaTimings;
-                stopped_limit?: boolean;
-              };
-              try {
-                parsed = JSON.parse(dataStr);
-              } catch {
-                continue;
-              }
-
-              // Extract content delta from the OpenAI-style chat completions response
-              const tcDelta = parsed.choices?.[0]?.delta?.tool_calls;
-              if (tcDelta) {
-                for (const tc of tcDelta) {
-                  const idx = tc.index ?? 0;
-                  if (!accumulatedToolCalls[idx]) {
-                    accumulatedToolCalls[idx] = {
-                      id: tc.id,
-                      type: "function",
-                      function: { name: "", arguments: "" },
-                    };
+            const thinkingDurationMs =
+              thinkingStartedAt !== null
+                ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
+                : undefined;
+            const metrics = buildMessageMetrics(EMPTY_TIMINGS, promptTokensCount, {
+              stopReason: "error",
+              ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+              ...(streamState.prevThinking
+                ? {
+                    thinkingSource: streamState.usedNativeReasoning
+                      ? ("native" as const)
+                      : ("tags" as const),
                   }
-                  if (tc.id) accumulatedToolCalls[idx].id = tc.id;
-                  if (tc.function?.name)
-                    accumulatedToolCalls[idx].function.name += tc.function.name;
-                  if (tc.function?.arguments)
-                    accumulatedToolCalls[idx].function.arguments += tc.function.arguments;
-                }
+                : {}),
+            });
+            try {
+              const db = await import("./persistence/db").then((m) => m.getDb());
+              db.prepare(
+                "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
+              ).run(
+                streamState.prevContent,
+                streamState.fullRawContent,
+                streamState.prevThinking || null,
+                JSON.stringify(metrics),
+                assistantMessageId,
+              );
+            } catch (persistErr) {
+              logStreamProxyError("interrupt-flush", persistErr, {
+                chatId,
+                assistantMessageId,
+                generationId,
+              });
+            }
+            cleanupEmptyAssistantMessage();
+            broadcast({
+              type: "error",
+              chatId,
+              messageId: assistantMessageId,
+              generationId,
+              message,
+            });
+            broadcast({
+              type: "stop",
+              chatId,
+              messageId: assistantMessageId,
+              generationId,
+              stopReason: "error",
+              timings: EMPTY_TIMINGS,
+              promptTokens: promptTokensCount,
+              contextSize: ctxSize,
+              fullContent: streamState.prevContent,
+              fullRawContent: streamState.fullRawContent,
+              fullThinking: streamState.prevThinking,
+              ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+            });
+          };
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (inactivityTimer) clearTimeout(inactivityTimer);
+
+              const chunk = value ? decoder.decode(value, { stream: true }) : "";
+              streamBuffer += chunk;
+
+              const lines = streamBuffer.split("\n");
+              if (!done) {
+                streamBuffer = lines.pop() || "";
+              } else {
+                streamBuffer = "";
               }
-              const contentPiece = parsed.choices?.[0]?.delta?.content || "";
-              const reasoningPiece = parsed.choices?.[0]?.delta?.reasoning_content || "";
 
-              if (contentPiece || reasoningPiece) {
-                const { contentDelta, thinkingDelta, isThinking } = applyAssistantStreamDelta(
-                  streamState,
-                  contentPiece,
-                  reasoningPiece,
-                  thinkingConfig.openTag,
-                  thinkingConfig.closeTag,
-                );
+              let shouldStop = false;
 
-                if (thinkingDelta && thinkingStartedAt === null) {
-                  thinkingStartedAt = Date.now();
+              for (const line of lines) {
+                if (!line.startsWith("data: ")) continue;
+                const dataStr = line.slice(6);
+                if (dataStr === "[DONE]") continue;
+
+                let parsed: {
+                  choices?: {
+                    delta?: {
+                      content?: string;
+                      reasoning_content?: string;
+                      tool_calls?: {
+                        index: number;
+                        id: string;
+                        function: { name?: string; arguments?: string };
+                      }[];
+                    };
+                    finish_reason?: string;
+                  }[];
+                  content?: string;
+                  stop?: boolean;
+                  timings?: import("../shared/types").LlamaTimings;
+                  stopped_limit?: boolean;
+                };
+                try {
+                  parsed = JSON.parse(dataStr);
+                } catch {
+                  continue;
                 }
-                if (thinkingStartedAt !== null && !isThinking && thinkingEndedAt === null) {
-                  thinkingEndedAt = Date.now();
+
+                // Extract content delta from the OpenAI-style chat completions response
+                const tcDelta = parsed.choices?.[0]?.delta?.tool_calls;
+                if (tcDelta) {
+                  for (const tc of tcDelta) {
+                    const idx = tc.index ?? 0;
+                    if (!accumulatedToolCalls[idx]) {
+                      accumulatedToolCalls[idx] = {
+                        id: tc.id,
+                        type: "function",
+                        function: { name: "", arguments: "" },
+                      };
+                    }
+                    if (tc.id) accumulatedToolCalls[idx].id = tc.id;
+                    if (tc.function?.name)
+                      accumulatedToolCalls[idx].function.name += tc.function.name;
+                    if (tc.function?.arguments)
+                      accumulatedToolCalls[idx].function.arguments += tc.function.arguments;
+                  }
+                }
+                const contentPiece = parsed.choices?.[0]?.delta?.content || "";
+                const reasoningPiece = parsed.choices?.[0]?.delta?.reasoning_content || "";
+
+                if (contentPiece || reasoningPiece) {
+                  const { contentDelta, thinkingDelta, isThinking } = applyAssistantStreamDelta(
+                    streamState,
+                    contentPiece,
+                    reasoningPiece,
+                    thinkingConfig.openTag,
+                    thinkingConfig.closeTag,
+                  );
+
+                  if (thinkingDelta && thinkingStartedAt === null) {
+                    thinkingStartedAt = Date.now();
+                  }
+                  if (thinkingStartedAt !== null && !isThinking && thinkingEndedAt === null) {
+                    thinkingEndedAt = Date.now();
+                  }
+
+                  if (contentDelta || thinkingDelta) {
+                    const thinkingDurationMs =
+                      thinkingStartedAt !== null && thinkingEndedAt !== null
+                        ? Math.max(0, thinkingEndedAt - thinkingStartedAt)
+                        : undefined;
+                    broadcast({
+                      type: "token",
+                      chatId,
+                      messageId: assistantMessageId,
+                      generationId,
+                      delta: contentDelta,
+                      thinkingDelta: thinkingDelta || undefined,
+                      promptTokens: promptTokensCount,
+                      contextSize: ctxSize,
+                      ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+                    });
+                  }
+
+                  if (Date.now() - lastFlushTime > 1000) {
+                    lastFlushTime = Date.now();
+                    const dbInstance = await import("./persistence/db").then((m) => m.getDb());
+                    dbInstance
+                      .prepare(
+                        "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
+                      )
+                      .run(
+                        streamState.prevContent,
+                        streamState.fullRawContent,
+                        streamState.prevThinking || null,
+                        assistantMessageId,
+                      );
+                  }
                 }
 
-                if (contentDelta || thinkingDelta) {
-                  const thinkingDurationMs =
-                    thinkingStartedAt !== null && thinkingEndedAt !== null
-                      ? Math.max(0, thinkingEndedAt - thinkingStartedAt)
-                      : undefined;
+                if (useTools && parsed.choices?.[0]?.finish_reason === "tool_calls") {
+                  finalizeAssistantStreamState(
+                    streamState,
+                    thinkingConfig.openTag,
+                    thinkingConfig.closeTag,
+                  );
+                  const toolCalls = accumulatedToolCalls.filter(Boolean);
                   broadcast({
-                    type: "token",
+                    type: "tool_call",
                     chatId,
                     messageId: assistantMessageId,
                     generationId,
-                    delta: contentDelta,
-                    thinkingDelta: thinkingDelta || undefined,
-                    promptTokens: promptTokensCount,
-                    contextSize: ctxSize,
-                    ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+                    toolCalls,
                   });
-                }
 
-                if (Date.now() - lastFlushTime > 1000) {
-                  lastFlushTime = Date.now();
-                  const dbInstance = await import("./persistence/db").then((m) => m.getDb());
-                  dbInstance
+                  // C1 fix: The assistant row was already INSERTed at line ~407.
+                  // Use UPDATE instead of a second INSERT to avoid PRIMARY KEY violation.
+                  const dbToolUpdate = await import("./persistence/db").then((m) => m.getDb());
+                  dbToolUpdate
                     .prepare(
-                      "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
+                      "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, tool_calls_json = ? WHERE id = ?",
                     )
                     .run(
                       streamState.prevContent,
                       streamState.fullRawContent,
                       streamState.prevThinking || null,
+                      JSON.stringify(toolCalls),
                       assistantMessageId,
                     );
-                }
-              }
 
-              if (useTools && parsed.choices?.[0]?.finish_reason === "tool_calls") {
-                const toolCalls = accumulatedToolCalls.filter(Boolean);
-                broadcast({
-                  type: "tool_call",
-                  chatId,
-                  messageId: assistantMessageId,
-                  generationId,
-                  toolCalls,
-                });
+                  broadcast({
+                    type: "tool_approval_state",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    pending: true,
+                    toolCallId: toolCalls[0]?.id,
+                    reason: "awaiting_user",
+                  });
 
-                // C1 fix: The assistant row was already INSERTed at line ~407.
-                // Use UPDATE instead of a second INSERT to avoid PRIMARY KEY violation.
-                const dbToolUpdate = await import("./persistence/db").then((m) => m.getDb());
-                dbToolUpdate
-                  .prepare(
-                    "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, tool_calls_json = ? WHERE id = ?",
-                  )
-                  .run(
-                    streamState.prevContent,
-                    streamState.fullRawContent,
-                    streamState.prevThinking || null,
-                    JSON.stringify(toolCalls),
-                    assistantMessageId,
-                  );
-
-                broadcast({
-                  type: "tool_approval_state",
-                  chatId,
-                  messageId: assistantMessageId,
-                  generationId,
-                  pending: true,
-                  toolCallId: toolCalls[0]?.id,
-                  reason: "awaiting_user",
-                });
-
-                const toolTimings = parsed.timings || EMPTY_TIMINGS;
-                /**
-                 * Records a tool message for this call and every later call that will not run.
-                 *
-                 * @param fromIndex - First tool call that still needs a result row.
-                 * @param decisionReason - Why those calls are not being executed.
-                 * @returns No return value.
-                 */
-                const recordUnresolvedToolCalls = async (
-                  fromIndex: number,
-                  decisionReason: string | undefined,
-                ) => {
-                  for (let index = fromIndex; index < toolCalls.length; index++) {
-                    const pending = toolCalls[index];
-                    if (!pending) continue;
-                    await recordToolResultMessage(
+                  const toolTimings = parsed.timings || EMPTY_TIMINGS;
+                  /**
+                   * Records a tool message for this call and every later call that will not run.
+                   *
+                   * @param fromIndex - First tool call that still needs a result row.
+                   * @param decisionReason - Why those calls are not being executed.
+                   * @returns No return value.
+                   */
+                  const recordUnresolvedToolCalls = async (
+                    fromIndex: number,
+                    decisionReason: string | undefined,
+                  ) => {
+                    for (let index = fromIndex; index < toolCalls.length; index++) {
+                      const pending = toolCalls[index];
+                      if (!pending) continue;
+                      await recordToolResultMessage(
+                        chatId,
+                        pending.id,
+                        toolDecisionErrorContent(decisionReason),
+                      );
+                    }
+                  };
+                  /**
+                   * Ends this generation without starting the tool follow-up.
+                   *
+                   * @param stopReason - Stop reason broadcast to the client.
+                   * @returns No return value.
+                   */
+                  const finishToolLoop = (stopReason: "error" | "cancelled") => {
+                    reachedTerminalEvent = true;
+                    shouldStop = true;
+                    broadcast({
+                      type: "stop",
                       chatId,
-                      pending.id,
-                      toolDecisionErrorContent(decisionReason),
+                      messageId: assistantMessageId,
+                      generationId,
+                      stopReason,
+                      timings: toolTimings,
+                      fullContent: streamState.prevContent,
+                      fullRawContent: streamState.fullRawContent,
+                      fullThinking: streamState.prevThinking,
+                    });
+                  };
+
+                  for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex++) {
+                    const tc = toolCalls[toolIndex];
+                    if (!tc) continue;
+                    if (abortController.signal.aborted) {
+                      await recordUnresolvedToolCalls(toolIndex, "cancelled");
+                      finishToolLoop("cancelled");
+                      break;
+                    }
+
+                    const { approved, editedArguments, reason } = await waitForToolApproval(
+                      chatId,
+                      tc.id,
                     );
+                    if (!approved || abortController.signal.aborted) {
+                      const decisionReason = abortController.signal.aborted
+                        ? "cancelled"
+                        : (reason ?? "rejected");
+                      broadcast({
+                        type: "tool_approval_state",
+                        chatId,
+                        messageId: assistantMessageId,
+                        generationId,
+                        pending: false,
+                        resumeGeneration: false,
+                        toolCallId: tc.id,
+                        reason: decisionReason,
+                      });
+                      if (!abortController.signal.aborted) {
+                        broadcast({
+                          type: "error",
+                          chatId,
+                          messageId: assistantMessageId,
+                          generationId,
+                          message: getToolApprovalFailureMessage(reason),
+                        });
+                      }
+                      await recordUnresolvedToolCalls(toolIndex, decisionReason);
+                      finishToolLoop(abortController.signal.aborted ? "cancelled" : "error");
+                      break;
+                    }
+
+                    if (toolIndex === toolCalls.length - 1) {
+                      broadcast({
+                        type: "tool_approval_state",
+                        chatId,
+                        messageId: assistantMessageId,
+                        generationId,
+                        pending: false,
+                        resumeGeneration: true,
+                        toolCallId: tc.id,
+                        reason: "approved",
+                      });
+                    }
+
+                    const toolResult = await executeToolRespectingAbort(
+                      tc.function.name,
+                      editedArguments ?? tc.function.arguments,
+                      abortController.signal,
+                    );
+                    if (toolResult === null) {
+                      await recordUnresolvedToolCalls(toolIndex, "cancelled");
+                      finishToolLoop("cancelled");
+                      break;
+                    }
+                    await recordToolResultMessage(chatId, tc.id, toolResult);
                   }
-                };
-                /**
-                 * Ends this generation without starting the tool follow-up.
-                 *
-                 * @param stopReason - Stop reason broadcast to the client.
-                 * @returns No return value.
-                 */
-                const finishToolLoop = (stopReason: "error" | "cancelled") => {
-                  reachedTerminalEvent = true;
+
+                  if (!shouldStop && abortController.signal.aborted) {
+                    finishToolLoop("cancelled");
+                  }
+
+                  if (!shouldStop) {
+                    const timings = toolTimings;
+                    if (toolRecursionDepth >= MAX_TOOL_RECURSION_DEPTH) {
+                      const recursionMessage = `Tool recursion limit (${MAX_TOOL_RECURSION_DEPTH}) reached for chat ${chatId}.`;
+                      logWarn(recursionMessage);
+                      broadcast({
+                        type: "error",
+                        chatId,
+                        messageId: assistantMessageId,
+                        generationId,
+                        message: recursionMessage,
+                      });
+                      broadcast({
+                        type: "stop",
+                        chatId,
+                        messageId: assistantMessageId,
+                        generationId,
+                        stopReason: "error",
+                        timings,
+                        fullContent: streamState.prevContent,
+                        fullRawContent: streamState.fullRawContent,
+                        fullThinking: streamState.prevThinking,
+                      });
+                    } else {
+                      broadcast({
+                        type: "stop",
+                        chatId,
+                        messageId: assistantMessageId,
+                        generationId,
+                        stopReason: "tool_calls",
+                        timings,
+                        fullContent: streamState.prevContent,
+                        fullRawContent: streamState.fullRawContent,
+                        fullThinking: streamState.prevThinking,
+                      });
+
+                      const { proxyCompletion } = await import("./streamProxy");
+                      await proxyCompletion({
+                        chatId,
+                        content: "",
+                        attachments: [],
+                        isToolRecurse: true,
+                        toolRecursionDepth: toolRecursionDepth + 1,
+                      });
+                    }
+                  }
+
                   shouldStop = true;
+                  break;
+                }
+
+                // Detect stop condition from the chat completions response
+                const finishReason = parsed.choices?.[0]?.finish_reason;
+                if (finishReason) {
+                  finalizeAssistantStreamState(
+                    streamState,
+                    thinkingConfig.openTag,
+                    thinkingConfig.closeTag,
+                  );
+                  const timings = parsed.timings || {
+                    tokens_cached: 0,
+                    tokens_evaluated: 0,
+                    predicted_ms: 0,
+                    predicted_n: 0,
+                    predicted_per_second: 0,
+                    predicted_per_token_ms: 0,
+                    prompt_ms: 0,
+                    prompt_n: 0,
+                    prompt_per_second: 0,
+                    prompt_per_token_ms: 0,
+                  };
+                  let stopReason: import("../shared/types").WsStopFrame["stopReason"] = "eos";
+                  if (finishReason === "length") stopReason = "max_tokens";
+                  if (finishReason === "tool_calls") stopReason = "tool_calls";
+
+                  if (
+                    stopReason === "max_tokens" &&
+                    infPreset?.contextOverflowPolicy === "StopAtLimit"
+                  ) {
+                    const ctxSize = server.config?.contextSize || 4096;
+                    if (contextOccupancyTokens(timings) >= ctxSize - 16) {
+                      stopReason = "contextLengthReached";
+                    }
+                  }
+
+                  updatePromptCacheStats(chatId, timings);
+                  if (thinkingStartedAt !== null && thinkingEndedAt === null) {
+                    thinkingEndedAt = Date.now();
+                  }
+                  const thinkingDurationMs =
+                    thinkingStartedAt !== null
+                      ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
+                      : streamState.prevThinking
+                        ? Math.max(0, timings.predicted_ms || 0)
+                        : undefined;
+                  const messageMetrics = buildMessageMetrics(timings, promptTokensCount, {
+                    thinkingDurationMs,
+                    stopReason,
+                    thinkingSource: streamState.prevThinking
+                      ? streamState.usedNativeReasoning
+                        ? "native"
+                        : "tags"
+                      : undefined,
+                  });
                   broadcast({
                     type: "stop",
                     chatId,
                     messageId: assistantMessageId,
                     generationId,
                     stopReason,
-                    timings: toolTimings,
+                    timings,
+                    promptTokens: promptTokensCount,
+                    contextSize: ctxSize,
                     fullContent: streamState.prevContent,
                     fullRawContent: streamState.fullRawContent,
                     fullThinking: streamState.prevThinking,
+                    ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
                   });
-                };
 
-                for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex++) {
-                  const tc = toolCalls[toolIndex];
-                  if (!tc) continue;
-                  if (abortController.signal.aborted) {
-                    await recordUnresolvedToolCalls(toolIndex, "cancelled");
-                    finishToolLoop("cancelled");
-                    break;
-                  }
-
-                  const { approved, editedArguments, reason } = await waitForToolApproval(
-                    chatId,
-                    tc.id,
-                  );
-                  if (!approved || abortController.signal.aborted) {
-                    const decisionReason = abortController.signal.aborted
-                      ? "cancelled"
-                      : (reason ?? "rejected");
-                    broadcast({
-                      type: "tool_approval_state",
-                      chatId,
-                      messageId: assistantMessageId,
-                      generationId,
-                      pending: false,
-                      resumeGeneration: false,
-                      toolCallId: tc.id,
-                      reason: decisionReason,
-                    });
-                    if (!abortController.signal.aborted) {
-                      broadcast({
-                        type: "error",
-                        chatId,
-                        messageId: assistantMessageId,
-                        generationId,
-                        message: getToolApprovalFailureMessage(reason),
-                      });
-                    }
-                    await recordUnresolvedToolCalls(toolIndex, decisionReason);
-                    finishToolLoop(abortController.signal.aborted ? "cancelled" : "error");
-                    break;
-                  }
-
-                  if (toolIndex === toolCalls.length - 1) {
-                    broadcast({
-                      type: "tool_approval_state",
-                      chatId,
-                      messageId: assistantMessageId,
-                      generationId,
-                      pending: false,
-                      resumeGeneration: true,
-                      toolCallId: tc.id,
-                      reason: "approved",
-                    });
-                  }
-
-                  const toolResult = await executeToolRespectingAbort(
-                    tc.function.name,
-                    editedArguments ?? tc.function.arguments,
-                    abortController.signal,
-                  );
-                  if (toolResult === null) {
-                    await recordUnresolvedToolCalls(toolIndex, "cancelled");
-                    finishToolLoop("cancelled");
-                    break;
-                  }
-                  await recordToolResultMessage(chatId, tc.id, toolResult);
+                  // C8 fix: explicitly pass updatedAt instead of relying on implicit empty-object behavior
+                  await updateChat(chatId, { updatedAt: Date.now() });
+                  const dbFinal = await import("./persistence/db").then((m) => m.getDb());
+                  dbFinal
+                    .prepare(
+                      "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
+                    )
+                    .run(
+                      streamState.prevContent,
+                      streamState.fullRawContent,
+                      streamState.prevThinking || null,
+                      JSON.stringify(messageMetrics),
+                      assistantMessageId,
+                    );
+                  if (settings.autonameEnabled) void triggerAutoname(chatId);
+                  shouldStop = true;
+                  break;
                 }
-
-                if (!shouldStop && abortController.signal.aborted) {
-                  finishToolLoop("cancelled");
-                }
-
-                if (!shouldStop) {
-                  const timings = toolTimings;
-                  if (toolRecursionDepth >= MAX_TOOL_RECURSION_DEPTH) {
-                    const recursionMessage = `Tool recursion limit (${MAX_TOOL_RECURSION_DEPTH}) reached for chat ${chatId}.`;
-                    logWarn(recursionMessage);
-                    broadcast({
-                      type: "error",
-                      chatId,
-                      messageId: assistantMessageId,
-                      generationId,
-                      message: recursionMessage,
-                    });
-                    broadcast({
-                      type: "stop",
-                      chatId,
-                      messageId: assistantMessageId,
-                      generationId,
-                      stopReason: "error",
-                      timings,
-                      fullContent: streamState.prevContent,
-                      fullRawContent: streamState.fullRawContent,
-                      fullThinking: streamState.prevThinking,
-                    });
-                  } else {
-                    broadcast({
-                      type: "stop",
-                      chatId,
-                      messageId: assistantMessageId,
-                      generationId,
-                      stopReason: "tool_calls",
-                      timings,
-                      fullContent: streamState.prevContent,
-                      fullRawContent: streamState.fullRawContent,
-                      fullThinking: streamState.prevThinking,
-                    });
-
-                    const { proxyCompletion } = await import("./streamProxy");
-                    await proxyCompletion({
-                      chatId,
-                      content: "",
-                      attachments: [],
-                      isToolRecurse: true,
-                      toolRecursionDepth: toolRecursionDepth + 1,
-                    });
-                  }
-                }
-
-                shouldStop = true;
-                break;
               }
-
-              // Detect stop condition from the chat completions response
-              const finishReason = parsed.choices?.[0]?.finish_reason;
-              if (finishReason) {
-                const timings = parsed.timings || {
-                  tokens_cached: 0,
-                  tokens_evaluated: 0,
-                  predicted_ms: 0,
-                  predicted_n: 0,
-                  predicted_per_second: 0,
-                  predicted_per_token_ms: 0,
-                  prompt_ms: 0,
-                  prompt_n: 0,
-                  prompt_per_second: 0,
-                  prompt_per_token_ms: 0,
-                };
-                let stopReason: import("../shared/types").WsStopFrame["stopReason"] = "eos";
-                if (finishReason === "length") stopReason = "max_tokens";
-                if (finishReason === "tool_calls") stopReason = "tool_calls";
-
-                if (
-                  stopReason === "max_tokens" &&
-                  infPreset?.contextOverflowPolicy === "StopAtLimit"
-                ) {
-                  const ctxSize = server.config?.contextSize || 4096;
-                  if (contextOccupancyTokens(timings) >= ctxSize - 16) {
-                    stopReason = "contextLengthReached";
-                  }
-                }
-
-                updatePromptCacheStats(chatId, timings);
-                if (thinkingStartedAt !== null && thinkingEndedAt === null) {
-                  thinkingEndedAt = Date.now();
-                }
-                const thinkingDurationMs =
-                  thinkingStartedAt !== null
-                    ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
-                    : streamState.prevThinking
-                      ? Math.max(0, timings.predicted_ms || 0)
-                      : undefined;
-                const messageMetrics = buildMessageMetrics(timings, promptTokensCount, {
-                  thinkingDurationMs,
-                  stopReason,
-                  thinkingSource: streamState.prevThinking
-                    ? streamState.usedNativeReasoning
-                      ? "native"
-                      : "tags"
-                    : undefined,
-                });
-                broadcast({
-                  type: "stop",
-                  chatId,
-                  messageId: assistantMessageId,
-                  generationId,
-                  stopReason,
-                  timings,
-                  promptTokens: promptTokensCount,
-                  contextSize: ctxSize,
-                  fullContent: streamState.prevContent,
-                  fullRawContent: streamState.fullRawContent,
-                  fullThinking: streamState.prevThinking,
-                  ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
-                });
-
-                // C8 fix: explicitly pass updatedAt instead of relying on implicit empty-object behavior
-                await updateChat(chatId, { updatedAt: Date.now() });
-                const dbFinal = await import("./persistence/db").then((m) => m.getDb());
-                dbFinal
-                  .prepare(
-                    "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
-                  )
-                  .run(
-                    streamState.prevContent,
-                    streamState.fullRawContent,
-                    streamState.prevThinking || null,
-                    JSON.stringify(messageMetrics),
-                    assistantMessageId,
-                  );
-                if (settings.autonameEnabled) void triggerAutoname(chatId);
-                shouldStop = true;
-                break;
-              }
+              if (shouldStop) reachedTerminalEvent = true;
+              if (shouldStop || done) break;
+              resetInactivityTimer();
             }
-            if (shouldStop) reachedTerminalEvent = true;
-            if (shouldStop || done) break;
-            resetInactivityTimer();
+            if (!reachedTerminalEvent) {
+              await persistInterruptedGeneration("The model stream ended before it finished.");
+            }
+          } catch (err: unknown) {
+            const aborted =
+              abortController.signal.aborted || (err instanceof Error && err.name === "AbortError");
+            if (aborted) {
+              const reason = takeAbortReason(generationId);
+              finalizeAssistantStreamState(
+                streamState,
+                thinkingConfig.openTag,
+                thinkingConfig.closeTag,
+              );
+              const stopReason = reason === "timeout" ? "error" : "cancelled";
+              const thinkingDurationMs =
+                thinkingStartedAt !== null
+                  ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
+                  : undefined;
+              const metrics = buildMessageMetrics(EMPTY_TIMINGS, promptTokensCount, {
+                stopReason,
+                ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+              });
+              const db = await import("./persistence/db").then((m) => m.getDb());
+              db.prepare(
+                "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
+              ).run(
+                streamState.prevContent,
+                streamState.fullRawContent,
+                streamState.prevThinking || null,
+                JSON.stringify(metrics),
+                assistantMessageId,
+              );
+              cleanupEmptyAssistantMessage();
+              logWarn("[streamProxy] Generation aborted by user or timeout", {
+                chatId,
+                assistantMessageId,
+                generationId,
+                reason,
+              });
+              finishAbortedGeneration({
+                chatId,
+                messageId: assistantMessageId,
+                generationId,
+                reason,
+                fullContent: streamState.prevContent,
+                fullRawContent: streamState.fullRawContent,
+                fullThinking: streamState.prevThinking,
+                promptTokens: promptTokensCount,
+                contextSize: ctxSize,
+              });
+            } else {
+              logStreamProxyError("stream-parse", err, {
+                chatId,
+                assistantMessageId,
+                generationId,
+              });
+              const message = err instanceof Error && err.message ? err.message : String(err);
+              await persistInterruptedGeneration(message);
+            }
+          } finally {
+            if (inactivityTimer) clearTimeout(inactivityTimer);
+            cancelPendingApprovals(chatId);
+            activeGenerations.delete(generationId);
           }
-          if (!reachedTerminalEvent) {
-            await persistInterruptedGeneration("The model stream ended before it finished.");
-          }
-        } catch (err: unknown) {
+        })
+        .catch(async (err: unknown) => {
+          if (inactivityTimer) clearTimeout(inactivityTimer);
+          cancelPendingApprovals(chatId);
+          activeGenerations.delete(generationId);
           const aborted =
             abortController.signal.aborted || (err instanceof Error && err.name === "AbortError");
           if (aborted) {
             const reason = takeAbortReason(generationId);
-            const stopReason = reason === "timeout" ? "error" : "cancelled";
-            const thinkingDurationMs =
-              thinkingStartedAt !== null
-                ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
-                : undefined;
-            const metrics = buildMessageMetrics(EMPTY_TIMINGS, promptTokensCount, {
-              stopReason,
-              ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
-            });
-            const db = await import("./persistence/db").then((m) => m.getDb());
-            db.prepare(
-              "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
-            ).run(
-              streamState.prevContent,
-              streamState.fullRawContent,
-              streamState.prevThinking || null,
-              JSON.stringify(metrics),
-              assistantMessageId,
-            );
             cleanupEmptyAssistantMessage();
-            logWarn("[streamProxy] Generation aborted by user or timeout", {
+            logWarn("[streamProxy] Generation aborted before the first token", {
               chatId,
               assistantMessageId,
               generationId,
@@ -1677,61 +1561,53 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               messageId: assistantMessageId,
               generationId,
               reason,
-              fullContent: streamState.prevContent,
-              fullRawContent: streamState.fullRawContent,
-              fullThinking: streamState.prevThinking,
               promptTokens: promptTokensCount,
               contextSize: ctxSize,
             });
-          } else {
-            logStreamProxyError("stream-parse", err, {
-              chatId,
-              assistantMessageId,
-              generationId,
-            });
-            const message = err instanceof Error && err.message ? err.message : String(err);
-            await persistInterruptedGeneration(message);
+            return;
           }
-        } finally {
-          if (inactivityTimer) clearTimeout(inactivityTimer);
-          cancelPendingApprovals(chatId);
-          activeGenerations.delete(generationId);
-        }
-      })
-      .catch(async (err: unknown) => {
-        if (inactivityTimer) clearTimeout(inactivityTimer);
-        cancelPendingApprovals(chatId);
-        activeGenerations.delete(generationId);
-        const aborted =
-          abortController.signal.aborted || (err instanceof Error && err.name === "AbortError");
-        if (aborted) {
-          const reason = takeAbortReason(generationId);
-          cleanupEmptyAssistantMessage();
-          logWarn("[streamProxy] Generation aborted before the first token", {
+          const failureContext = getModelFailureContext();
+          logStreamProxyError("fetch-catch", err, {
+            endpoint,
             chatId,
             assistantMessageId,
             generationId,
-            reason,
+            ...failureContext,
           });
-          finishAbortedGeneration({
+          cleanupEmptyAssistantMessage();
+          broadcast({
+            type: "error",
             chatId,
             messageId: assistantMessageId,
             generationId,
-            reason,
-            promptTokens: promptTokensCount,
-            contextSize: ctxSize,
+            message: formatTransportErrorMessage(err, failureContext),
+          });
+        });
+    };
+
+    void Promise.resolve()
+      .then(() => runInference())
+      .catch((err: unknown) => {
+        cancelPendingApprovals(chatId);
+        activeGenerations.delete(generationId);
+        cleanupEmptyAssistantMessage();
+        if (err instanceof ContextOverflowError) {
+          broadcast({
+            type: "error",
+            chatId,
+            messageId: assistantMessageId,
+            generationId,
+            message: err.message,
           });
           return;
         }
         const failureContext = getModelFailureContext();
-        logStreamProxyError("fetch-catch", err, {
-          endpoint,
+        logStreamProxyError("run-inference", err, {
           chatId,
           assistantMessageId,
           generationId,
           ...failureContext,
         });
-        cleanupEmptyAssistantMessage();
         broadcast({
           type: "error",
           chatId,
@@ -1740,39 +1616,10 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
           message: formatTransportErrorMessage(err, failureContext),
         });
       });
-  };
 
-  void Promise.resolve()
-    .then(() => runInference())
-    .catch((err: unknown) => {
-      cancelPendingApprovals(chatId);
-      activeGenerations.delete(generationId);
-      cleanupEmptyAssistantMessage();
-      if (err instanceof ContextOverflowError) {
-        broadcast({
-          type: "error",
-          chatId,
-          messageId: assistantMessageId,
-          generationId,
-          message: err.message,
-        });
-        return;
-      }
-      const failureContext = getModelFailureContext();
-      logStreamProxyError("run-inference", err, {
-        chatId,
-        assistantMessageId,
-        generationId,
-        ...failureContext,
-      });
-      broadcast({
-        type: "error",
-        chatId,
-        messageId: assistantMessageId,
-        generationId,
-        message: formatTransportErrorMessage(err, failureContext),
-      });
-    });
-
-  return assistantMessageId;
+    return assistantMessageId;
+  } catch (err) {
+    activeGenerations.delete(generationId);
+    throw err;
+  }
 }

@@ -23,7 +23,11 @@ import {
 } from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
 import { getActiveGenerations } from "../../src/server/generationRegistry";
-import { abortGeneration, proxyCompletion } from "../../src/server/streamProxy";
+import {
+  abortGeneration,
+  getActiveGenerationChatIds,
+  proxyCompletion,
+} from "../../src/server/streamProxy";
 import { cancelPendingApprovals, resolveToolApproval } from "../../src/server/tools";
 import * as llamaServerModule from "../../src/server/llamaServer";
 import { createDefaultInferenceSampling, createDefaultLoadConfig } from "../../src/shared/defaults";
@@ -1170,6 +1174,24 @@ describe("streamProxy", () => {
     expect(assistantMsg?.metrics?.generationMs).toBe(200);
   });
 
+  it("keeps a trailing partial think tag in the saved reply", async () => {
+    const stream = buildSSEStream([chatDelta("answer <"), chatStop("stop")]);
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
+
+    const chat = await createChat("Trailing tag");
+    const assistantMsgId = await proxyCompletion({
+      chatId: chat.id,
+      content: "Hello there",
+      attachments: [],
+    });
+    await waitForGenerationIdle();
+    const reloaded = await getChat(chat.id);
+    const assistant = reloaded?.messages?.find((message) => message.id === assistantMsgId);
+    expect(assistant?.content).toBe("answer <");
+    expect(assistant?.rawContent).toBe("answer <");
+  });
+
   it("finalizes a stream that closes without a finish reason", async () => {
     const wsHubModule = await import("../../src/server/wsHub");
     const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
@@ -1677,6 +1699,37 @@ describe("streamProxy", () => {
     await waitForGenerationIdle();
   });
 
+  it("broadcasts one cancelled stop when generation is aborted during truncation", async () => {
+    const wsHubModule = await import("../../src/server/wsHub");
+    const overflow = await import("../../src/server/overflow");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
+    const truncateSpy = spyOn(overflow, "truncateMessages").mockImplementation(
+      async (messages: unknown) => {
+        return messages as never;
+      },
+    );
+    const chat = await createChat("Abort During Truncation");
+    truncateSpy.mockImplementation(async (messages: unknown) => {
+      abortGeneration(chat.id, "cancelled");
+      return messages as never;
+    });
+
+    try {
+      await proxyCompletion({ chatId: chat.id, content: "hello", attachments: [] });
+      await waitForGenerationIdle();
+      const stops = broadcastSpy.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (frame) =>
+            frame.type === "stop" && frame.chatId === chat.id && frame.stopReason === "cancelled",
+        );
+      expect(stops).toHaveLength(1);
+    } finally {
+      truncateSpy.mockRestore();
+      broadcastSpy.mockRestore();
+    }
+  });
+
   it("times out when tokens stop arriving after the stream has started", async () => {
     await saveSettings({ requestTimeoutSeconds: 0.05 });
 
@@ -2073,6 +2126,11 @@ describe("streamProxy", () => {
       attachments: [],
     });
 
+    // The first calculate call starts the mathjs worker, which can take several seconds
+    // on a cold start. Start it before the timed loop so each wait measures the loop only.
+    const { default: calculateTool } = await import("../../src/server/builtinTools/calculate");
+    await calculateTool.execute({ expression: "1+1" });
+
     for (let approvalIndex = 1; approvalIndex <= 6; approvalIndex++) {
       const toolCallId = `tc_${approvalIndex}`;
       await waitUntil(async () => {
@@ -2087,7 +2145,7 @@ describe("streamProxy", () => {
     await waitForGenerationIdle();
 
     expect(chatCompletionFetchCount).toBe(6);
-  });
+  }, 30_000);
 
   it("truncates history using tool and schema overhead without per-message tokenization loops", async () => {
     let tokenizeFetchCount = 0;
@@ -2601,5 +2659,20 @@ describe("streamProxy", () => {
     expect(reloaded?.messages?.some((m) => m.role === "tool" && m.content.includes("4"))).toBe(
       true,
     );
+  });
+
+  it("drops the generation entry when setup fails after registration", async () => {
+    const chat = await createChat("Generation Leak");
+    const addSpy = spyOn(chatRepoModule, "addMessage").mockRejectedValue(
+      new Error("message insert failed"),
+    );
+    try {
+      await expect(
+        proxyCompletion({ chatId: chat.id, content: "hello", attachments: [] }),
+      ).rejects.toThrow("message insert failed");
+      expect(getActiveGenerationChatIds().size).toBe(0);
+    } finally {
+      addSpy.mockRestore();
+    }
   });
 });

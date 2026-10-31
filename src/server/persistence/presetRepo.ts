@@ -22,6 +22,7 @@ import {
   SPECULATIVE_DECODE_TYPES,
   type InferencePreset,
   type LoadPreset,
+  type LoadPresetUpdate,
   type ModelLoadConfig,
   type SystemPromptPreset,
 } from "../../shared/types";
@@ -562,6 +563,52 @@ export function assertWritableLoadPreset(body: unknown): void {
   assertWritableLoadPresetConfig(record["config"]);
 }
 
+/** Numeric sampling keys from {@link createDefaultInferenceSampling}. */
+const INFERENCE_NUMERIC_FIELDS: readonly string[] = Object.entries(createDefaultInferenceSampling())
+  .filter((entry): entry is [string, number] => typeof entry[1] === "number")
+  .map(([key]) => key);
+
+/**
+ * Rejects inference-preset writes that store null or non-finite sampling numbers.
+ *
+ * @param body - Parsed JSON request body for create or update.
+ * @returns No return value.
+ * @throws {PresetValidationError} If a present numeric sampling field is not a finite number.
+ */
+export function assertWritableInferencePreset(body: unknown): void {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new PresetValidationError("Inference preset must be a JSON object.");
+  }
+  const record = body as Record<string, unknown>;
+  for (const key of INFERENCE_NUMERIC_FIELDS) {
+    if (!Object.hasOwn(record, key)) continue;
+    const value = record[key];
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new PresetValidationError(`${key} must be a finite number.`);
+    }
+  }
+}
+
+/**
+ * Rejects system-preset creates that omit a name or a string body.
+ *
+ * @param body - Parsed JSON request body.
+ * @returns No return value.
+ * @throws {PresetValidationError} If `name` is empty or `content` is not a string.
+ */
+export function assertWritableSystemPreset(body: unknown): void {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw new PresetValidationError("System preset must be a JSON object.");
+  }
+  const record = body as Record<string, unknown>;
+  if (typeof record["name"] !== "string" || record["name"].trim().length === 0) {
+    throw new PresetValidationError("Preset creation requires a name.");
+  }
+  if (typeof record["content"] !== "string") {
+    throw new PresetValidationError("System preset content must be a string.");
+  }
+}
+
 /**
  * Parses the stored JSON payload for a load preset.
  *
@@ -812,34 +859,34 @@ export type PresetMutationResult = "updated" | "deleted" | "not_found" | "protec
  * Updates an existing load preset in the database.
  *
  * @param id - Identifier of the preset to update.
- * @param updates - Partial load preset fields to merge into the existing row.
- * @returns Whether the row was updated or missing.
+ * @param updates - Partial load preset fields to merge into the existing row. `chatTemplateOverride: null` clears the saved Jinja override.
+ * @returns `updated`, `not_found`, or `protected` when the preset is read-only.
  */
 export async function updateLoadPreset(
   id: string,
-  updates: Partial<LoadPreset>,
-): Promise<Exclude<PresetMutationResult, "deleted" | "protected">> {
+  updates: LoadPresetUpdate,
+): Promise<Exclude<PresetMutationResult, "deleted">> {
   const db = getDb();
   const existing = db
-    .query<{ config_json: string; name: string; model_path: string | null }, [string]>(
-      "SELECT config_json, name, model_path FROM load_presets WHERE id = ?",
-    )
+    .query<
+      { config_json: string; name: string; model_path: string | null; is_readonly: number },
+      [string]
+    >("SELECT config_json, name, model_path, is_readonly FROM load_presets WHERE id = ?")
     .get(id);
   if (!existing) return "not_found";
+  if (existing.is_readonly) return "protected";
   const currentConfig = parseLoadPresetPayload(existing.config_json);
+  const overrideProvided = Object.hasOwn(updates, "chatTemplateOverride");
+  const nextOverride =
+    !overrideProvided || updates.chatTemplateOverride === undefined
+      ? currentConfig.chatTemplateOverride
+      : updates.chatTemplateOverride === null
+        ? undefined
+        : updates.chatTemplateOverride;
 
   const newConfigJson = serializeLoadPresetPayload({
     config: updates.config ?? currentConfig.config,
-    ...((updates.chatTemplateOverride !== undefined
-      ? updates.chatTemplateOverride
-      : currentConfig.chatTemplateOverride) !== undefined
-      ? {
-          chatTemplateOverride:
-            updates.chatTemplateOverride !== undefined
-              ? updates.chatTemplateOverride
-              : currentConfig.chatTemplateOverride,
-        }
-      : {}),
+    ...(nextOverride !== undefined ? { chatTemplateOverride: nextOverride } : {}),
     ...((updates.preserveThinking !== undefined
       ? updates.preserveThinking
       : currentConfig.preserveThinking) !== undefined

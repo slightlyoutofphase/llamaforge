@@ -43,26 +43,62 @@ export function buildFfmpegFrameArgs(inputPath: string, outputPattern: string): 
 }
 
 /**
- * Builds the JPEG filename used for an extracted video frame.
+ * Uses a non-empty file stem so a nameless video still gets a flat frame file.
  *
- * @param index - 1-based frame index.
- * @returns File name such as `video-frame-001.jpg`.
+ * @param stem - `path.parse` name of the source video.
+ * @returns The stem, or `video` when the source name is blank.
  */
-export function videoFrameFileName(index: number): string {
-  return `video-frame-${String(index).padStart(3, "0")}.jpg`;
+function frameStem(stem: string): string {
+  const trimmed = stem.trim();
+  return trimmed.length > 0 ? trimmed : "video";
 }
 
 /**
- * Lists existing extracted JPEG frames in a directory.
+ * Escapes a file stem so it can be matched literally in a regular expression.
  *
- * @param directory - Directory that may already contain `video-frame-*.jpg` files.
- * @returns Absolute paths sorted by frame index.
+ * @param value - Stem that may contain characters such as `+` or `(`.
+ * @returns The stem with regex metacharacters escaped.
  */
-export async function listExistingVideoFrames(directory: string): Promise<string[]> {
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Builds the JPEG filename used for an extracted video frame.
+ *
+ * @param stem - File stem of the source video, without its extension.
+ * @param index - 1-based frame index.
+ * @returns File name such as `clip.frame-001.jpg`.
+ */
+export function videoFrameFileName(stem: string, index: number): string {
+  return `${frameStem(stem)}.frame-${String(index).padStart(3, "0")}.jpg`;
+}
+
+/**
+ * Builds the ffmpeg output pattern for one video's frames.
+ *
+ * Percent signs in the stem are doubled so ffmpeg treats them as literal characters.
+ *
+ * @param stem - File stem of the source video, without its extension.
+ * @returns A pattern such as `clip.frame-%03d.jpg`.
+ */
+export function videoFrameOutputPattern(stem: string): string {
+  return `${frameStem(stem).replaceAll("%", "%%")}.frame-%03d.jpg`;
+}
+
+/**
+ * Lists existing extracted JPEG frames for one video in a directory.
+ *
+ * @param directory - Message folder that may already contain frame files.
+ * @param stem - File stem of the source video, without its extension.
+ * @returns Absolute paths for that video only, sorted by frame index.
+ */
+export async function listExistingVideoFrames(directory: string, stem: string): Promise<string[]> {
+  const pattern = new RegExp(`^${escapeRegExp(frameStem(stem))}\\.frame-\\d{3}\\.jpg$`, "i");
   try {
     const entries = await fs.readdir(directory);
     return entries
-      .filter((name) => /^video-frame-\d{3}\.jpg$/i.test(name))
+      .filter((name) => pattern.test(name))
       .sort()
       .map((name) => path.join(directory, name));
   } catch {
@@ -135,15 +171,16 @@ async function ffmpegExists(command: string): Promise<boolean> {
 /**
  * Extracts evenly paced JPEG frames from a video file using ffmpeg.
  *
- * Existing `video-frame-*.jpg` files in `outputDir` are reused so regeneration
- * does not spawn ffmpeg again.
+ * Frames already extracted for this video's stem are reused. Another video in the
+ * same folder keeps its own `stem.frame-NNN.jpg` files.
  *
  * @param inputPath - Absolute path of the source video.
  * @param outputDir - Directory that will receive JPEG frames.
  * @returns Absolute JPEG paths, or an empty array when extraction fails.
  */
 export async function extractVideoFrames(inputPath: string, outputDir: string): Promise<string[]> {
-  const existing = await listExistingVideoFrames(outputDir);
+  const stem = path.parse(inputPath).name;
+  const existing = await listExistingVideoFrames(outputDir, stem);
   if (existing.length > 0) return existing;
 
   const settings = await loadSettings();
@@ -154,7 +191,7 @@ export async function extractVideoFrames(inputPath: string, outputDir: string): 
   }
 
   await fs.mkdir(outputDir, { recursive: true });
-  const outputPattern = path.join(outputDir, "video-frame-%03d.jpg");
+  const outputPattern = path.join(outputDir, videoFrameOutputPattern(stem));
   const proc = spawn({
     cmd: [ffmpeg, ...buildFfmpegFrameArgs(inputPath, outputPattern)],
     stdout: "pipe",
@@ -186,7 +223,7 @@ export async function extractVideoFrames(inputPath: string, outputDir: string): 
     clearTimeout(timeout);
   }
 
-  return listExistingVideoFrames(outputDir);
+  return listExistingVideoFrames(outputDir, stem);
 }
 
 /**

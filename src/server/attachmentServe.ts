@@ -113,15 +113,21 @@ export function attachmentContentDisposition(fileName: string, mimeType: string)
  *
  * @param absPath - Absolute path of a file already verified to be inside the attachments root.
  * @param request - Incoming HTTP request (Range header is read when present).
+ * @param options - Optional original file name from the attachments table.
  * @returns HTTP response with the file body or a 206 slice.
  */
-export async function serveAttachmentFile(absPath: string, request: Request): Promise<Response> {
+export async function serveAttachmentFile(
+  absPath: string,
+  request: Request,
+  options?: { downloadName?: string | null | undefined },
+): Promise<Response> {
   const file = Bun.file(absPath);
   if (!(await file.exists())) {
     return new Response("Not Found", { status: 404 });
   }
 
-  const fileName = path.basename(absPath);
+  const cleanedName = (options?.downloadName ?? "").replace(/["\r\n]/g, "").trim();
+  const fileName = cleanedName || path.basename(absPath);
   const mimeType = resolveAttachmentMime(absPath, file.type || "application/octet-stream");
   const size = file.size;
   const disposition = attachmentContentDisposition(fileName, mimeType);

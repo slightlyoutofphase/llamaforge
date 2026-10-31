@@ -60,19 +60,37 @@ function findBoundedOpenTag(
 }
 
 /**
+ * Options for {@link parseThinkTags}.
+ */
+export interface ParseThinkTagsOptions {
+  /**
+   * When true, a trailing prefix of the open or close tag is real text.
+   * Streaming parses leave this unset so a partial tag does not flash.
+   */
+  final?: boolean;
+}
+
+/**
  * Robustly parses content into target final text and thinking trace without stateful chunks.
- * Safeguards against partial trailing tags to prevent flashing.
+ * Safeguards against partial trailing tags to prevent flashing until the stream is finished.
  *
  * @param raw - Raw assistant output accumulated so far.
  * @param openTag - Opening delimiter for thinking content.
  * @param closeTag - Closing delimiter for thinking content.
+ * @param options - Pass `{ final: true }` once no more tokens will arrive.
  * @returns Split content containing visible text, captured thinking text, and the active parsing state.
  */
-export function parseThinkTags(raw: string, openTag: string, closeTag: string) {
+export function parseThinkTags(
+  raw: string,
+  openTag: string,
+  closeTag: string,
+  options?: ParseThinkTagsOptions,
+) {
   let content = "";
   let thinking = "";
   let isThinking = false;
   let curr = 0;
+  const final = options?.final === true;
 
   if (!openTag || !closeTag) {
     return { content: raw, thinking: "", isThinking: false };
@@ -83,10 +101,12 @@ export function parseThinkTags(raw: string, openTag: string, closeTag: string) {
       const openIdx = findBoundedOpenTag(raw, openTag, closeTag, curr);
       if (openIdx === -1) {
         let matchLen = 0;
-        for (let i = openTag.length - 1; i >= 1; i--) {
-          if (raw.endsWith(openTag.substring(0, i))) {
-            matchLen = i;
-            break;
+        if (!final) {
+          for (let i = openTag.length - 1; i >= 1; i--) {
+            if (raw.endsWith(openTag.substring(0, i))) {
+              matchLen = i;
+              break;
+            }
           }
         }
         content += raw.substring(curr, Math.max(curr, raw.length - matchLen));
@@ -103,10 +123,12 @@ export function parseThinkTags(raw: string, openTag: string, closeTag: string) {
       const closeIdx = raw.indexOf(closeTag, curr);
       if (closeIdx === -1) {
         let matchLen = 0;
-        for (let i = closeTag.length - 1; i >= 1; i--) {
-          if (raw.endsWith(closeTag.substring(0, i))) {
-            matchLen = i;
-            break;
+        if (!final) {
+          for (let i = closeTag.length - 1; i >= 1; i--) {
+            if (raw.endsWith(closeTag.substring(0, i))) {
+              matchLen = i;
+              break;
+            }
           }
         }
         thinking += raw.substring(curr, Math.max(curr, raw.length - matchLen));
@@ -132,16 +154,22 @@ export function parseThinkTags(raw: string, openTag: string, closeTag: string) {
  * @param raw - Accumulated assistant text.
  * @param openTag - Preferred thinking open delimiter.
  * @param closeTag - Preferred thinking close delimiter.
+ * @param options - Passed through to each delimiter attempt. `{ final: true }` keeps a trailing tag prefix.
  * @returns Split content using the first delimiter pair that captures a trace.
  */
-export function parseThinkTagsWithFallback(raw: string, openTag: string, closeTag: string) {
-  const primary = parseThinkTags(raw, openTag, closeTag);
+export function parseThinkTagsWithFallback(
+  raw: string,
+  openTag: string,
+  closeTag: string,
+  options?: ParseThinkTagsOptions,
+) {
+  const primary = parseThinkTags(raw, openTag, closeTag, options);
   if (primary.thinking || primary.isThinking) return primary;
 
   for (const alt of [GEMMA4_THINKING_CONFIG, DEFAULT_THINKING_CONFIG]) {
     if (alt.openTag === openTag && alt.closeTag === closeTag) continue;
     if (!raw.includes(alt.openTag)) continue;
-    const parsed = parseThinkTags(raw, alt.openTag, alt.closeTag);
+    const parsed = parseThinkTags(raw, alt.openTag, alt.closeTag, options);
     if (parsed.thinking || parsed.isThinking) return parsed;
   }
   return primary;
@@ -214,6 +242,32 @@ export function applyAssistantStreamDelta(
     thinkingDelta: state.prevThinking.substring(thinkingBefore.length),
     isThinking,
   };
+}
+
+/**
+ * Flushes a held-back tag suffix once the assistant stream has ended.
+ *
+ * Streaming parses hide a trailing prefix of the open or close tag so it does not
+ * flash before the rest of the tag arrives. A finished reply has no further tokens,
+ * so that suffix is visible text, or thinking text when a think block is still open.
+ * Native `reasoning_content` streams are already split and are left unchanged.
+ *
+ * @param state - Mutable accumulation for the assistant message.
+ * @param openTag - Thinking open delimiter.
+ * @param closeTag - Thinking close delimiter.
+ * @returns No return value. Updates `prevContent` and `prevThinking` when tags were scanned.
+ */
+export function finalizeAssistantStreamState(
+  state: AssistantStreamState,
+  openTag: string,
+  closeTag: string,
+): void {
+  if (state.usedNativeReasoning) return;
+  const parsed = parseThinkTagsWithFallback(state.fullRawContent, openTag, closeTag, {
+    final: true,
+  });
+  state.prevContent = parsed.content;
+  state.prevThinking = parsed.thinking;
 }
 
 /**

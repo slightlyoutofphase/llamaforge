@@ -3,7 +3,6 @@
  * Provides the model library panel for browsing and loading GGUF models.
  */
 
-import { resolveSpecDraftModelPath } from "../../../shared/defaults";
 import { modelOptionLabel, presetMenuLabels } from "../../../shared/presetNames";
 import { loadPresetsForModel, pickLoadPresetForModel } from "../../../shared/presetScope";
 import { metadataHasToolCalling } from "../../../shared/templateCapabilities";
@@ -22,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { useRef, useState } from "react";
+import { planModelLoad } from "../../loadRequest";
 import { logError } from "../../logger";
 import { useCreateChat, useLoadPresets, useSettings } from "../../queries";
 import { useAppStore } from "../../store";
@@ -43,7 +43,7 @@ export function ModelLibraryPanel() {
   const isWaitingForToolApproval = useAppStore((s) => s.isWaitingForToolApproval);
   const rescanModels = useAppStore((s) => s.rescanModels);
   const { setRightPanelView } = useUiStore();
-  const { data: loadPresets } = useLoadPresets();
+  const { data: loadPresets, isPending: loadPresetsPending } = useLoadPresets();
   const { data: settings } = useSettings();
   const createChatMut = useCreateChat();
   const navigate = useNavigate();
@@ -73,63 +73,19 @@ export function ModelLibraryPanel() {
    * @returns No return value.
    */
   const handleLoad = (preset: LoadPreset) => {
-    if (!selectedModel || requestInFlight || serverStatus !== "idle") return;
+    if (!selectedModel || requestInFlight || serverStatus !== "idle" || loadPresetsPending) return;
 
-    // Check for multimodal incompatibility
-    const hasVision = !!selectedModel.metadata?.hasVisionEncoder;
-    const hasAudio = !!selectedModel.metadata?.hasAudioEncoder;
-
-    const messages = useAppStore.getState().messages;
-    const visionMsgs = messages.filter((m) =>
-      m.attachments?.some(
-        (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("video/"),
-      ),
-    );
-    const audioMsgs = messages.filter((m) =>
-      m.attachments?.some((a) => a.mimeType.startsWith("audio/")),
-    );
-
-    const request: LoadModelRequest = {
-      ...preset.config,
-      modelPath: selectedModel.primaryPath,
-      presetId: preset.id,
-      thinkingTagOverride: preset.thinkingTagOverride,
-    };
-
-    const resolvedDraftPath = resolveSpecDraftModelPath(
-      preset.config.specType,
-      preset.config.specDraftModelPath,
-      selectedModel.draftModelPath,
-      selectedModel.draftSpecType,
-    );
-    if (resolvedDraftPath) {
-      request.specDraftModelPath = resolvedDraftPath;
-    }
-
-    if (
-      preset.chatTemplateOverride &&
-      preset.chatTemplateOverride.length > 0 &&
-      preset.chatTemplateOverride !== selectedModel.metadata?.chatTemplate
-    ) {
-      request.chatTemplateContent = preset.chatTemplateOverride;
-    }
-
-    if (!hasVision && visionMsgs.length > 0 && !hasAudio && audioMsgs.length > 0) {
+    const plan = planModelLoad(selectedModel, preset, useAppStore.getState().messages);
+    if (plan.kind === "guard") {
       setGuardModal({
-        reason: "both",
-        messages: [...visionMsgs, ...audioMsgs],
-        configToLoad: request,
+        reason: plan.reason,
+        messages: plan.messages,
+        configToLoad: plan.request,
       });
       return;
-    } else if (!hasVision && visionMsgs.length > 0) {
-      setGuardModal({ reason: "vision", messages: visionMsgs, configToLoad: request });
-      return;
-    } else if (!hasAudio && audioMsgs.length > 0) {
-      setGuardModal({ reason: "audio", messages: audioMsgs, configToLoad: request });
-      return;
     }
 
-    loadModel(request);
+    loadModel(plan.request);
   };
 
   /**
@@ -325,19 +281,23 @@ export function ModelLibraryPanel() {
                           MANAGE PRESETS
                         </button>
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        {modelPresets.map((p) => (
-                          <button
-                            key={p.id}
-                            type="button"
-                            disabled={requestInFlight || serverStatus !== "idle" || isLoaded}
-                            onClick={() => handleLoad(p)}
-                            className="bg-[var(--color-bg)] border border-[var(--color-border)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] text-xs px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50">
-                            <Settings size={12} />
-                            {presetLabels.get(p.id) ?? p.name}
-                          </button>
-                        ))}
-                      </div>
+                      {loadPresetsPending ? (
+                        <p className="text-xs text-[var(--color-text-muted)]">Loading presets…</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {modelPresets.map((p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              disabled={requestInFlight || serverStatus !== "idle" || isLoaded}
+                              onClick={() => handleLoad(p)}
+                              className="bg-[var(--color-bg)] border border-[var(--color-border)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] text-xs px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50">
+                              <Settings size={12} />
+                              {presetLabels.get(p.id) ?? p.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

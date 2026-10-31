@@ -3,10 +3,11 @@
  * Tests for TypeScript tool discovery and user-tool loading.
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { shutdownCalculateWorker } from "../../src/server/builtinTools/calculate";
 import {
   __setUserToolDirectories,
   getExecutableTool,
@@ -24,6 +25,10 @@ async function writeTempTool(fileName: string, source: string): Promise<string> 
 describe("toolRegistry", () => {
   afterEach(() => {
     __setUserToolDirectories(null);
+  });
+
+  afterAll(() => {
+    shutdownCalculateWorker();
   });
 
   it("lists built-in tools and the in-repo echo_text user tool", async () => {
@@ -141,6 +146,12 @@ describe("toolRegistry", () => {
     expect(tool?.description).toBe("Second");
     expect(await tool?.execute({ text: "hi" })).toEqual({ result: "second:hi" });
   });
+
+  it("executes the built-in calculate tool asynchronously", async () => {
+    const tool = await getExecutableTool("calculate");
+    expect(tool).toBeDefined();
+    await expect(tool?.execute({ expression: "1+1" })).resolves.toEqual({ result: 2 });
+  }, 30_000);
 
   it("accepts a valid LlamaForgeTool object and rejects incomplete exports", () => {
     expect(

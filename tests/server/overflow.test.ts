@@ -5,7 +5,13 @@
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import type { Attachment, ChatMessage } from "@shared/types";
-import { ContextOverflowError, getTokens, truncateMessages } from "../../src/server/overflow";
+import {
+  ContextOverflowError,
+  getTokenizerEpoch,
+  getTokens,
+  resetTokenCountCache,
+  truncateMessages,
+} from "../../src/server/overflow";
 import { asFetch } from "../fixtures";
 
 const originalFetch = globalThis.fetch;
@@ -119,6 +125,26 @@ describe("overflow logic", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("tokenizes again after the token-count cache is reset", async () => {
+    const msgs = [mockMsg("user", "reset me")];
+    const fetchMock = mock().mockImplementation(async () => {
+      return new Response(JSON.stringify({ tokens: [1, 1, 1] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    globalThis.fetch = asFetch(fetchMock);
+    const epoch = getTokenizerEpoch();
+
+    const first = await getTokens(msgs, 8080);
+    resetTokenCountCache();
+    const second = await getTokens(msgs, 8080);
+
+    expect(first).toBe(second);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(getTokenizerEpoch()).toBe(epoch + 1);
+  });
+
   it("truncates based on tool and schema overhead in the assembled request payload", async () => {
     const msgs = [
       mockMsg("system", "SYS".repeat(20)),
@@ -159,6 +185,32 @@ describe("overflow logic", () => {
     expect(result[0]?.role).toBe("system");
     expect(result[1]?.role).toBe("user");
     expect(result[1]?.content).toContain("LATEST QUESTION");
+  });
+
+  it("drops another group when the character estimate still exceeds the exact token count", async () => {
+    const msgs = [
+      mockMsg("system", "SYS"),
+      mockMsg("user", "A".repeat(400)),
+      mockMsg("assistant", "B".repeat(400)),
+      mockMsg("user", "LATEST"),
+    ];
+    const fetchMock = mock().mockImplementation(async (_input: RequestInfo, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+      const tokenCount = Math.max(1, (body.content?.length ?? 0) * 2);
+      return new Response(JSON.stringify({ tokens: new Array(tokenCount).fill(1) }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    globalThis.fetch = asFetch(fetchMock);
+    resetTokenCountCache();
+
+    const result = await truncateMessages([...msgs], "RollingWindow", 1024, 512, 8080);
+
+    expect(result.map((message) => message.role)).toEqual(["system", "user"]);
+    expect(result.at(-1)?.content).toBe("LATEST");
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(0);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(4);
   });
 
   it("TruncateMiddle removes assistant tool-call groups atomically", async () => {

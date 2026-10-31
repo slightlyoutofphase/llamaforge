@@ -4,7 +4,7 @@
  */
 
 import { X } from "lucide-react";
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "./store";
 import { useUiStore } from "./uiStore";
 
@@ -36,6 +36,7 @@ function ConsoleLogPanel() {
   const [filter, setFilter] = useState("ALL");
   const [search, setSearch] = useState("");
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const followTailRef = useRef(true);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
 
@@ -80,6 +81,13 @@ function ConsoleLogPanel() {
     observer.observe(viewport);
     return () => observer.disconnect();
   }, []);
+
+  // Runs whenever the visible list changes so a following viewport stays on the newest line.
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !followTailRef.current || filteredLogs.length === 0) return;
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [filteredLogs]);
 
   const effectiveViewportHeight = viewportHeight || 320;
   const startIndex = Math.max(0, Math.floor(scrollTop / LOG_ROW_HEIGHT) - LOG_OVERSCAN_ROWS);
@@ -160,7 +168,13 @@ function ConsoleLogPanel() {
 
       <div
         ref={viewportRef}
-        onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        onScroll={(event) => {
+          const viewport = event.currentTarget;
+          setScrollTop(viewport.scrollTop);
+          const distanceFromBottom =
+            viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+          followTailRef.current = distanceFromBottom <= 8;
+        }}
         className="flex-1 overflow-y-auto font-mono text-[11px] p-2 text-[var(--color-text-secondary)]">
         {filteredLogs.length === 0 ? (
           <div className="text-center text-[var(--color-text-muted)] italic mt-4">

@@ -7,21 +7,10 @@ import { DEFAULT_APP_SETTINGS } from "@shared/defaults";
 import type { AppSettings } from "@shared/types";
 import { Loader2, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { NumberDraftInput } from "./components/DraftInputs";
 import { useSettings, useUpdateSettings } from "./queries";
 import { useAppStore } from "./store";
 import { useUiStore } from "./uiStore";
-
-type NumericDraftKey =
-  "llamaPortRangeMin" | "llamaPortRangeMax" | "requestTimeoutSeconds" | "serverPort";
-
-type NumericDraftState = Record<NumericDraftKey, string>;
-
-const NUMERIC_DEFAULTS: NumericDraftState = {
-  llamaPortRangeMin: String(DEFAULT_APP_SETTINGS.llamaPortRangeMin),
-  llamaPortRangeMax: String(DEFAULT_APP_SETTINGS.llamaPortRangeMax),
-  requestTimeoutSeconds: String(DEFAULT_APP_SETTINGS.requestTimeoutSeconds),
-  serverPort: String(DEFAULT_APP_SETTINGS.serverPort),
-};
 
 /** Settings keys that autosave must not write back. */
 const OMITTED_FROM_AUTOSAVE = new Set<keyof AppSettings>([
@@ -59,23 +48,6 @@ function changedAutosaveSettings(
 }
 
 /**
- * Builds the editable string drafts used by numeric settings inputs.
- *
- * @param settings - Persisted settings values used to seed the input controls.
- * @returns A normalized set of string values for the numeric draft fields.
- */
-function createNumericDrafts(settings?: Partial<AppSettings>): NumericDraftState {
-  return {
-    llamaPortRangeMin: String(settings?.llamaPortRangeMin ?? NUMERIC_DEFAULTS.llamaPortRangeMin),
-    llamaPortRangeMax: String(settings?.llamaPortRangeMax ?? NUMERIC_DEFAULTS.llamaPortRangeMax),
-    requestTimeoutSeconds: String(
-      settings?.requestTimeoutSeconds ?? NUMERIC_DEFAULTS.requestTimeoutSeconds,
-    ),
-    serverPort: String(settings?.serverPort ?? NUMERIC_DEFAULTS.serverPort),
-  };
-}
-
-/**
  * Component for editing application settings.
  * Includes sections for binary paths, presets navigation, appearance, and advanced network settings.
  *
@@ -87,7 +59,6 @@ export function SettingsPanel() {
   const updateMut = useUpdateSettings();
 
   const [localState, setLocalState] = useState<Partial<AppSettings>>({});
-  const [numericDrafts, setNumericDrafts] = useState<NumericDraftState>(NUMERIC_DEFAULTS);
   const lastPersistedStateRef = useRef<Partial<AppSettings> | null>(null);
   const hasHydratedRef = useRef(false);
   const saveTimeoutRef = useRef<number | null>(null);
@@ -95,73 +66,25 @@ export function SettingsPanel() {
   persistSettingsRef.current = updateMut.mutate;
 
   useEffect(() => {
-    if (settings) {
-      setLocalState(settings);
-      setNumericDrafts(createNumericDrafts(settings));
-      lastPersistedStateRef.current = settings;
-      hasHydratedRef.current = true;
-    }
+    if (!settings || hasHydratedRef.current) return;
+    setLocalState(settings);
+    lastPersistedStateRef.current = settings;
+    hasHydratedRef.current = true;
   }, [settings]);
 
   /**
-   * Updates a draft integer field and mirrors valid values into persisted settings state.
+   * Writes a committed numeric setting into the panel state that autosave watches.
    *
-   * @param key - Integer settings field being edited.
-   * @param rawValue - Raw string value from the input control.
+   * @param key - Settings field that was committed from a number draft.
+   * @param value - Parsed number, or `undefined` when the draft was empty.
    * @returns No return value.
    */
-  const updateIntegerDraft = (
-    key: "llamaPortRangeMin" | "llamaPortRangeMax" | "serverPort",
-    rawValue: string,
+  const commitNumericSetting = (
+    key: "llamaPortRangeMin" | "llamaPortRangeMax" | "requestTimeoutSeconds" | "serverPort",
+    value: number | undefined,
   ) => {
-    setNumericDrafts((prev) => ({ ...prev, [key]: rawValue }));
-    const trimmed = rawValue.trim();
-    if (!/^\d+$/.test(trimmed)) {
-      return;
-    }
-
-    const parsed = Number.parseInt(trimmed, 10);
-    if (!Number.isInteger(parsed) || parsed <= 0 || parsed > 65535) {
-      return;
-    }
-
-    setLocalState((prev) => {
-      if (key === "llamaPortRangeMin") {
-        const currentMax =
-          prev.llamaPortRangeMax ?? Number.parseInt(NUMERIC_DEFAULTS.llamaPortRangeMax, 10);
-        if (parsed > currentMax) return prev;
-      }
-      if (key === "llamaPortRangeMax") {
-        const currentMin =
-          prev.llamaPortRangeMin ?? Number.parseInt(NUMERIC_DEFAULTS.llamaPortRangeMin, 10);
-        if (parsed < currentMin) return prev;
-      }
-      return { ...prev, [key]: parsed };
-    });
-  };
-
-  /**
-   * Updates the inactivity-timeout draft and mirrors non-negative values into settings state.
-   *
-   * Zero is kept so the user can disable the timer. Incomplete text stays in the draft
-   * until it parses as a finite number greater than or equal to zero.
-   *
-   * @param rawValue - Raw string value from the timeout input.
-   * @returns No return value.
-   */
-  const updateTimeoutDraft = (rawValue: string) => {
-    setNumericDrafts((prev) => ({ ...prev, requestTimeoutSeconds: rawValue }));
-    const trimmed = rawValue.trim();
-    if (!/^\d+(\.\d+)?$/.test(trimmed)) {
-      return;
-    }
-
-    const parsed = Number.parseFloat(trimmed);
-    if (!Number.isFinite(parsed) || parsed < 0) {
-      return;
-    }
-
-    setLocalState((prev) => ({ ...prev, requestTimeoutSeconds: parsed }));
+    if (value === undefined) return;
+    setLocalState((prev) => ({ ...prev, [key]: value }));
   };
 
   useEffect(() => {
@@ -596,11 +519,13 @@ export function SettingsPanel() {
               <label htmlFor="portMin" className="text-sm font-medium line-clamp-1">
                 Llama Port Min
               </label>
-              <input
+              <NumberDraftInput
                 id="portMin"
-                type="number"
-                value={numericDrafts.llamaPortRangeMin}
-                onChange={(e) => updateIntegerDraft("llamaPortRangeMin", e.target.value)}
+                integer
+                min={1}
+                max={localState.llamaPortRangeMax ?? DEFAULT_APP_SETTINGS.llamaPortRangeMax}
+                value={localState.llamaPortRangeMin}
+                onCommit={(value) => commitNumericSetting("llamaPortRangeMin", value)}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm"
               />
             </div>
@@ -608,11 +533,13 @@ export function SettingsPanel() {
               <label htmlFor="portMax" className="text-sm font-medium line-clamp-1">
                 Llama Port Max
               </label>
-              <input
+              <NumberDraftInput
                 id="portMax"
-                type="number"
-                value={numericDrafts.llamaPortRangeMax}
-                onChange={(e) => updateIntegerDraft("llamaPortRangeMax", e.target.value)}
+                integer
+                min={localState.llamaPortRangeMin ?? DEFAULT_APP_SETTINGS.llamaPortRangeMin}
+                max={65535}
+                value={localState.llamaPortRangeMax}
+                onCommit={(value) => commitNumericSetting("llamaPortRangeMax", value)}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm"
               />
             </div>
@@ -621,13 +548,11 @@ export function SettingsPanel() {
             <label htmlFor="timeout" className="text-sm font-medium">
               Generation inactivity timeout (sec)
             </label>
-            <input
+            <NumberDraftInput
               id="timeout"
-              type="number"
               min={0}
-              step="any"
-              value={numericDrafts.requestTimeoutSeconds}
-              onChange={(e) => updateTimeoutDraft(e.target.value)}
+              value={localState.requestTimeoutSeconds}
+              onCommit={(value) => commitNumericSetting("requestTimeoutSeconds", value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm"
             />
             <p className="text-[10px] text-[var(--color-text-muted)] leading-tight">
@@ -645,11 +570,13 @@ export function SettingsPanel() {
             <label htmlFor="serverPort" className="text-sm font-medium">
               Bun Server Port
             </label>
-            <input
+            <NumberDraftInput
               id="serverPort"
-              type="number"
-              value={numericDrafts.serverPort}
-              onChange={(e) => updateIntegerDraft("serverPort", e.target.value)}
+              integer
+              min={1}
+              max={65535}
+              value={localState.serverPort}
+              onCommit={(value) => commitNumericSetting("serverPort", value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm font-mono focus:border-[var(--color-accent)] outline-none"
             />
             <p className="text-[10px] text-red-400 font-medium leading-tight">

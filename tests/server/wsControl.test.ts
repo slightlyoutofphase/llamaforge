@@ -5,9 +5,19 @@
 
 import { beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import * as logger from "../../src/server/logger";
 import * as streamProxy from "../../src/server/streamProxy";
-import { dispatchClientFrame, handleClientSocketClosed } from "../../src/server/wsControl";
-import { addConnection, clearConnections, removeConnection } from "../../src/server/wsHub";
+import {
+  dispatchClientFrame,
+  handleClientSocketClosed,
+  observeWebSocketTask,
+} from "../../src/server/wsControl";
+import {
+  addConnection,
+  clearConnections,
+  getConnectionCount,
+  removeConnection,
+} from "../../src/server/wsHub";
 
 describe("wsControl", () => {
   beforeEach(() => {
@@ -56,6 +66,53 @@ describe("wsControl", () => {
       expect(abortSpy).toHaveBeenCalledWith("disconnected");
     } finally {
       abortSpy.mockRestore();
+    }
+  });
+
+  it("does not resolve tool approvals from a WebSocket frame", async () => {
+    const tools = await import("../../src/server/tools");
+    const resolveSpy = spyOn(tools, "resolveToolApproval").mockReturnValue("resolved");
+    const ws = { send: () => 0 } as unknown as ServerWebSocket<unknown>;
+    addConnection(ws);
+    try {
+      await dispatchClientFrame(
+        ws,
+        JSON.stringify({
+          type: "tool_approval",
+          chatId: "chat-1",
+          toolCallId: "call-1",
+          approved: true,
+        }),
+      );
+      expect(resolveSpy).not.toHaveBeenCalled();
+    } finally {
+      resolveSpy.mockRestore();
+      removeConnection(ws);
+    }
+  });
+
+  it("logs a frame that throws and leaves the socket open", async () => {
+    const abortSpy = spyOn(streamProxy, "abortGeneration").mockImplementation(() => {
+      throw new Error("frame failed");
+    });
+    const logSpy = spyOn(logger, "logError").mockImplementation(() => {});
+    const ws = { send: () => 0 } as unknown as ServerWebSocket<unknown>;
+    addConnection(ws);
+
+    try {
+      observeWebSocketTask(
+        dispatchClientFrame(ws, JSON.stringify({ type: "cancel", chatId: "chat-1" })),
+      );
+      const deadline = Date.now() + 1_000;
+      while (logSpy.mock.calls.length === 0 && Date.now() < deadline) {
+        await Bun.sleep(10);
+      }
+      expect(logSpy).toHaveBeenCalledWith("WebSocket frame handling failed", expect.any(Error));
+      expect(getConnectionCount()).toBe(1);
+    } finally {
+      abortSpy.mockRestore();
+      logSpy.mockRestore();
+      removeConnection(ws);
     }
   });
 

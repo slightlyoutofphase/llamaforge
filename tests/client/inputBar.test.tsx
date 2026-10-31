@@ -326,4 +326,44 @@ describe("InputBar Component", () => {
     });
     expect(useAppStore.getState().errorMessage).toContain("notes.json");
   });
+
+  it("does not offer Stop while a send is in flight", () => {
+    const onSend = mock();
+    const onStop = mock();
+    render(
+      <InputBar
+        onSend={onSend}
+        isGenerating={true}
+        isSending={true}
+        isActive={true}
+        onStop={onStop}
+      />,
+    );
+    const sending = screen.getByRole("button", { name: "Sending" });
+    expect(sending).toHaveProperty("disabled", true);
+    expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull();
+    fireEvent.click(sending);
+    expect(onStop).not.toHaveBeenCalled();
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("keeps text typed while a send is still in flight", async () => {
+    let release: () => void = () => {};
+    const onSend = mock(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(<InputBar onSend={onSend} isGenerating={false} isActive={true} onStop={mock()} />);
+    const textarea = screen.getByPlaceholderText("Type your message...");
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    fireEvent.change(textarea, { target: { value: "hello more" } });
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    expect((textarea as HTMLTextAreaElement).value).toBe("hello more");
+  });
 });

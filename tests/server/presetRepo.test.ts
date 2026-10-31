@@ -668,4 +668,84 @@ describe("presetRepo", () => {
     await updateLoadPreset("only", { name: "Default (from GGUF) for Aura" });
     expect((await getLoadPresets()).find((preset) => preset.id === "only")?.name).toBe("Aura");
   });
+
+  it("clears, sets, and keeps a chat template override", async () => {
+    await createLoadPreset({
+      id: "lp-template",
+      name: "Template",
+      isDefault: false,
+      isReadonly: false,
+      modelPath: "path-template",
+      config: testLoadConfig("path-template"),
+      chatTemplateOverride: "old template",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    await updateLoadPreset("lp-template", { name: "Template renamed" });
+    expect(
+      (await getLoadPresets()).find((preset) => preset.id === "lp-template")?.chatTemplateOverride,
+    ).toBe("old template");
+
+    await updateLoadPreset("lp-template", { chatTemplateOverride: "new template" });
+    expect(
+      (await getLoadPresets()).find((preset) => preset.id === "lp-template")?.chatTemplateOverride,
+    ).toBe("new template");
+
+    await updateLoadPreset("lp-template", { chatTemplateOverride: null });
+    expect(
+      (await getLoadPresets()).find((preset) => preset.id === "lp-template")?.chatTemplateOverride,
+    ).toBeUndefined();
+  });
+
+  it("returns 403 when a read-only load preset is updated", async () => {
+    const seeded = (await getLoadPresets()).find((preset) => preset.isReadonly);
+    if (!seeded) {
+      throw new Error("Expected a seeded read-only load preset.");
+    }
+    const result = await updateLoadPreset(seeded.id, {
+      name: "Hacked",
+      chatTemplateOverride: "nope",
+    });
+    expect(result).toBe("protected");
+    const after = (await getLoadPresets()).find((preset) => preset.id === seeded.id);
+    expect(after?.name).toBe(seeded.name);
+    expect(after?.chatTemplateOverride).toBeUndefined();
+
+    const { createRouter } = await import("../../src/server/router");
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request(`http://localhost/api/presets/load/${seeded.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Hacked" }),
+      }),
+      { upgrade: () => false },
+    );
+    if (!res) throw new Error("expected a response");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("protected");
+    expect((await getLoadPresets()).find((preset) => preset.id === seeded.id)?.name).toBe(
+      seeded.name,
+    );
+  });
+
+  it("returns 400 when a system preset is created without content", async () => {
+    const { createRouter } = await import("../../src/server/router");
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request("http://localhost/api/presets/system", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Notes" }),
+      }),
+      { upgrade: () => false },
+    );
+    if (!res) throw new Error("expected a response");
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("content");
+    expect((await getSystemPresets()).some((preset) => preset.name === "Notes")).toBe(false);
+  });
 });

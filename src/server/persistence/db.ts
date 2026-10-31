@@ -65,34 +65,63 @@ function migrateChatsParentDeleteSetNull(db: Database): void {
   if (tableSql?.includes("ON DELETE SET NULL")) return;
 
   db.exec("PRAGMA foreign_keys = OFF;");
-  db.exec(`
-    CREATE TABLE chats_new (
-      id          TEXT PRIMARY KEY,
-      name        TEXT NOT NULL DEFAULT 'New Chat',
-      created_at  INTEGER NOT NULL,
-      updated_at  INTEGER NOT NULL,
-      parent_id   TEXT REFERENCES chats_new(id) ON DELETE SET NULL,
-      is_branch   INTEGER NOT NULL DEFAULT 0,
-      model_path  TEXT,
-      system_preset_id TEXT,
-      inference_preset_id TEXT
-    );
-  `);
-  db.exec(`
-    INSERT INTO chats_new (
-      id, name, created_at, updated_at, parent_id, is_branch,
-      model_path, system_preset_id, inference_preset_id
+  try {
+    db.exec(`
+      CREATE TABLE chats_new (
+        id          TEXT PRIMARY KEY,
+        name        TEXT NOT NULL DEFAULT 'New Chat',
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        parent_id   TEXT REFERENCES chats_new(id) ON DELETE SET NULL,
+        is_branch   INTEGER NOT NULL DEFAULT 0,
+        model_path  TEXT,
+        system_preset_id TEXT,
+        inference_preset_id TEXT
+      );
+    `);
+    db.exec(`
+      INSERT INTO chats_new (
+        id, name, created_at, updated_at, parent_id, is_branch,
+        model_path, system_preset_id, inference_preset_id
+      )
+      SELECT
+        id, name, created_at, updated_at, parent_id, is_branch,
+        model_path, system_preset_id, inference_preset_id
+      FROM chats;
+    `);
+    db.exec("DROP TABLE chats;");
+    db.exec("ALTER TABLE chats_new RENAME TO chats;");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_chats_created_at ON chats(created_at);");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_chats_updated_at ON chats(updated_at);");
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+
+  const violations = db
+    .query<{ table: string; rowid: number; parent: string; fkid: number }, []>(
+      "PRAGMA foreign_key_check",
     )
-    SELECT
-      id, name, created_at, updated_at, parent_id, is_branch,
-      model_path, system_preset_id, inference_preset_id
-    FROM chats;
-  `);
-  db.exec("DROP TABLE chats;");
-  db.exec("ALTER TABLE chats_new RENAME TO chats;");
-  db.exec("CREATE INDEX IF NOT EXISTS idx_chats_created_at ON chats(created_at);");
-  db.exec("CREATE INDEX IF NOT EXISTS idx_chats_updated_at ON chats(updated_at);");
-  db.exec("PRAGMA foreign_keys = ON;");
+    .all();
+  if (violations.length > 0) {
+    logError("Foreign key check failed after rebuilding chats.parent_id", violations);
+  }
+}
+
+/**
+ * Turns incremental auto-vacuum on for a database created before that was the default.
+ *
+ * The setting is stored only for an empty database, or after `VACUUM`. `VACUUM` rewrites
+ * the whole file once, at startup, before the server listens. Later startups keep the
+ * 10-minute incremental timer and do not rewrite the file again.
+ *
+ * @param db - Database whose auto-vacuum mode should become incremental.
+ * @returns No return value.
+ */
+function enableIncrementalAutoVacuum(db: Database): void {
+  const mode = db.query<{ auto_vacuum: number }, []>("PRAGMA auto_vacuum").get()?.auto_vacuum ?? 0;
+  if (mode !== 0) return;
+  db.exec("PRAGMA auto_vacuum = INCREMENTAL;");
+  db.exec("VACUUM;");
 }
 
 /**
@@ -235,8 +264,9 @@ export function getDb(path?: string): Database {
 
   const currentVersion =
     _db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version ?? 0;
-  const LATEST_DB_VERSION = 4;
+  const LATEST_DB_VERSION = 5;
   const CHATS_PARENT_FK_MIGRATION_INDEX = 3;
+  const AUTO_VACUUM_MIGRATION_INDEX = 4;
   const MIGRATIONS: Array<((d: Database) => void) | undefined> = [
     undefined, // v0 -> v1: initial schema creation is handled by initDbSchema.
     (d: Database) => {
@@ -280,13 +310,16 @@ export function getDb(path?: string): Database {
     try {
       _db.exec("BEGIN TRANSACTION;");
       for (let i = currentVersion; i < LATEST_DB_VERSION; i++) {
-        if (i === CHATS_PARENT_FK_MIGRATION_INDEX) continue;
+        if (i === CHATS_PARENT_FK_MIGRATION_INDEX || i === AUTO_VACUUM_MIGRATION_INDEX) continue;
         const migration = MIGRATIONS[i];
         if (migration) migration(_db);
       }
       _db.exec("COMMIT;");
       if (currentVersion < 4) {
         migrateChatsParentDeleteSetNull(_db);
+      }
+      if (currentVersion < 5) {
+        enableIncrementalAutoVacuum(_db);
       }
       _db.exec(`PRAGMA user_version = ${LATEST_DB_VERSION};`);
       if (hasAnyTables) {

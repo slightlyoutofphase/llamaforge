@@ -19,16 +19,20 @@ export function formatLogArgument(value: unknown): string {
   if (typeof value === "bigint") return value.toString();
   if (typeof value !== "object" || value === null) return String(value);
 
-  const seen = new WeakSet<object>();
+  const ancestors: object[] = [];
   try {
-    return JSON.stringify(value, (_key, nested: unknown) => {
+    return JSON.stringify(value, function (this: object, _key, nested: unknown) {
       if (nested instanceof Error) {
         return { name: nested.name, message: nested.message, stack: nested.stack };
       }
       if (typeof nested === "bigint") return nested.toString();
       if (typeof nested === "object" && nested !== null) {
-        if (seen.has(nested)) return "[Circular]";
-        seen.add(nested);
+        const holderIndex = ancestors.lastIndexOf(this);
+        if (holderIndex >= 0) {
+          ancestors.length = holderIndex + 1;
+        }
+        if (ancestors.includes(nested)) return "[Circular]";
+        ancestors.push(nested);
       }
       return nested;
     });

@@ -6,8 +6,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { createDefaultLoadConfig } from "../../src/shared/defaults";
 import { useAppStore } from "../../src/client/store";
 import { ModelSelector } from "../../src/client/ModelSelector";
+import { ModelLibraryPanel } from "../../src/client/components/sidebar/ModelLibraryPanel";
 import { ModelLoadOverlay } from "../../src/client/components/ModelLoadOverlay";
 import { asFetch, ggufDisplayMetadata } from "../fixtures";
 
@@ -544,5 +546,144 @@ describe("ModelSelector Component", () => {
     expect(q4Names).toEqual(["Balanced Default", "Aura-Q4_K_S"]);
     expect(q8Names).toEqual(["Balanced Default", "Aura-Q8_0"]);
     expect(q4Names.join(" ").match(/\bdefault\b/gi)).toEqual(["Default"]);
+  });
+
+  it("keeps LOAD unavailable until load presets resolve", async () => {
+    global.fetch = asFetch(mock(() => new Promise(() => undefined)));
+    useAppStore.setState({
+      models: [
+        {
+          publisher: "lab",
+          modelName: "Shared Model",
+          primaryPath: "D:/models/shared.gguf",
+          metadata: ggufDisplayMetadata({ name: "Shared Model" }),
+        },
+      ],
+      loadModel: async () => true,
+      unloadModel: async () => {},
+      serverStatus: "idle",
+      loadedModel: null,
+      messages: [],
+      isGenerating: false,
+    });
+
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelSelector />
+        </QueryClientProvider>,
+      );
+    });
+    expect(await screen.findByText("Loading presets…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "LOAD" })).toBeNull();
+
+    cleanup();
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelLibraryPanel />
+        </QueryClientProvider>,
+      );
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Shared Model/ }));
+    expect(await screen.findByText("Loading presets…")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Shared Load" })).toBeNull();
+  });
+
+  it("sends the same load request from the registry and the model library", async () => {
+    const modelPath = "D:/models/shared.gguf";
+    const preset = {
+      id: "shared-preset",
+      name: "Shared Load",
+      modelPath,
+      isDefault: false,
+      isReadonly: false,
+      chatTemplateOverride: "custom-template",
+      thinkingTagOverride: {
+        openTag: "<think>",
+        closeTag: "</think>",
+        enableToken: "<think>",
+      },
+      config: {
+        ...createDefaultLoadConfig("D:/models/other.gguf"),
+        specType: "draft-simple" as const,
+        specDraftModelPath: "D:/models/configured-draft.gguf",
+        contextSize: 2048,
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const model = {
+      publisher: "lab",
+      modelName: "Shared Model",
+      primaryPath: modelPath,
+      draftModelPath: "D:/models/detected-draft.gguf",
+      draftSpecType: "draft-mtp" as const,
+      metadata: ggufDisplayMetadata({
+        name: "Shared Model",
+        chatTemplate: "default-template",
+      }),
+    };
+    global.fetch = asFetch(
+      mock((input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/presets/load")) {
+          return Promise.resolve(
+            new Response(JSON.stringify([preset]), {
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify([])));
+      }),
+    );
+
+    const selectorLoad = mock().mockResolvedValue(true);
+    useAppStore.setState({
+      models: [model],
+      loadModel: selectorLoad,
+      unloadModel: async () => {},
+      serverStatus: "idle",
+      loadedModel: null,
+      messages: [],
+      isGenerating: false,
+    });
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelSelector />
+        </QueryClientProvider>,
+      );
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "LOAD" }));
+    });
+
+    cleanup();
+    const libraryLoad = mock().mockResolvedValue(true);
+    useAppStore.setState({ loadModel: libraryLoad });
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelLibraryPanel />
+        </QueryClientProvider>,
+      );
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /Shared Model/ }));
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("button", { name: "Shared Load" }));
+    });
+
+    expect(selectorLoad).toHaveBeenCalledTimes(1);
+    expect(libraryLoad).toHaveBeenCalledTimes(1);
+    expect(selectorLoad.mock.calls[0]?.[0]).toEqual(libraryLoad.mock.calls[0]?.[0]);
+    expect(selectorLoad.mock.calls[0]?.[0]).toMatchObject({
+      modelPath,
+      presetId: "shared-preset",
+      contextSize: 2048,
+      specDraftModelPath: "D:/models/configured-draft.gguf",
+      chatTemplateContent: "custom-template",
+      thinkingTagOverride: preset.thinkingTagOverride,
+    });
   });
 });

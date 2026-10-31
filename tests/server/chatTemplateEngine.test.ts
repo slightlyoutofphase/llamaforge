@@ -7,6 +7,7 @@ import { describe, expect, it } from "bun:test";
 import {
   applyAssistantStreamDelta,
   detectThinkingConfig,
+  finalizeAssistantStreamState,
   inferNativeReasoningReuse,
   parseThinkTags,
   parseThinkTagsWithFallback,
@@ -111,6 +112,46 @@ describe("chatTemplateEngine", () => {
         content: "before ",
         thinking: "",
         isThinking: false,
+      });
+      expect(
+        parseThinkTags(
+          "before <|c",
+          GEMMA4_THINKING_CONFIG.openTag,
+          GEMMA4_THINKING_CONFIG.closeTag,
+        ),
+      ).toEqual({
+        content: "before ",
+        thinking: "",
+        isThinking: false,
+      });
+    });
+
+    it("keeps a trailing tag prefix once the reply is finished", () => {
+      expect(parseThinkTags("before <", "<think>", "</think>", { final: true })).toEqual({
+        content: "before <",
+        thinking: "",
+        isThinking: false,
+      });
+      expect(
+        parseThinkTags(
+          "before <|c",
+          GEMMA4_THINKING_CONFIG.openTag,
+          GEMMA4_THINKING_CONFIG.closeTag,
+          { final: true },
+        ),
+      ).toEqual({
+        content: "before <|c",
+        thinking: "",
+        isThinking: false,
+      });
+      expect(
+        parseThinkTags("before <think>running though...</", "<think>", "</think>", {
+          final: true,
+        }),
+      ).toEqual({
+        content: "before ",
+        thinking: "running though...</",
+        isThinking: true,
       });
     });
 
@@ -277,6 +318,32 @@ describe("chatTemplateEngine", () => {
       expect(state.usedNativeReasoning).toBe(true);
       expect(state.prevThinking).toBe("plan");
       expect(state.prevContent).toBe("<think>not a tag parse</think>answer");
+    });
+  });
+
+  describe("finalizeAssistantStreamState", () => {
+    it("writes a held-back suffix into the visible reply", () => {
+      const state = {
+        fullRawContent: "answer <",
+        prevContent: "answer ",
+        prevThinking: "",
+        usedNativeReasoning: false,
+      };
+      finalizeAssistantStreamState(state, "<think>", "</think>");
+      expect(state.prevContent).toBe("answer <");
+      expect(state.prevThinking).toBe("");
+    });
+
+    it("leaves a native reasoning stream unchanged", () => {
+      const state = {
+        fullRawContent: "<think>secret</think>answer",
+        prevContent: "<think>secret</think>answer",
+        prevThinking: "plan",
+        usedNativeReasoning: true,
+      };
+      finalizeAssistantStreamState(state, "<think>", "</think>");
+      expect(state.prevContent).toBe("<think>secret</think>answer");
+      expect(state.prevThinking).toBe("plan");
     });
   });
 

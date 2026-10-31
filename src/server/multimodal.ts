@@ -700,6 +700,12 @@ function persistVideoSoundtrackAttachment(video: Attachment, audioAbs: string): 
   return attachment;
 }
 
+type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } }
+  | { type: "input_audio"; input_audio: { url: string } }
+  | { type: "input_video"; input_video: { url: string } };
+
 /**
  * Builds the content parts array for a multimodal LLM API request.
  * Converts mixed text and attachment objects into the appropriate nested JSON objects required by completions.
@@ -709,12 +715,6 @@ function persistVideoSoundtrackAttachment(video: Attachment, audioAbs: string): 
  * @param metadata - Projecting boundaries like supported capabilities via the server config.
  * @returns The complex content parts array or a simple string if no supported attachments exist.
  */
-type ChatContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } }
-  | { type: "input_audio"; input_audio: { url: string } }
-  | { type: "input_video"; input_video: { url: string } };
-
 export async function buildContentParts(
   text: string,
   attachments: Attachment[],

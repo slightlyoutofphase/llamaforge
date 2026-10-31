@@ -6,6 +6,7 @@
  * and starts the HTTP + WebSocket server.
  */
 import { serve } from "bun";
+import { shutdownCalculateWorker } from "./builtinTools/calculate";
 import { killActiveModelProcessSync, loadModel, unloadModel } from "./llamaServer";
 import { logError, logInfo, logStatus } from "./logger";
 import { scanModels } from "./modelScanner";
@@ -109,45 +110,6 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
     throw describeBindFailure(port, err);
   }
 
-  // Populate metadata after the HTTP port is bound so the UI can connect immediately.
-  try {
-    const { populateMetadata } = await import("./modelScanner");
-    const metadataModels = await Promise.all(rawModels.map((m) => populateMetadata(m)));
-    const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
-    await ensureModelDefaultPresets(metadataModels);
-    logInfo("Synchronous model metadata population complete.");
-  } catch (e) {
-    logError("Synchronous model metadata population failed:", e);
-  }
-
-  // Autoload last model if enabled
-  if (settings.autoloadLastModel && settings.lastLoadConfig && settings.llamaServerPath) {
-    try {
-      const autoloadConfig = { ...settings.lastLoadConfig };
-      const selectedModel = rawModels.find(
-        (model) => model.primaryPath === settings.lastLoadConfig?.modelPath,
-      );
-      if (selectedModel?.mmProjPath) {
-        autoloadConfig.mmProjPath = selectedModel.mmProjPath;
-      }
-
-      logInfo(`Autoloading last model: ${autoloadConfig.modelPath}`);
-      await loadModel(
-        autoloadConfig,
-        settings.llamaServerPath,
-        settings.llamaPortRangeMin,
-        settings.llamaPortRangeMax,
-        settings.lastLoadThinkingTagOverride,
-      );
-      logInfo("Autoload completed successfully.");
-    } catch (err) {
-      logError(
-        "Autoload failed. The model server could not be started.",
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  }
-
   let shutdownInProgress = false;
   /**
    * Kills llama-server, closes browser sockets, and exits without waiting.
@@ -181,11 +143,15 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
   /**
    * Shuts down the Bun server, active llama-server process, and database cleanly.
    *
+   * Registered before autoload so Ctrl+C during a long model load still reaches
+   * {@link unloadModel}, which interrupts a readiness wait when the process changes.
+   *
    * @returns No return value.
    */
   const cleanup = () => {
     if (shutdownInProgress) return;
     shutdownInProgress = true;
+    shutdownCalculateWorker();
     logInfo("Shutting down LlamaForge Server...");
     void (async () => {
       try {
@@ -225,6 +191,45 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
       process.stdin.resume();
       process.stdin.on("end", forceExit);
       process.stdin.on("close", forceExit);
+    }
+  }
+
+  // Populate metadata after the HTTP port is bound so the UI can connect immediately.
+  try {
+    const { populateMetadata } = await import("./modelScanner");
+    const metadataModels = await Promise.all(rawModels.map((m) => populateMetadata(m)));
+    const { ensureModelDefaultPresets } = await import("./persistence/presetRepo");
+    await ensureModelDefaultPresets(metadataModels);
+    logInfo("Synchronous model metadata population complete.");
+  } catch (e) {
+    logError("Synchronous model metadata population failed:", e);
+  }
+
+  // Autoload last model if enabled
+  if (settings.autoloadLastModel && settings.lastLoadConfig && settings.llamaServerPath) {
+    try {
+      const autoloadConfig = { ...settings.lastLoadConfig };
+      const selectedModel = rawModels.find(
+        (model) => model.primaryPath === settings.lastLoadConfig?.modelPath,
+      );
+      if (selectedModel?.mmProjPath) {
+        autoloadConfig.mmProjPath = selectedModel.mmProjPath;
+      }
+
+      logInfo(`Autoloading last model: ${autoloadConfig.modelPath}`);
+      await loadModel(
+        autoloadConfig,
+        settings.llamaServerPath,
+        settings.llamaPortRangeMin,
+        settings.llamaPortRangeMax,
+        settings.lastLoadThinkingTagOverride,
+      );
+      logInfo("Autoload completed successfully.");
+    } catch (err) {
+      logError(
+        "Autoload failed. The model server could not be started.",
+        err instanceof Error ? err.message : String(err),
+      );
     }
   }
 

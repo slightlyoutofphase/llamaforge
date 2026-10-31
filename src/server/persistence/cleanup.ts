@@ -18,9 +18,42 @@ import { getAppDataDir, getDb } from "./db";
  * @param referencedSet - `file_path` values currently stored in `attachments`.
  * @returns `true` when the file must not be deleted as an orphan.
  */
+/**
+ * Indexes referenced file stems by their directory prefix.
+ *
+ * @param referencedSet - `file_path` values currently stored in `attachments`.
+ * @returns Directory prefix to the set of file stems in that directory.
+ */
+export function buildReferencedStemIndex(
+  referencedSet: ReadonlySet<string>,
+): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>();
+  for (const referenced of referencedSet) {
+    const parts = referenced.split("/");
+    const fileName = parts.at(-1);
+    if (!fileName || parts.length < 2) continue;
+    const dirPrefix = `${parts.slice(0, -1).join("/")}/`;
+    const dot = fileName.lastIndexOf(".");
+    const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
+    const stems = index.get(dirPrefix) ?? new Set<string>();
+    stems.add(stem);
+    index.set(dirPrefix, stems);
+  }
+  return index;
+}
+
+/**
+ * Whether a disk file is a video soundtrack cache that still belongs to a referenced video.
+ *
+ * @param relPath - Path relative to the app data root, using `/` separators.
+ * @param referencedSet - `file_path` values currently stored in `attachments`.
+ * @param stemIndex - Directory-to-stem index built once per cleanup pass.
+ * @returns `true` when the file must not be deleted as an orphan.
+ */
 export function isProtectedVideoAudioSidecar(
   relPath: string,
   referencedSet: ReadonlySet<string>,
+  stemIndex?: ReadonlyMap<string, ReadonlySet<string>>,
 ): boolean {
   const parts = relPath.split("/");
   const fileName = parts.at(-1);
@@ -28,15 +61,8 @@ export function isProtectedVideoAudioSidecar(
   const stem = videoAudioSidecarOwnerStem(fileName);
   if (!stem) return false;
   const dirPrefix = `${parts.slice(0, -1).join("/")}/`;
-  for (const referenced of referencedSet) {
-    if (!referenced.startsWith(dirPrefix)) continue;
-    const referencedName = referenced.slice(dirPrefix.length);
-    if (referencedName.includes("/")) continue;
-    const dot = referencedName.lastIndexOf(".");
-    const referencedStem = dot > 0 ? referencedName.slice(0, dot) : referencedName;
-    if (referencedStem === stem) return true;
-  }
-  return false;
+  const index = stemIndex ?? buildReferencedStemIndex(referencedSet);
+  return index.get(dirPrefix)?.has(stem) ?? false;
 }
 
 /**
@@ -63,6 +89,7 @@ export async function cleanupOrphanedAttachments() {
       .map((r) => r.file_path);
 
     const referencedSet = new Set(referencedFiles);
+    const stemIndex = buildReferencedStemIndex(referencedSet);
 
     // M7 fix: skip cleanup for chats with active generations to prevent race conditions
     const activeChatIds = getActiveGenerationChatIds();
@@ -87,7 +114,7 @@ export async function cleanupOrphanedAttachments() {
                 const relPath = ["attachments", chatDir.name, msgDir.name, file.name].join("/");
                 if (
                   !referencedSet.has(relPath) &&
-                  !isProtectedVideoAudioSidecar(relPath, referencedSet)
+                  !isProtectedVideoAudioSidecar(relPath, referencedSet, stemIndex)
                 ) {
                   logInfo(`Cleaning up orphaned attachment: ${relPath}`);
                   await Bun.file(path.join(msgDirPath, file.name))

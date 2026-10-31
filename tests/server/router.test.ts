@@ -10,6 +10,7 @@ import * as llamaServerModule from "../../src/server/llamaServer";
 import { addMessage, createChat, getChat } from "../../src/server/persistence/chatRepo";
 import { getAppDataDir, initDb } from "../../src/server/persistence/db";
 import { createInferencePreset } from "../../src/server/persistence/presetRepo";
+import { createDefaultInferenceSampling } from "../../src/shared/defaults";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
 import { __setHardwareProbe } from "../../src/server/router";
 import { ggufDisplayMetadata, noUpgradeServer, setBunEnv } from "../fixtures";
@@ -1574,5 +1575,108 @@ describe("router", () => {
     expect(res?.status).toBe(409);
     const body = (await res?.json()) as { error?: string };
     expect(body.error).toBe("Llama-server is not running.");
+  });
+
+  it("POST /api/chats/:id/messages returns 409 when llama-server is not running", async () => {
+    const chat = await createChat("Send While Stopped");
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request(`http://localhost/api/chats/${chat.id}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: "hello" }),
+      }),
+      noUpgradeServer,
+    );
+    expect(res?.status).toBe(409);
+    const body = (await res?.json()) as { error?: string };
+    expect(body.error).toBe("Llama-server is not running.");
+  });
+
+  it("PUT /api/presets/inference rejects isDefault", async () => {
+    await createInferencePreset({
+      ...createDefaultInferenceSampling(),
+      id: "inf-reject-default",
+      name: "Reject Default",
+      isDefault: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request("http://localhost/api/presets/inference/inf-reject-default", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isDefault: true }),
+      }),
+      noUpgradeServer,
+    );
+    expect(res?.status).toBe(400);
+    const body = (await res?.json()) as { error?: string };
+    expect(body.error).toContain("isDefault");
+  });
+
+  it("PUT /api/presets/inference rejects null for a numeric sampling field", async () => {
+    await createInferencePreset({
+      ...createDefaultInferenceSampling(),
+      id: "inf-reject-null",
+      name: "Reject Null",
+      isDefault: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request("http://localhost/api/presets/inference/inf-reject-null", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ temperature: null }),
+      }),
+      noUpgradeServer,
+    );
+    expect(res?.status).toBe(400);
+    const body = (await res?.json()) as { error?: string };
+    expect(body.error).toContain("temperature");
+  });
+
+  it("POST /api/chats/:id/tool-approvals resolves, misses, and rejects the wrong chat", async () => {
+    const { waitForToolApproval } = await import("../../src/server/tools");
+    const router = createRouter();
+    const pending = waitForToolApproval("chat-approve", "call-approve");
+    const ok = await router.fetch(
+      new Request("http://localhost/api/chats/chat-approve/tool-approvals/call-approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: true, editedArguments: '{"expression":"2+2"}' }),
+      }),
+      noUpgradeServer,
+    );
+    expect(ok?.status).toBe(200);
+    await expect(pending).resolves.toMatchObject({ approved: true });
+
+    const missing = await router.fetch(
+      new Request("http://localhost/api/chats/chat-approve/tool-approvals/missing-call", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: false }),
+      }),
+      noUpgradeServer,
+    );
+    expect(missing?.status).toBe(404);
+
+    const mismatched = waitForToolApproval("other-chat", "call-mismatch");
+    const conflict = await router.fetch(
+      new Request("http://localhost/api/chats/chat-approve/tool-approvals/call-mismatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approved: true }),
+      }),
+      noUpgradeServer,
+    );
+    expect(conflict?.status).toBe(409);
+    mismatched.catch(() => undefined);
+    const { cancelPendingApprovals } = await import("../../src/server/tools");
+    cancelPendingApprovals("other-chat");
+    await mismatched;
   });
 });

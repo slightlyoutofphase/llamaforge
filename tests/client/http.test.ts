@@ -43,6 +43,18 @@ describe("client http request helper", () => {
     expect(xhrConstructed).toBe(false);
   });
 
+  it("surfaces the server error text from a failed preset update", async () => {
+    const fetchMock = mock(async () => {
+      return new Response(JSON.stringify({ error: "must be >= 1" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    globalThis.fetch = asFetch(fetchMock);
+    const { updateLoadPreset } = await import(`../../src/client/api.ts?cachebust=${Date.now()}`);
+    await expect(updateLoadPreset("preset-1", { name: "Broken" })).rejects.toThrow("must be >= 1");
+  });
+
   it("rejects with TimeoutError when fetch exceeds the timeout budget", async () => {
     const fetchMock = mock(
       (_input: RequestInfo | URL, init?: RequestInit) =>

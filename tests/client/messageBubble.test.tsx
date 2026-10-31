@@ -16,6 +16,38 @@ import { useAppStore } from "../../src/client/store";
 import { THINKING_TRACE_BODY_CLASS } from "../../src/shared/thinkingDisplay";
 
 describe("MessageBubble Component", () => {
+  const codeMessage: ChatMessage = {
+    id: "code-1",
+    chatId: "c1",
+    role: "assistant",
+    content: "```js\nconst answer = 1;\n```",
+    rawContent: "```js\nconst answer = 1;\n```",
+    position: 0,
+    createdAt: 1,
+  };
+  const bubbleActions = {
+    onEdit: () => {},
+    onBranch: () => {},
+    onRegenerate: () => {},
+    onContinue: () => {},
+    onDelete: () => {},
+  };
+
+  it("highlights code after streaming and leaves it plain while streaming", () => {
+    const streaming = render(
+      <MessageBubble message={codeMessage} isStreaming={true} {...bubbleActions} />,
+    );
+    expect(streaming.container.querySelector(".hljs")).toBeNull();
+    expect(streaming.container.textContent).toContain("const answer = 1;");
+    streaming.unmount();
+
+    const finished = render(
+      <MessageBubble message={codeMessage} isStreaming={false} {...bubbleActions} />,
+    );
+    expect(finished.container.querySelector(".hljs")).toBeTruthy();
+    finished.unmount();
+  });
+
   afterEach(() => {
     cleanup();
     useAppStore.setState({ isGenerating: false });

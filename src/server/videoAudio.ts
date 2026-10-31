@@ -31,6 +31,13 @@ const EXTRACT_TIMEOUT_MS = 120_000;
 const VERSION_TIMEOUT_MS = 4_000;
 
 let cachedFfprobePath: string | null | undefined;
+/** Epoch milliseconds until a remembered ffprobe miss may be searched again. */
+let ffprobeMissUntil = 0;
+const FFPROBE_MISS_TTL_MS = 60_000;
+/** Test override: `present` skips the search, `missing` forces a miss, `real` searches. */
+let ffprobeTestMode: "real" | "present" | "missing" = "real";
+/** Counts real ffprobe searches, not TTL short-circuits. */
+let ffprobeSearchCount = 0;
 const inFlightSidecars = new Map<string, Promise<string | null>>();
 
 /**
@@ -235,9 +242,56 @@ export function __setVideoAudioExtract(impl: VideoAudioExtractFn | null): void {
  */
 export function __resetVideoAudioState(): void {
   cachedFfprobePath = undefined;
+  ffprobeMissUntil = 0;
+  ffprobeTestMode = "real";
+  ffprobeSearchCount = 0;
   inFlightSidecars.clear();
   probeImpl = probeVideoHasAudioStream;
   extractImpl = extractVideoAudioTrack;
+}
+
+/**
+ * Forces ffprobe lookup for tests.
+ *
+ * @param mode - `present` treats ffprobe as installed, `missing` treats it as absent, `real` searches.
+ * @returns No return value.
+ * @internal
+ */
+export function __setFfprobeAvailabilityForTests(mode: "real" | "present" | "missing"): void {
+  ffprobeTestMode = mode;
+  ffprobeMissUntil = 0;
+  if (mode !== "present") cachedFfprobePath = undefined;
+}
+
+/**
+ * Forgets a cached ffprobe miss so the next lookup searches again.
+ *
+ * @returns No return value.
+ * @internal
+ */
+export function __expireFfprobeMissForTests(): void {
+  ffprobeMissUntil = 0;
+}
+
+/**
+ * Returns how many times ffprobe was actually searched, ignoring TTL hits.
+ *
+ * @returns Search count since the last reset.
+ * @internal
+ */
+export function __ffprobeSearchCount(): number {
+  return ffprobeSearchCount;
+}
+
+/**
+ * Path of the marker written when ffprobe runs but cannot read a video.
+ *
+ * @param videoAbsPath - Absolute path of the video.
+ * @returns Marker path beside the video.
+ */
+export function videoProbeFailedMarkerPath(videoAbsPath: string): string {
+  const parsed = path.parse(videoAbsPath);
+  return path.join(parsed.dir, `${parsed.name}.probe-failed`);
 }
 
 /**
@@ -256,8 +310,22 @@ async function resolveVideoAudioSidecarUncached(videoAbsPath: string): Promise<s
   if (await fileExists(markerPath)) {
     return null;
   }
+  const failedMarker = videoProbeFailedMarkerPath(videoAbsPath);
+  const videoStat = await fs.stat(videoAbsPath).catch(() => null);
+  if (videoStat && (await probeFailedMarkerIsCurrent(failedMarker, videoStat.mtimeMs))) {
+    return null;
+  }
 
   const hasAudio = await probeImpl(videoAbsPath);
+  if (hasAudio === null) {
+    const probeWasReal = probeImpl === probeVideoHasAudioStream;
+    const ffprobeKnown = ffprobeTestMode === "present" || Boolean(cachedFfprobePath);
+    if (ffprobeKnown || probeWasReal) {
+      const settings = await loadSettings();
+      if (await resolveFfprobePath(settings)) await writeProbeFailedMarker(failedMarker);
+    }
+    return null;
+  }
   if (hasAudio === false) {
     try {
       await Bun.write(markerPath, "");
@@ -352,13 +420,21 @@ async function extractVideoAudioTrack(inputPath: string, outputPath: string): Pr
 /**
  * Resolves an ffprobe executable next to ffmpeg or on PATH.
  *
- * A missing executable is not cached, so installing ffprobe is picked up on the next video.
+ * A missing executable is remembered for 60 seconds, so installing ffprobe is picked up
+ * on a later video without probing on every payload.
  *
  * @param settings - Application settings used to locate ffmpeg.
  * @returns Absolute or PATH-resolved ffprobe command, or `null` when unavailable.
  */
 async function resolveFfprobePath(settings: AppSettings): Promise<string | null> {
+  if (ffprobeTestMode === "present") return cachedFfprobePath || "ffprobe";
   if (cachedFfprobePath) return cachedFfprobePath;
+  if (Date.now() < ffprobeMissUntil) return null;
+  ffprobeSearchCount += 1;
+  if (ffprobeTestMode === "missing") {
+    ffprobeMissUntil = Date.now() + FFPROBE_MISS_TTL_MS;
+    return null;
+  }
 
   const candidates: string[] = [];
   const ffmpeg = await resolveFfmpegPath(settings);
@@ -379,7 +455,44 @@ async function resolveFfprobePath(settings: AppSettings): Promise<string | null>
     }
   }
 
+  ffprobeMissUntil = Date.now() + FFPROBE_MISS_TTL_MS;
   return null;
+}
+
+/**
+ * Returns whether a failed-probe marker is still newer than the video.
+ *
+ * @param markerPath - `<stem>.probe-failed` path.
+ * @param videoMtimeMs - Video modification time in milliseconds.
+ * @returns `true` when the marker exists and is at least as new as the video.
+ */
+async function probeFailedMarkerIsCurrent(
+  markerPath: string,
+  videoMtimeMs: number,
+): Promise<boolean> {
+  try {
+    const stat = await fs.stat(markerPath);
+    return stat.mtimeMs >= videoMtimeMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Writes a failed-probe marker so the same file is not probed again until it changes.
+ *
+ * @param markerPath - Marker path beside the video.
+ * @returns No return value.
+ */
+async function writeProbeFailedMarker(markerPath: string): Promise<void> {
+  try {
+    await Bun.write(markerPath, "");
+  } catch (error) {
+    logWarn("[videoAudio] Failed to write probe-failed marker", {
+      markerPath,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**
