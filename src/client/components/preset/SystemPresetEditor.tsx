@@ -10,6 +10,11 @@ import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  allocateUniqueName,
+  duplicatePresetName,
+  presetMenuLabels,
+} from "../../../shared/presetNames";
+import {
   useCreateSystemPreset,
   useDeleteSystemPreset,
   useSystemPresets,
@@ -84,7 +89,13 @@ export function SystemPresetEditor() {
    */
   const handleSave = () => {
     if (!localState?.id) return;
-    updateMut.mutate({ id: localState.id, updates: localState });
+    const name = allocateUniqueName(
+      localState.name ?? "",
+      (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
+    );
+    const next = { ...localState, name };
+    setLocalState(next);
+    updateMut.mutate({ id: localState.id, updates: next });
   };
 
   /**
@@ -97,7 +108,10 @@ export function SystemPresetEditor() {
     const newPreset: SystemPromptPreset = {
       ...(localState as SystemPromptPreset),
       id: crypto.randomUUID(),
-      name: `${localState.name} (Copy)`,
+      name: duplicatePresetName(
+        localState.name ?? "Preset",
+        (presets ?? []).map((preset) => preset.name),
+      ),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -113,7 +127,10 @@ export function SystemPresetEditor() {
   const handleNew = () => {
     const newPreset: SystemPromptPreset = {
       id: crypto.randomUUID(),
-      name: "New System Preset",
+      name: allocateUniqueName(
+        "New System Preset",
+        (presets ?? []).map((preset) => preset.name),
+      ),
       content: "",
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -121,6 +138,14 @@ export function SystemPresetEditor() {
     createMut.mutate(newPreset);
     setRightPanelView("systemPreset", newPreset.id);
   };
+
+  const systemLabels = presetMenuLabels(
+    (presets ?? []).map((preset) => ({
+      id: preset.id,
+      name: preset.name,
+      isDefault: false,
+    })),
+  );
 
   /**
    * Deletes the currently selected system prompt preset.
@@ -147,7 +172,7 @@ export function SystemPresetEditor() {
             </option>
             {presets?.map((p) => (
               <option key={p.id} value={p.id} className="bg-[var(--color-surface)]">
-                {p.name}
+                {systemLabels.get(p.id) ?? p.name}
               </option>
             ))}
           </select>

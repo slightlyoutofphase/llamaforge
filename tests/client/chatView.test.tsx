@@ -749,3 +749,148 @@ describe("ChatView in-place message actions", () => {
     expect(useAppStore.getState().isGenerating).toBe(true);
   });
 });
+
+describe("ChatView preset menus", () => {
+  let originalFetch: typeof global.fetch;
+  let ChatView: typeof import("../../src/client/components/chat/ChatView").ChatView;
+
+  beforeEach(async () => {
+    originalFetch = global.fetch;
+    global.fetch = asFetch(
+      mock((input, init) => {
+        const url = typeof input === "string" ? input : input.url;
+        const method = (init?.method ?? "GET").toUpperCase();
+        if (method === "PUT" && String(url).includes("/api/chats/")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({ success: true }), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        if (String(url).includes("/api/presets/inference")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify([
+                inferencePreset,
+                {
+                  ...inferencePreset,
+                  id: "standard",
+                  name: "Standard",
+                  sourceModelPath: undefined,
+                  isDefault: false,
+                },
+                {
+                  ...inferencePreset,
+                  id: "foreign",
+                  name: "Foreign Gemma Preset",
+                  sourceModelPath: "/models/other.gguf",
+                  isDefault: false,
+                },
+              ]),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (String(url).includes("/api/presets/system")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify([
+                {
+                  id: "sys-long",
+                  name: "A very long system prompt preset name that must stay readable",
+                  content: "Be concise.",
+                },
+              ]),
+              { status: 200, headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        if (String(url).includes("/api/settings")) {
+          return Promise.resolve(
+            new Response(JSON.stringify({}), {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            }),
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({}), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+        );
+      }),
+    );
+
+    useAppStore.setState({
+      currentChatId: "chat-loop-1",
+      currentChatMetadata: {
+        name: "New Chat",
+        systemPresetId: "sys-long",
+        inferencePresetId: "qwen-default",
+      },
+      messages: [],
+      totalMessages: 0,
+      isGenerating: false,
+      isWaitingForToolApproval: false,
+      isConnected: true,
+      serverStatus: "running",
+      loadedModel: {
+        publisher: "test",
+        modelName: "Gemma-4-E4B-FineTuneB-Q8_0",
+        primaryPath: "/models/qwen.gguf",
+      },
+      errorMessage: null,
+      loadChat: mock().mockResolvedValue(undefined),
+      sendMessage: mock().mockResolvedValue(undefined),
+      stopGeneration: mock(),
+      unloadChat: mock(),
+    });
+
+    const imported = await import("../../src/client/components/chat/ChatView");
+    ChatView = imported.ChatView;
+  });
+
+  afterEach(() => {
+    cleanup();
+    global.fetch = originalFetch;
+  });
+
+  it("shows inference presets for the loaded model and lets long names wrap", async () => {
+    await renderChatView(ChatView);
+
+    const modelButton = screen.getByRole("button", { name: /Gemma-4-E4B-FineTuneB-Q8_0/ });
+    const modelLabel = modelButton.querySelector("span");
+    expect(modelLabel?.className).toContain("break-words");
+    expect(modelLabel?.className ?? "").not.toContain("max-w-[200px]");
+    expect(modelButton.className).toContain("min-w-0");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Inf:/ }));
+    });
+
+    const menu = screen.getByTestId("inference-preset-menu");
+    expect(menu.className).toContain("left-4");
+    expect(menu.className).toContain("right-4");
+    expect(menu.className).not.toContain("w-48");
+    expect(menu.textContent).toContain("Qwen Default");
+    expect(menu.textContent).toContain("Standard");
+    expect(menu.textContent).not.toContain("Foreign Gemma Preset");
+
+    const presetButton = [...menu.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Qwen Default"),
+    );
+    expect(presetButton?.className).toContain("break-words");
+    expect(presetButton?.className ?? "").not.toContain("truncate");
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Sys:/ }));
+    });
+    const systemMenu = screen.getByTestId("system-preset-menu");
+    expect(systemMenu.textContent).toContain(
+      "A very long system prompt preset name that must stay readable",
+    );
+    expect(systemMenu.className).not.toContain("w-48");
+  });
+});

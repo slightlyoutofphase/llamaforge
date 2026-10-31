@@ -5,7 +5,14 @@
 
 import { createDefaultInferenceSampling, createDefaultLoadConfig } from "../../shared/defaults";
 import { applyImageTokenBatchFloor } from "../../shared/imageTokens";
-import { analyzeTemplateCapabilities } from "../../shared/templateCapabilities";
+import {
+  allocateUniqueName,
+  assignUniquePresetNames,
+  autoPresetName,
+  preferredDefaultId,
+  resolveStoredPresetName,
+} from "../../shared/presetNames";
+import { analyzeTemplateCapabilities, modelPathsMatch } from "../../shared/templateCapabilities";
 import { detectThinkingConfig } from "../../shared/thinkingTags";
 import {
   SPECULATIVE_DECODE_TYPES,
@@ -14,7 +21,7 @@ import {
   type ModelLoadConfig,
   type SystemPromptPreset,
 } from "../../shared/types";
-import { logWarn } from "../logger";
+import { logInfo, logWarn } from "../logger";
 import { getDb } from "./db";
 
 /** Thrown when a load-preset payload cannot be persisted. */
@@ -745,6 +752,10 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
   if (!id) id = Bun.randomUUIDv7();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
+  name = allocateUniqueName(
+    name,
+    (await getLoadPresets()).map((preset) => preset.name),
+  );
 
   const configJson = serializeLoadPresetPayload({
     config,
@@ -764,6 +775,7 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
     createdAt,
     updatedAt,
   );
+  if (isDefault) await collapseDuplicateDefaults("load");
 }
 
 export type PresetMutationResult = "updated" | "deleted" | "not_found" | "protected";
@@ -822,7 +834,14 @@ export async function updateLoadPreset(
       : {}),
   });
 
-  const newName = updates.name ?? existing.name;
+  const takenLoadNames = (await getLoadPresets())
+    .filter((preset) => preset.id !== id)
+    .map((preset) => preset.name);
+  const newName = resolveStoredPresetName(
+    updates.name ?? existing.name,
+    existing.name,
+    takenLoadNames,
+  );
   const newModelPath = updates.modelPath ?? updates.config?.modelPath ?? existing.model_path;
   db.prepare(
     "UPDATE load_presets SET name = ?, model_path = ?, config_json = ?, updated_at = ? WHERE id = ?",
@@ -860,6 +879,10 @@ export async function createInferencePreset(preset: InferencePreset): Promise<vo
   if (!id) id = Bun.randomUUIDv7();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
+  name = allocateUniqueName(
+    name,
+    (await getInferencePresets()).map((preset) => preset.name),
+  );
 
   if (config.structuredOutput) {
     config.structuredOutput = { ...config.structuredOutput, grammar: undefined };
@@ -869,6 +892,7 @@ export async function createInferencePreset(preset: InferencePreset): Promise<vo
   db.prepare(
     `INSERT INTO inference_presets (id, name, source_model_path, is_default, config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(id, name, sourceModelPath || null, isDefault ? 1 : 0, configJson, createdAt, updatedAt);
+  if (isDefault) await collapseDuplicateDefaults("inference");
 }
 
 /**
@@ -911,7 +935,14 @@ export async function updateInferencePreset(
     newConfig.structuredOutput = { ...newConfig.structuredOutput, grammar: undefined };
   }
 
-  const newName = name ?? existingRow.name;
+  const takenInferenceNames = (await getInferencePresets())
+    .filter((preset) => preset.id !== id)
+    .map((preset) => preset.name);
+  const newName = resolveStoredPresetName(
+    name ?? existingRow.name,
+    existingRow.name,
+    takenInferenceNames,
+  );
 
   db.prepare(
     "UPDATE inference_presets SET name = ?, config_json = ?, updated_at = ? WHERE id = ?",
@@ -950,6 +981,10 @@ export async function createSystemPreset(preset: SystemPromptPreset): Promise<vo
   if (!id) id = Bun.randomUUIDv7();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
+  name = allocateUniqueName(
+    name,
+    (await getSystemPresets()).map((preset) => preset.name),
+  );
 
   db.prepare(
     `INSERT INTO system_presets (id, name, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
@@ -975,8 +1010,11 @@ export async function updateSystemPreset(
   const setStmts: string[] = [];
   const args: (string | number)[] = [];
   if (updates.name !== undefined) {
+    const all = await getSystemPresets();
+    const stored = all.find((preset) => preset.id === id)?.name ?? updates.name;
+    const taken = all.filter((preset) => preset.id !== id).map((preset) => preset.name);
     setStmts.push("name = ?");
-    args.push(updates.name);
+    args.push(resolveStoredPresetName(updates.name, stored, taken));
   }
   if (updates.content !== undefined) {
     setStmts.push("content = ?");
@@ -1009,31 +1047,234 @@ export async function deleteSystemPreset(id: string): Promise<PresetMutationResu
 }
 
 /**
- * Ensures each discovered model has default load and inference presets derived from GGUF metadata.
+ * Writes a repaired preset name.
+ *
+ * @param table - Preset table that owns the row.
+ * @param id - Row to rename.
+ * @param name - Unique name to store.
+ * @param updatedAt - Timestamp recorded on the row.
+ * @returns No return value.
+ */
+function writePresetName(
+  table: "load_presets" | "inference_presets" | "system_presets",
+  id: string,
+  name: string,
+  updatedAt: number,
+): void {
+  const db = getDb();
+  if (table === "load_presets") {
+    db.prepare("UPDATE load_presets SET name = ?, updated_at = ? WHERE id = ?").run(
+      name,
+      updatedAt,
+      id,
+    );
+    return;
+  }
+  if (table === "inference_presets") {
+    db.prepare("UPDATE inference_presets SET name = ?, updated_at = ? WHERE id = ?").run(
+      name,
+      updatedAt,
+      id,
+    );
+    return;
+  }
+  db.prepare("UPDATE system_presets SET name = ?, updated_at = ? WHERE id = ?").run(
+    name,
+    updatedAt,
+    id,
+  );
+}
+
+/**
+ * Renames stored presets onto the unique names assigned for that table.
+ *
+ * @param table - Preset table to update.
+ * @param current - Names currently stored.
+ * @param assigned - Names those rows should have.
+ * @returns The number of rows renamed.
+ */
+function persistPresetRenames(
+  table: "load_presets" | "inference_presets" | "system_presets",
+  current: readonly { id: string; name: string }[],
+  assigned: Map<string, string>,
+): number {
+  const now = Date.now();
+  let renamed = 0;
+  for (const row of current) {
+    const next = assigned.get(row.id);
+    if (!next || next === row.name) continue;
+    writePresetName(table, row.id, next, now);
+    renamed += 1;
+  }
+  if (renamed > 0) {
+    logInfo(`Renamed ${renamed} ${table.replaceAll("_", " ")} so every name is unique.`);
+  }
+  return renamed;
+}
+
+/**
+ * Leaves a single marked default in one preset list.
+ *
+ * @param kind - Which preset table to repair.
+ * @returns A promise that resolves once extra default flags are cleared.
+ */
+async function collapseDuplicateDefaults(kind: "load" | "inference"): Promise<void> {
+  const db = getDb();
+  const now = Date.now();
+  if (kind === "load") {
+    const presets = await getLoadPresets();
+    const keeper = preferredDefaultId(
+      presets.map((preset) => ({
+        id: preset.id,
+        isDefault: preset.isDefault,
+        isReadonly: preset.isReadonly,
+        boundPath: preset.modelPath,
+        createdAt: preset.createdAt,
+      })),
+    );
+    if (!keeper) return;
+    const update = db.prepare(
+      "UPDATE load_presets SET is_default = ?, updated_at = ? WHERE id = ?",
+    );
+    for (const preset of presets) {
+      const should = preset.id === keeper;
+      if (preset.isDefault === should) continue;
+      update.run(should ? 1 : 0, now, preset.id);
+    }
+    return;
+  }
+
+  const presets = await getInferencePresets();
+  const keeper = preferredDefaultId(
+    presets.map((preset) => ({
+      id: preset.id,
+      isDefault: preset.isDefault,
+      boundPath: preset.sourceModelPath,
+      createdAt: preset.createdAt,
+    })),
+  );
+  if (!keeper) return;
+  const update = db.prepare(
+    "UPDATE inference_presets SET is_default = ?, updated_at = ? WHERE id = ?",
+  );
+  for (const preset of presets) {
+    const should = preset.id === keeper;
+    if (preset.isDefault === should) continue;
+    update.run(should ? 1 : 0, now, preset.id);
+  }
+}
+
+/**
+ * Whether any preset path refers to the same GGUF, ignoring slash direction and drive-letter case.
+ *
+ * @param paths - Paths stored on existing presets.
+ * @param primaryPath - Model file being checked.
+ * @returns `true` when a preset is already bound to that file.
+ */
+function presetBoundToPath(
+  paths: readonly (string | null | undefined)[],
+  primaryPath: string,
+): boolean {
+  return paths.some((path) => modelPathsMatch(path || undefined, primaryPath));
+}
+
+/**
+ * Rewrites preset names so each list is unique and old generated titles are gone.
+ *
+ * @param models - Models from the current scan. Draft companions do not affect titles.
+ * @returns A promise that resolves once stored names have been repaired.
+ */
+async function repairPresetNames(models: import("../../shared/types").ModelEntry[]): Promise<void> {
+  const loadPresets = await getLoadPresets();
+  persistPresetRenames(
+    "load_presets",
+    loadPresets,
+    assignUniquePresetNames(
+      loadPresets.map((preset) => ({
+        id: preset.id,
+        name: preset.name,
+        createdAt: preset.createdAt,
+        isReadonly: preset.isReadonly,
+        modelPath: preset.modelPath,
+      })),
+      models,
+    ),
+  );
+
+  const inferencePresets = await getInferencePresets();
+  persistPresetRenames(
+    "inference_presets",
+    inferencePresets,
+    assignUniquePresetNames(
+      inferencePresets.map((preset) => ({
+        id: preset.id,
+        name: preset.name,
+        createdAt: preset.createdAt,
+        isReadonly: false,
+        modelPath: preset.sourceModelPath,
+      })),
+      models,
+    ),
+  );
+
+  const systemPresets = await getSystemPresets();
+  persistPresetRenames(
+    "system_presets",
+    systemPresets,
+    assignUniquePresetNames(
+      systemPresets.map((preset) => ({
+        id: preset.id,
+        name: preset.name,
+        createdAt: preset.createdAt,
+        modelPath: null,
+      })),
+      [],
+    ),
+  );
+}
+
+/**
+ * Ensures each discovered model has a load preset and an inference preset,
+ * and that every name in each preset list is unique.
+ *
+ * A folder with one GGUF keeps that folder title. Each extra quant in the
+ * same folder is named with its own file name, so both show up as different
+ * load choices. Hand-written names are kept. Old
+ * `Default (from GGUF) for ...` titles are rewritten. Only one preset in each
+ * list stays marked as the default.
  *
  * @param models - Models discovered during the current model scan.
- * @returns A promise that resolves once any missing default presets have been created.
+ * @returns A promise that resolves once missing presets exist and names are unique.
  */
 export async function ensureModelDefaultPresets(
   models: import("../../shared/types").ModelEntry[],
 ): Promise<void> {
+  await repairPresetNames(models);
+  await collapseDuplicateDefaults("load");
+  await collapseDuplicateDefaults("inference");
+
+  const catalog = models.filter((model) => !model.metadata?.isDraftModel);
   const loadPresets = await getLoadPresets();
   const infPresets = await getInferencePresets();
-
-  const existingLoadPaths = new Set(loadPresets.map((p) => p.modelPath));
-  const existingInfPaths = new Set(infPresets.map((p) => p.sourceModelPath));
-  let hasDefaultLoad = loadPresets.some((p) => p.isDefault);
-  let hasDefaultInf = infPresets.some((p) => p.isDefault);
+  let hasDefaultLoad = loadPresets.some((preset) => preset.isDefault);
+  let hasDefaultInf = infPresets.some((preset) => preset.isDefault);
 
   for (const m of models) {
-    if (!m.metadata) continue;
+    if (!m.metadata || m.metadata.isDraftModel) continue;
 
-    // Default Load Preset
-    if (!existingLoadPaths.has(m.primaryPath)) {
+    if (
+      !presetBoundToPath(
+        loadPresets.map((preset) => preset.modelPath),
+        m.primaryPath,
+      )
+    ) {
       const baseConfig = createDefaultLoadConfig(m.primaryPath);
       const newLoadPreset: LoadPreset = {
         id: Bun.randomUUIDv7(),
-        name: `Default (from GGUF) for ${m.modelName}`,
+        name: allocateUniqueName(
+          autoPresetName(m, catalog),
+          loadPresets.map((preset) => preset.name),
+        ),
         modelPath: m.primaryPath,
         isDefault: !hasDefaultLoad,
         isReadonly: false,
@@ -1057,12 +1298,16 @@ export async function ensureModelDefaultPresets(
         updatedAt: Date.now(),
       };
       await createLoadPreset(newLoadPreset);
-      existingLoadPaths.add(m.primaryPath);
+      loadPresets.push(newLoadPreset);
       if (newLoadPreset.isDefault) hasDefaultLoad = true;
     }
 
-    // Default Inference Preset
-    if (!existingInfPaths.has(m.primaryPath)) {
+    if (
+      !presetBoundToPath(
+        infPresets.map((preset) => preset.sourceModelPath),
+        m.primaryPath,
+      )
+    ) {
       const hasCoreSamplingParams =
         m.metadata.defaultTemperature !== undefined &&
         m.metadata.defaultTopK !== undefined &&
@@ -1070,7 +1315,10 @@ export async function ensureModelDefaultPresets(
 
       const newInfPreset: import("../../shared/types").InferencePreset = {
         id: Bun.randomUUIDv7(),
-        name: `Default (from GGUF) for ${m.modelName}`,
+        name: allocateUniqueName(
+          autoPresetName(m, catalog),
+          infPresets.map((preset) => preset.name),
+        ),
         sourceModelPath: m.primaryPath,
         isDefault: !hasDefaultInf,
         ...createDefaultInferenceSampling(),
@@ -1083,7 +1331,7 @@ export async function ensureModelDefaultPresets(
         updatedAt: Date.now(),
       };
       await createInferencePreset(newInfPreset);
-      existingInfPaths.add(m.primaryPath);
+      infPresets.push(newInfPreset);
       if (newInfPreset.isDefault) hasDefaultInf = true;
     }
   }

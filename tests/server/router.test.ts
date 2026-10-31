@@ -1001,28 +1001,51 @@ describe("router", () => {
     }
   });
 
-  it("POST /api/server/unload responds before teardown finishes", async () => {
+  it("POST /api/server/unload waits until the model process has stopped", async () => {
     const router = createRouter();
+    let releaseUnload: () => void = () => {};
+    const unloadGate = new Promise<void>((resolve) => {
+      releaseUnload = resolve;
+    });
     const unloadSpy = spyOn(llamaServerModule, "requestUnloadModel").mockImplementation(
-      () => new Promise<void>(() => {}),
+      () => unloadGate,
     );
 
     try {
-      const timeoutToken = Symbol("timeout");
-      const responseOrTimeout = await Promise.race([
-        router.fetch(
-          new Request("http://localhost/api/server/unload", { method: "POST" }),
-          noUpgradeServer,
-        ),
-        new Promise<symbol>((resolve) => setTimeout(() => resolve(timeoutToken), 100)),
+      const pending = router.fetch(
+        new Request("http://localhost/api/server/unload", { method: "POST" }),
+        noUpgradeServer,
+      );
+      const early = await Promise.race([
+        pending.then(() => "done" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 50)),
       ]);
-
-      expect(responseOrTimeout).not.toBe(timeoutToken);
-      expect(responseOrTimeout).toBeInstanceOf(Response);
-      const res = responseOrTimeout as Response;
-      expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ success: true });
+      expect(early).toBe("timeout");
       expect(unloadSpy).toHaveBeenCalledTimes(1);
+
+      releaseUnload();
+      const res = await pending;
+      expect(res).toBeInstanceOf(Response);
+      expect(res?.status).toBe(200);
+      expect(await res?.json()).toEqual({ success: true });
+    } finally {
+      unloadSpy.mockRestore();
+    }
+  });
+
+  it("POST /api/server/unload reports a failure when teardown throws", async () => {
+    const router = createRouter();
+    const unloadSpy = spyOn(llamaServerModule, "requestUnloadModel").mockImplementation(() =>
+      Promise.reject(new Error("taskkill failed")),
+    );
+
+    try {
+      const res = await router.fetch(
+        new Request("http://localhost/api/server/unload", { method: "POST" }),
+        noUpgradeServer,
+      );
+      expect(res?.status).toBe(500);
+      expect(await res?.json()).toEqual({ error: "taskkill failed" });
     } finally {
       unloadSpy.mockRestore();
     }

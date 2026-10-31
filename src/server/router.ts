@@ -15,13 +15,14 @@ import type {
 import { serveAttachmentFile } from "./attachmentServe";
 import { getHardwareInfo } from "./hardwareProbe";
 import { getServerStatus, loadModel, requestUnloadModel } from "./llamaServer";
-import { logDebug, logError, logInfo, logWarn } from "./logger";
+import { logAccess, logError, logInfo, logWarn } from "./logger";
 import { populateMetadata, scanModels } from "./modelScanner";
 import { isAllowedMutationOrigin, isAllowedWebSocketOrigin, isMutatingMethod } from "./origin";
 import { getAppDataDir } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
 import { getUserToolDirectories, listAvailableTools } from "./toolRegistry";
-import { addConnection, getConnectionCount, recordPong, removeConnection } from "./wsHub";
+import { dispatchClientFrame, handleClientSocketClosed } from "./wsControl";
+import { addConnection, recordPong, removeConnection } from "./wsHub";
 
 /**
  * Current hardware probe implementation used by backend routing.
@@ -382,7 +383,7 @@ export function createRouter() {
      */
     async fetch(req: Request, server: RouterServer): Promise<Response | undefined> {
       const url = new URL(req.url);
-      logDebug(`API Request: ${req.method} ${url.pathname}`);
+      logAccess(`API Request: ${req.method} ${url.pathname}`);
 
       if (url.pathname === "/ws") {
         if (!isAllowedWebSocketOrigin(req)) {
@@ -534,10 +535,14 @@ export function createRouter() {
       }
 
       if (req.method === "POST" && url.pathname === "/api/server/unload") {
-        void requestUnloadModel().catch((err: unknown) => {
-          logError("Background unload failed:", err);
-        });
-        return jsonResponse({ success: true });
+        try {
+          await requestUnloadModel();
+          return jsonResponse({ success: true });
+        } catch (err: unknown) {
+          logError("Unload failed:", err);
+          const message = err instanceof Error ? err.message : "Failed to unload model.";
+          return jsonResponse({ error: message }, 500);
+        }
       }
 
       if (req.method === "GET" && url.pathname === "/api/server/status") {
@@ -1177,25 +1182,8 @@ export function createRouter() {
        * @param message - Raw WebSocket message payload.
        * @returns No return value.
        */
-      message(_ws: ServerWebSocket<unknown>, message: string | Buffer) {
-        try {
-          const frame = JSON.parse(message.toString());
-          if (frame.type === "cancel" && frame.chatId) {
-            import("./streamProxy").then(({ abortGeneration }) => {
-              abortGeneration(frame.generationId ?? frame.chatId);
-            });
-          }
-          if (frame.type === "tool_approval" && frame.toolCallId) {
-            import("./tools").then(({ resolveToolApproval }) => {
-              resolveToolApproval(
-                frame.toolCallId,
-                frame.approved,
-                frame.editedArguments,
-                frame.chatId,
-              );
-            });
-          }
-        } catch (_e) {}
+      message(ws: ServerWebSocket<unknown>, message: string | Buffer) {
+        void dispatchClientFrame(ws, message);
       },
       /**
        * Registers a newly opened WebSocket connection.
@@ -1224,11 +1212,7 @@ export function createRouter() {
        */
       close(ws: ServerWebSocket<unknown>) {
         removeConnection(ws);
-        import("./tools").then(({ cancelPendingApprovals }) => {
-          if (getConnectionCount() === 0) {
-            cancelPendingApprovals(undefined, "disconnected");
-          }
-        });
+        void handleClientSocketClosed();
       },
     },
   };

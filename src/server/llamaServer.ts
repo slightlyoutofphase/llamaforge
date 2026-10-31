@@ -14,6 +14,7 @@ import { isGemma4Architecture } from "../shared/thinkingTags";
 import type { LlamaServerStatus, ModelLoadConfig, ThinkingTagConfig } from "../shared/types";
 import { parseGgufMetadata } from "./ggufReader";
 import { logDebug, logError, logInfo, logWarn, shouldEmitLog } from "./logger";
+import { attachChildProcessToParentLifetime } from "./windowsLifetime";
 import { getAppDataDir } from "./persistence/db";
 import { findFreePort } from "./utils/network";
 import { broadcastLoadProgress, broadcastLog, broadcastStatus } from "./wsHub";
@@ -222,6 +223,17 @@ function killSpawnedServerSync(): void {
   }
   killProcessTree(activeServerPid, true);
   activeServerPid = null;
+}
+
+/**
+ * Synchronously kills the tracked llama-server process tree.
+ *
+ * Console-close and `exit` hooks cannot wait on the async unload path.
+ *
+ * @returns No return value.
+ */
+export function killActiveModelProcessSync(): void {
+  killSpawnedServerSync();
 }
 
 let exitHooksInstalled = false;
@@ -621,6 +633,9 @@ export async function loadModel(
     });
     const targetProc = proc;
     activeServerPid = targetProc.pid ?? null;
+    if (activeServerPid !== null) {
+      attachChildProcessToParentLifetime(activeServerPid);
+    }
 
     activePort = port;
 
@@ -888,6 +903,12 @@ export function requestUnloadModel(): Promise<void> {
 
   unloadPromise = (async () => {
     logInfo("Unloading model...");
+    try {
+      const { abortAllGenerations } = await import("./streamProxy");
+      abortAllGenerations("unloaded");
+    } catch (err) {
+      logError("Failed to abort active generations before unload:", err);
+    }
     const { cancelPendingApprovals } = await import("./tools");
     cancelPendingApprovals(undefined, "unloaded");
     if (!proc) {

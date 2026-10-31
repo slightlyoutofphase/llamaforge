@@ -265,6 +265,7 @@ function parseMessageMetrics(metricsJson: string | null | undefined): MessageMet
         "error",
         "contextLengthReached",
         "tool_calls",
+        "cancelled",
       ]);
       const stopReason =
         typeof parsed.stopReason === "string" && stopReasons.has(parsed.stopReason)

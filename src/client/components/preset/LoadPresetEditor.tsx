@@ -24,6 +24,12 @@ import {
   IMAGE_MAX_TOKEN_OPTIONS,
   minUbatchForImageTokens,
 } from "../../../shared/imageTokens";
+import {
+  allocateUniqueName,
+  duplicatePresetName,
+  presetMenuLabels,
+} from "../../../shared/presetNames";
+import { copyLoadPresetSettings, presetAppliesToModel } from "../../../shared/presetScope";
 import { analyzeLoadPresetChatTemplate } from "../../../shared/templateCapabilities";
 import { detectThinkingConfig } from "../../../shared/thinkingTags";
 import type {
@@ -243,12 +249,22 @@ function Accordion({
 export function LoadPresetEditor() {
   const { setRightPanelView, activePresetId } = useUiStore();
   const models = useAppStore((s) => s.models);
+  const loadedModel = useAppStore((s) => s.loadedModel);
   const { data: presets } = useLoadPresets();
   const createMut = useCreateLoadPreset();
   const updateMut = useUpdateLoadPreset();
   const deleteMut = useDeleteLoadPreset();
 
   const activePreset = presets?.find((p) => p.id === activePresetId) || presets?.[0];
+  const listedPresets = (presets ?? []).filter((preset) => {
+    if (preset.id === activePreset?.id) return true;
+    if (!loadedModel?.primaryPath) return true;
+    return presetAppliesToModel(preset.modelPath, loadedModel.primaryPath);
+  });
+  const copySources = (presets ?? [])
+    .filter((preset) => preset.id !== activePreset?.id)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   const [localState, setLocalState] = useState<Partial<LoadPreset> | null>(null);
   const [showOptimization, setShowOptimization] = useState(false);
@@ -357,10 +373,29 @@ export function LoadPresetEditor() {
    */
   const handleSave = () => {
     if (!localState.id) return;
+    const name = allocateUniqueName(
+      localState.name ?? "",
+      (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
+    );
+    const next = { ...localState, name };
+    setLocalState(next);
     const preserveThinking = templateCapabilities?.hasPreserveThinking
-      ? (localState.preserveThinking ?? templateCapabilities.preserveThinkingDefault ?? false)
+      ? (next.preserveThinking ?? templateCapabilities.preserveThinkingDefault ?? false)
       : false;
-    updateMut.mutate({ id: localState.id, updates: { ...localState, preserveThinking } });
+    updateMut.mutate({ id: localState.id, updates: { ...next, preserveThinking } });
+  };
+
+  /**
+   * Copies another preset's load settings onto this one, keeping this preset's model paths.
+   *
+   * @param sourceId - Preset to copy settings from.
+   * @returns No return value.
+   */
+  const handleCopyFrom = (sourceId: string) => {
+    if (!localState?.id || !localState.config || localState.isReadonly) return;
+    const source = presets?.find((preset) => preset.id === sourceId);
+    if (!source) return;
+    setLocalState(copyLoadPresetSettings(localState as LoadPreset, source));
   };
 
   /**
@@ -373,7 +408,10 @@ export function LoadPresetEditor() {
     const newPreset: LoadPreset = {
       ...(localState as LoadPreset),
       id: crypto.randomUUID(),
-      name: `${localState.name} (Copy)`,
+      name: duplicatePresetName(
+        localState.name ?? "Preset",
+        (presets ?? []).map((preset) => preset.name),
+      ),
       isDefault: false,
       isReadonly: false,
       createdAt: Date.now(),
@@ -391,7 +429,10 @@ export function LoadPresetEditor() {
   const handleNew = () => {
     const newPreset: LoadPreset = {
       id: crypto.randomUUID(),
-      name: "New Load Preset",
+      name: allocateUniqueName(
+        "New Load Preset",
+        (presets ?? []).map((preset) => preset.name),
+      ),
       modelPath: "",
       isDefault: false,
       isReadonly: false,
@@ -416,53 +457,84 @@ export function LoadPresetEditor() {
 
   const config = localState.config;
   const isReadonly = localState.isReadonly;
+  const listedLabels = presetMenuLabels(listedPresets);
+  const copyLabels = presetMenuLabels(copySources);
 
   return (
     <div className="flex flex-col h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] w-[400px] shadow-xl overflow-hidden shrink-0">
-      <div className="flex items-center justify-between p-4 border-b border-[var(--color-border)] gap-2">
-        <div className="flex flex-col flex-1 min-w-0">
-          <h2 className="font-semibold text-lg flex items-center gap-2 truncate">Load Preset</h2>
+      <div className="border-b border-[var(--color-border)]">
+        <div className="flex items-center justify-between p-4 gap-2">
+          <div className="flex flex-col flex-1 min-w-0">
+            <h2 className="font-semibold text-lg flex items-center gap-2 truncate">Load Preset</h2>
+            <select
+              aria-label="Load preset"
+              value={activePreset?.id || ""}
+              onChange={(e) => setRightPanelView("loadPreset", e.target.value)}
+              className="text-xs bg-transparent border-none text-[var(--color-text-muted)] outline-none focus:text-[var(--color-text-primary)] w-full">
+              {listedPresets.map((p) => (
+                <option key={p.id} value={p.id} className="bg-[var(--color-surface)]">
+                  {listedLabels.get(p.id) ?? p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              onClick={handleNew}
+              className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors"
+              title="Create New">
+              <Plus size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={handleDuplicate}
+              className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors"
+              title="Duplicate">
+              <Copy size={16} />
+            </button>
+            {!isReadonly && (
+              <button
+                type="button"
+                onClick={handleDelete}
+                className="p-1 hover:bg-red-900/30 text-red-400 rounded-md transition-colors"
+                title="Delete">
+                <Trash2 size={16} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setRightPanelView("settings")}
+              className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+        <div className="px-4 pb-3">
+          <label
+            htmlFor="loadCopyFrom"
+            className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+            Copy from
+          </label>
           <select
-            value={activePreset?.id || ""}
-            onChange={(e) => setRightPanelView("loadPreset", e.target.value)}
-            className="text-xs bg-transparent border-none text-[var(--color-text-muted)] outline-none focus:text-[var(--color-text-primary)] w-full truncate">
-            {presets?.map((p) => (
-              <option key={p.id} value={p.id} className="bg-[var(--color-surface)]">
-                {p.name} {p.isDefault ? "(Default)" : ""}
+            id="loadCopyFrom"
+            value=""
+            disabled={isReadonly || copySources.length === 0}
+            title="Copies load settings onto this preset. Its name, primary GGUF, mmproj, and draft model path stay put. Save to keep the change."
+            onChange={(e) => {
+              const sourceId = e.target.value;
+              if (sourceId) handleCopyFrom(sourceId);
+            }}
+            className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-2 py-1.5 rounded-md text-xs outline-none focus:border-[var(--color-accent)] disabled:opacity-50">
+            <option value="">
+              {copySources.length === 0 ? "No other presets" : "Choose a preset…"}
+            </option>
+            {copySources.map((preset) => (
+              <option key={preset.id} value={preset.id} className="bg-[var(--color-surface)]">
+                {copyLabels.get(preset.id) ?? preset.name}
               </option>
             ))}
           </select>
-        </div>
-        <div className="flex gap-1">
-          <button
-            type="button"
-            onClick={handleNew}
-            className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors"
-            title="Create New">
-            <Plus size={16} />
-          </button>
-          <button
-            type="button"
-            onClick={handleDuplicate}
-            className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors"
-            title="Duplicate">
-            <Copy size={16} />
-          </button>
-          {!isReadonly && (
-            <button
-              type="button"
-              onClick={handleDelete}
-              className="p-1 hover:bg-red-900/30 text-red-400 rounded-md transition-colors"
-              title="Delete">
-              <Trash2 size={16} />
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setRightPanelView("settings")}
-            className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
-            <X size={18} />
-          </button>
         </div>
       </div>
 

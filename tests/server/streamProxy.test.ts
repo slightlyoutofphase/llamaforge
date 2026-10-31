@@ -2176,6 +2176,18 @@ describe("streamProxy", () => {
       const assistant = reloaded?.messages?.find((m) => m.id === msgId);
       expect(assistant).toBeDefined();
       expect(assistant?.thinkingContent).toContain("I am reasoning");
+      expect(
+        broadcastSpy.mock.calls.some((call) => {
+          const frame = call[0];
+          return frame.type === "stop" && frame.stopReason === "cancelled";
+        }),
+      ).toBe(true);
+      expect(
+        broadcastSpy.mock.calls.some((call) => {
+          const frame = call[0];
+          return frame.type === "error" && frame.generationId;
+        }),
+      ).toBe(false);
     } finally {
       broadcastSpy.mockRestore();
     }

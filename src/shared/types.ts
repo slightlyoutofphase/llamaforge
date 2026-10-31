@@ -294,7 +294,13 @@ export interface MessageMetrics {
   thinkingDurationMs?: number;
   /** Reason the generation stopped. */
   stopReason?:
-    "eos" | "max_tokens" | "stop_string" | "error" | "contextLengthReached" | "tool_calls";
+    | "eos"
+    | "max_tokens"
+    | "stop_string"
+    | "error"
+    | "contextLengthReached"
+    | "tool_calls"
+    | "cancelled";
   /**
    * How the thinking trace was extracted for this message.
    * `native` is llama-server `reasoning_content`; `tags` is in-stream delimiters.
@@ -350,7 +356,13 @@ export interface WsStopFrame {
   generationId?: string | undefined;
   /** Reason the generation stopped. */
   stopReason:
-    "eos" | "max_tokens" | "stop_string" | "error" | "contextLengthReached" | "tool_calls";
+    | "eos"
+    | "max_tokens"
+    | "stop_string"
+    | "error"
+    | "contextLengthReached"
+    | "tool_calls"
+    | "cancelled";
   /** Timing metrics for the completed generation. */
   timings: LlamaTimings;
   /** Optional total prompt tokens used. */
@@ -510,6 +522,20 @@ export interface WsPresetsUpdatedFrame {
   type: "presets_updated";
 }
 
+/**
+ * Lightweight keepalive frame exchanged by the browser and the Bun server.
+ *
+ * Protocol-level WebSocket pongs can sit behind a token flood, so both sides
+ * also speak this application frame. Receiving one means that side is still
+ * scheduled and the socket is still delivering data.
+ */
+export interface WsHeartbeatFrame {
+  /** Packet type identifier for a keepalive. */
+  type: "heartbeat";
+  /** Sender clock in milliseconds, when the sender included one. */
+  ts?: number;
+}
+
 export type WsFrame =
   | WsTokenFrame
   | WsStopFrame
@@ -521,7 +547,8 @@ export type WsFrame =
   | WsToolApprovalStateFrame
   | WsMessageFrame
   | WsLoadProgressFrame
-  | WsPresetsUpdatedFrame;
+  | WsPresetsUpdatedFrame
+  | WsHeartbeatFrame;
 
 /**
  * Upstream message representation where clients explicitly demand a stop to an actively executing generation session.
@@ -558,7 +585,25 @@ export interface WsToolApprovalFrame {
 /**
  * Unified type representing structural inputs parsed over websockets directly to backend servers.
  */
-export type WsClientFrame = WsCancelFrame | WsToolApprovalFrame;
+/**
+ * Client notice that this browser session is going away and in-flight
+ * generations should stop with it.
+ */
+export interface WsSessionCloseFrame {
+  /** Packet type identifier for an intentional client disconnect. */
+  type: "session_close";
+}
+
+/**
+ * Client keepalive. The server records it as proof the page is still reading.
+ */
+export interface WsClientHeartbeatFrame {
+  /** Packet type identifier for a client keepalive. */
+  type: "heartbeat";
+}
+
+export type WsClientFrame =
+  WsCancelFrame | WsToolApprovalFrame | WsSessionCloseFrame | WsClientHeartbeatFrame;
 
 /**
  * Configuration payload enabling explicitly formatted JSON definitions mapping functions for standard LLM tool calling contexts.
@@ -911,9 +956,10 @@ export interface AppSettings {
   autoloadLastModel: boolean;
   /**
    * When enabled, video attachments that contain an audio stream also send that
-   * soundtrack as a separate `input_audio` part. llama-server cannot consume
-   * muxed video+audio as a single file. No-ops unless the loaded model has an
-   * audio encoder.
+   * soundtrack as a separate `input_audio` part, placed before any image or
+   * video in the turn. Gemma 4 ignores audio that follows an image or video.
+   * llama-server cannot consume muxed video+audio as a single file. No-ops
+   * unless the loaded model has an audio encoder.
    */
   includeVideoAudio: boolean;
   /** Minimum allowed port for llama-server. */

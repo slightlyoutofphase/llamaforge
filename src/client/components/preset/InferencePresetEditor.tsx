@@ -8,6 +8,12 @@ import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { createDefaultInferenceSampling } from "../../../shared/defaults";
+import {
+  allocateUniqueName,
+  duplicatePresetName,
+  presetMenuLabels,
+} from "../../../shared/presetNames";
+import { copyInferencePresetSettings, presetAppliesToModel } from "../../../shared/presetScope";
 import { chatTemplateSupportsToolCalling } from "../../../shared/templateCapabilities";
 import { toStoredToolDefinition } from "../../../shared/toolModule";
 import type { AvailableTool, InferencePreset, ToolDefinition } from "../../../shared/types";
@@ -51,7 +57,7 @@ function catalogTools(
 
 /**
  * Component for managing and editing inference presets.
- * Includes sliders for sampling params, a JSON editor for structured output, tool toggles, and lifecycle actions (new, duplicate, delete).
+ * Includes sliders for sampling params, a JSON editor for structured output, tool toggles, and lifecycle actions (new, duplicate, copy from, delete).
  *
  * @returns React functional component.
  */
@@ -68,6 +74,15 @@ export function InferencePresetEditor() {
   const deleteMut = useDeleteInferencePreset();
 
   const activePreset = presets?.find((p) => p.id === activePresetId) || presets?.[0];
+  const listedPresets = (presets ?? []).filter((preset) => {
+    if (preset.id === activePreset?.id) return true;
+    if (!loadedModel?.primaryPath) return true;
+    return presetAppliesToModel(preset.sourceModelPath, loadedModel.primaryPath);
+  });
+  const copySources = (presets ?? [])
+    .filter((preset) => preset.id !== activePreset?.id)
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   const [localState, setLocalState] = useState<Partial<InferencePreset> | null>(null);
 
@@ -86,6 +101,9 @@ export function InferencePresetEditor() {
   }, [localState?.id, localState?.structuredOutput?.schema]);
 
   if (!localState) return <div className="w-80 shrink-0 bg-[var(--color-surface)] border-l" />;
+
+  const listedLabels = presetMenuLabels(listedPresets);
+  const copyLabels = presetMenuLabels(copySources);
 
   const toolsSupported =
     serverStatus !== "running" ||
@@ -135,7 +153,26 @@ export function InferencePresetEditor() {
    */
   const handleSave = () => {
     if (!localState.id) return;
-    updateMut.mutate({ id: localState.id, updates: localState });
+    const name = allocateUniqueName(
+      localState.name ?? "",
+      (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
+    );
+    const next = { ...localState, name };
+    setLocalState(next);
+    updateMut.mutate({ id: localState.id, updates: next });
+  };
+
+  /**
+   * Copies another preset's sampling onto this one, keeping this preset's model binding.
+   *
+   * @param sourceId - Preset to copy settings from.
+   * @returns No return value.
+   */
+  const handleCopyFrom = (sourceId: string) => {
+    if (!localState?.id) return;
+    const source = presets?.find((preset) => preset.id === sourceId);
+    if (!source) return;
+    setLocalState(copyInferencePresetSettings(localState as InferencePreset, source));
   };
 
   /**
@@ -148,7 +185,10 @@ export function InferencePresetEditor() {
     const newPreset: InferencePreset = {
       ...(localState as InferencePreset),
       id: crypto.randomUUID(),
-      name: `${localState.name} (Copy)`,
+      name: duplicatePresetName(
+        localState.name ?? "Preset",
+        (presets ?? []).map((preset) => preset.name),
+      ),
       isDefault: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -165,7 +205,10 @@ export function InferencePresetEditor() {
   const handleNew = () => {
     const newPreset: InferencePreset = {
       id: crypto.randomUUID(),
-      name: "New Inference Preset",
+      name: allocateUniqueName(
+        "New Inference Preset",
+        (presets ?? []).map((preset) => preset.name),
+      ),
       isDefault: false,
       ...createDefaultInferenceSampling(),
       createdAt: Date.now(),
@@ -188,52 +231,81 @@ export function InferencePresetEditor() {
 
   return (
     <div className="flex flex-col h-full bg-[var(--color-surface)] border-l border-[var(--color-border)] w-96 shadow-xl overflow-hidden shrink-0">
-      <div className="flex items-center justify-between p-4 border-b border-[var(--color-border)] gap-2">
-        <div className="flex flex-col flex-1 min-w-0">
-          <h2 className="font-semibold text-lg flex items-center gap-2 truncate">
-            Inference Preset
-          </h2>
+      <div className="border-b border-[var(--color-border)]">
+        <div className="flex items-center justify-between p-4 gap-2">
+          <div className="flex flex-col flex-1 min-w-0">
+            <h2 className="font-semibold text-lg flex items-center gap-2 truncate">
+              Inference Preset
+            </h2>
+            <select
+              aria-label="Inference preset"
+              value={activePreset?.id || ""}
+              onChange={(e) => setRightPanelView("inferencePreset", e.target.value)}
+              className="text-xs bg-transparent border-none text-[var(--color-text-muted)] outline-none focus:text-[var(--color-text-primary)] w-full">
+              {listedPresets.map((p) => (
+                <option key={p.id} value={p.id} className="bg-[var(--color-surface)]">
+                  {listedLabels.get(p.id) ?? p.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              onClick={handleNew}
+              className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors"
+              title="Create New">
+              <Plus size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={handleDuplicate}
+              className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors"
+              title="Duplicate">
+              <Copy size={16} />
+            </button>
+            {!localState.isDefault && (
+              <button
+                type="button"
+                onClick={handleDelete}
+                className="p-1 hover:bg-red-900/30 text-red-400 rounded-md transition-colors"
+                title="Delete">
+                <Trash2 size={16} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setRightPanelView("settings")}
+              className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
+              <X size={18} />
+            </button>
+          </div>
+        </div>
+        <div className="px-4 pb-3">
+          <label
+            htmlFor="inferenceCopyFrom"
+            className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+            Copy from
+          </label>
           <select
-            value={activePreset?.id || ""}
-            onChange={(e) => setRightPanelView("inferencePreset", e.target.value)}
-            className="text-xs bg-transparent border-none text-[var(--color-text-muted)] outline-none focus:text-[var(--color-text-primary)] w-full truncate">
-            {presets?.map((p) => (
-              <option key={p.id} value={p.id} className="bg-[var(--color-surface)]">
-                {p.name} {p.isDefault ? "(Default)" : ""}
+            id="inferenceCopyFrom"
+            value=""
+            disabled={copySources.length === 0}
+            title="Copies sampling, tools, and the other settings onto this preset. Its name and model stay put. Save to keep the change."
+            onChange={(e) => {
+              const sourceId = e.target.value;
+              if (sourceId) handleCopyFrom(sourceId);
+            }}
+            className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-2 py-1.5 rounded-md text-xs outline-none focus:border-[var(--color-accent)] disabled:opacity-50">
+            <option value="">
+              {copySources.length === 0 ? "No other presets" : "Choose a preset…"}
+            </option>
+            {copySources.map((preset) => (
+              <option key={preset.id} value={preset.id} className="bg-[var(--color-surface)]">
+                {copyLabels.get(preset.id) ?? preset.name}
               </option>
             ))}
           </select>
-        </div>
-        <div className="flex gap-1">
-          <button
-            type="button"
-            onClick={handleNew}
-            className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors"
-            title="Create New">
-            <Plus size={16} />
-          </button>
-          <button
-            type="button"
-            onClick={handleDuplicate}
-            className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors"
-            title="Duplicate">
-            <Copy size={16} />
-          </button>
-          {!localState.isDefault && (
-            <button
-              type="button"
-              onClick={handleDelete}
-              className="p-1 hover:bg-red-900/30 text-red-400 rounded-md transition-colors"
-              title="Delete">
-              <Trash2 size={16} />
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setRightPanelView("settings")}
-            className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
-            <X size={18} />
-          </button>
         </div>
       </div>
 

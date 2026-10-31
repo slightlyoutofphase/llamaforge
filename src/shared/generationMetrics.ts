@@ -54,6 +54,8 @@ export function formatStopReasonLabel(
       return "Tool Calls";
     case "error":
       return "Error";
+    case "cancelled":
+      return "Cancelled";
     default:
       return undefined;
   }

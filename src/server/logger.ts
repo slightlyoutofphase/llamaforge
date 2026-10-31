@@ -4,6 +4,7 @@
  */
 
 import type { AppSettings } from "../shared/types";
+import { getActiveGenerationChatIds } from "./generationRegistry";
 import { broadcastLog } from "./wsHub";
 
 type LogLevel = AppSettings["logLevel"];
@@ -77,6 +78,32 @@ function formatArgs(args: unknown[]): string {
 }
 
 /**
+ * Prints an operational status line to the terminal even when the configured log level
+ * would hide informational logs.
+ *
+ * Startup details such as the listen address stay visible when logging is `off`, `error`,
+ * or `warn`. Test runs stay quiet through the same silent mode as the rest of the logger.
+ * When informational logs are enabled, the line is emitted through {@link logInfo} so it is
+ * printed once and still broadcast to the in-app console.
+ *
+ * @param message - Status text to show in the terminal.
+ * @param args - Additional values appended to the status line.
+ * @returns Nothing.
+ */
+export function logStatus(message: string, ...args: unknown[]): void {
+  if (isSilent) {
+    return;
+  }
+
+  if (shouldEmitLog("info")) {
+    logInfo(message, ...args);
+    return;
+  }
+
+  console.log(message, ...args);
+}
+
+/**
  * Emits an informational log message when the current settings allow it.
  *
  * @param message - The primary log message.
@@ -138,6 +165,29 @@ export function logDebug(message: string, ...args: unknown[]): void {
 
   console.debug(message, ...args);
   broadcastLog("debug", message + formatArgs(args));
+}
+
+/**
+ * Logs an HTTP access line without competing with an active token stream.
+ *
+ * The terminal still receives the line at debug level. While a generation is
+ * in flight the line is not copied onto the WebSocket: opening a menu issues
+ * several of these at once, and broadcasting them beside token frames was
+ * enough to stall pings and make the hub declare the browser dead.
+ *
+ * @param message - Access line, typically `API Request: METHOD /path`.
+ * @returns Nothing.
+ */
+export function logAccess(message: string): void {
+  if (!shouldEmitLog("debug")) {
+    return;
+  }
+
+  console.debug(message);
+  if (getActiveGenerationChatIds().size > 0) {
+    return;
+  }
+  broadcastLog("debug", message);
 }
 
 /**

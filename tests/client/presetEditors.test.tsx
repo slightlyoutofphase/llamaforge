@@ -588,4 +588,102 @@ describe("Preset Editors Integration", () => {
       ).disabled,
     ).toBe(true);
   });
+
+  it("InferencePresetEditor: copies settings from another model and keeps this preset's name", async () => {
+    queryClient.setQueryData(queryKeys.presetsInference(), [
+      { ...mockInferencePreset, sourceModelPath: "/models/finetune-b.gguf" },
+      {
+        ...mockInferencePreset,
+        id: "other-inf",
+        name: "FineTune A",
+        sourceModelPath: "/models/finetune-a.gguf",
+        isDefault: false,
+        temperature: 0.15,
+        topK: 12,
+      },
+    ]);
+    useAppStore.setState({
+      loadedModel: {
+        publisher: "test",
+        modelName: "FineTune B",
+        primaryPath: "/models/finetune-b.gguf",
+      },
+      serverStatus: "idle",
+    });
+    useUiStore.setState({ activePresetId: "test-inf-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <InferencePresetEditor />
+      </QueryClientProvider>,
+    );
+
+    const switcher = (await screen.findByRole("combobox", {
+      name: "Inference preset",
+    })) as HTMLSelectElement;
+    const switcherNames = [...switcher.options].map((option) => option.textContent ?? "");
+    expect(switcherNames.some((name) => name.includes("Test Inference"))).toBe(true);
+    expect(switcherNames.some((name) => name.includes("FineTune A"))).toBe(false);
+
+    const copyFrom = screen.getByLabelText("Copy from") as HTMLSelectElement;
+    expect([...copyFrom.options].some((option) => option.textContent?.includes("FineTune A"))).toBe(
+      true,
+    );
+
+    fireEvent.change(copyFrom, { target: { value: "other-inf" } });
+    expect((screen.getByLabelText(/Temperature/i) as HTMLInputElement).value).toBe("0.15");
+    expect((screen.getByLabelText("Preset Name") as HTMLInputElement).value).toBe("Test Inference");
+  });
+
+  it("LoadPresetEditor: copies settings from another model and keeps this preset's paths", async () => {
+    queryClient.setQueryData(queryKeys.presetsLoad(), [
+      mockLoadPreset,
+      {
+        ...mockLoadPreset,
+        id: "other-load",
+        name: "FineTune A Load",
+        modelPath: "/models/finetune-a.gguf",
+        isDefault: false,
+        config: {
+          ...mockLoadPreset.config,
+          modelPath: "/models/finetune-a.gguf",
+          mmProjPath: "/models/finetune-a.mmproj",
+          specDraftModelPath: "/models/finetune-a-draft.gguf",
+          gpuLayers: 40,
+        },
+      },
+    ]);
+    useAppStore.setState({
+      loadedModel: {
+        publisher: "test",
+        modelName: "test-model",
+        primaryPath: "/models/test.gguf",
+      },
+      serverStatus: "idle",
+    });
+    useUiStore.setState({ activePresetId: "test-load-id" });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <LoadPresetEditor />
+      </QueryClientProvider>,
+    );
+
+    const switcher = (await screen.findByRole("combobox", {
+      name: "Load preset",
+    })) as HTMLSelectElement;
+    const switcherNames = [...switcher.options].map((option) => option.textContent ?? "");
+    expect(switcherNames.some((name) => name.includes("Test Load"))).toBe(true);
+    expect(switcherNames.some((name) => name.includes("FineTune A Load"))).toBe(false);
+
+    const copyFrom = screen.getByLabelText("Copy from") as HTMLSelectElement;
+    fireEvent.change(copyFrom, { target: { value: "other-load" } });
+
+    expect((screen.getByLabelText(/GPU Layers/i) as HTMLInputElement).value).toBe("40");
+    expect((screen.getByLabelText(/Primary Model Path/i) as HTMLInputElement).value).toBe(
+      "/models/test.gguf",
+    );
+    expect((screen.getByLabelText(/MMProj Path/i) as HTMLInputElement).value).toBe("");
+    expect((screen.getByLabelText("Preset Name") as HTMLInputElement).value).toBe("Test Load");
+  });
 });

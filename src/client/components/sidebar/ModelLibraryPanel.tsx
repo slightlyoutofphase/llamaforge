@@ -4,6 +4,8 @@
  */
 
 import { resolveSpecDraftModelPath } from "../../../shared/defaults";
+import { modelOptionLabel, presetMenuLabels } from "../../../shared/presetNames";
+import { loadPresetsForModel, pickLoadPresetForModel } from "../../../shared/presetScope";
 import { metadataHasToolCalling } from "../../../shared/templateCapabilities";
 import type { ChatMessage, LoadModelRequest, LoadPreset } from "../../../shared/types";
 import { useNavigate } from "@tanstack/react-router";
@@ -56,15 +58,13 @@ export function ModelLibraryPanel() {
   const [isCreatingChat, setIsCreatingChat] = useState(false);
   const createChatLockRef = useRef(false);
 
-  const filteredModels = models.filter(
-    (m) =>
-      !m.metadata?.isDraftModel &&
-      (m.modelName.toLowerCase().includes(search.toLowerCase()) ||
-        m.primaryPath.toLowerCase().includes(search.toLowerCase())),
-  );
+  const catalog = models.filter((model) => !model.metadata?.isDraftModel);
+  const filteredModels = catalog.filter((model) => {
+    const haystack = `${modelOptionLabel(model, catalog)} ${model.modelName} ${model.primaryPath}`;
+    return haystack.toLowerCase().includes(search.toLowerCase());
+  });
 
   const selectedModel = models.find((m) => m.primaryPath === selectedPath);
-  const defaultLoadPreset = loadPresets?.find((p) => p.isDefault) || loadPresets?.[0];
   const requestInFlight = isGenerating || isWaitingForToolApproval || serverStatus === "loading";
 
   /**
@@ -211,6 +211,9 @@ export function ModelLibraryPanel() {
           filteredModels.map((model) => {
             const isLoaded = loadedModel?.primaryPath === model.primaryPath;
             const isSelected = selectedPath === model.primaryPath;
+            const label = modelOptionLabel(model, catalog);
+            const modelPresets = loadPresetsForModel(loadPresets ?? [], model.primaryPath);
+            const presetLabels = presetMenuLabels(modelPresets);
 
             return (
               <div key={model.primaryPath} className="space-y-2">
@@ -237,7 +240,7 @@ export function ModelLibraryPanel() {
                       </div>
                       <div>
                         <h3 className="font-semibold text-[var(--color-text-primary)] leading-tight break-words max-w-full">
-                          {model.modelName}
+                          {label}
                         </h3>
                         <div className="flex items-center gap-2 mt-1 flex-wrap min-w-0">
                           <div className="flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)] font-mono min-w-0 truncate">
@@ -265,7 +268,7 @@ export function ModelLibraryPanel() {
                               Tools
                             </span>
                           )}
-                          {model.modelName.toLowerCase().includes("mtp") && (
+                          {`${label} ${model.modelName}`.toLowerCase().includes("mtp") && (
                             <span className="bg-green-500/10 text-green-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-green-500/20 uppercase tracking-wider max-w-full break-words">
                               MTP
                             </span>
@@ -312,25 +315,28 @@ export function ModelLibraryPanel() {
                         </div>
                         <button
                           type="button"
-                          onClick={() => setRightPanelView("loadPreset", defaultLoadPreset?.id)}
+                          onClick={() =>
+                            setRightPanelView(
+                              "loadPreset",
+                              pickLoadPresetForModel(loadPresets ?? [], model.primaryPath)?.id,
+                            )
+                          }
                           className="text-[10px] text-[var(--color-accent)] hover:underline font-bold">
                           MANAGE PRESETS
                         </button>
                       </div>
                       <div className="flex flex-wrap gap-2">
-                        {loadPresets
-                          ?.filter((p) => !p.modelPath || p.modelPath === model.primaryPath)
-                          .map((p) => (
-                            <button
-                              key={p.id}
-                              type="button"
-                              disabled={requestInFlight || serverStatus !== "idle" || isLoaded}
-                              onClick={() => handleLoad(p)}
-                              className="bg-[var(--color-bg)] border border-[var(--color-border)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] text-xs px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50">
-                              <Settings size={12} />
-                              {p.name}
-                            </button>
-                          ))}
+                        {modelPresets.map((p) => (
+                          <button
+                            key={p.id}
+                            type="button"
+                            disabled={requestInFlight || serverStatus !== "idle" || isLoaded}
+                            onClick={() => handleLoad(p)}
+                            className="bg-[var(--color-bg)] border border-[var(--color-border)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] text-xs px-3 py-1.5 rounded-lg transition-all flex items-center gap-1.5 disabled:opacity-50">
+                            <Settings size={12} />
+                            {presetLabels.get(p.id) ?? p.name}
+                          </button>
+                        ))}
                       </div>
                     </div>
                   </div>

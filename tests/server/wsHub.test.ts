@@ -18,6 +18,7 @@ import {
   logDebug,
   logError,
   logInfo,
+  logStatus,
   logVerbose,
   setConfiguredLogLevel,
   setSilent,
@@ -136,6 +137,72 @@ describe("wsHub", () => {
     removeConnection(ws);
   });
 
+  it("prints status lines when informational logs are disabled", () => {
+    const send = mock((data: string) => {
+      void data;
+    });
+    const ws = { send } as unknown as ServerWebSocket<unknown>;
+    const infoSpy = spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      addConnection(ws);
+      setSilent(false);
+      setConfiguredLogLevel("off");
+
+      logStatus("Starting LlamaForge Server on http://127.0.0.1:11435");
+
+      expect(infoSpy).toHaveBeenCalledTimes(1);
+      expect(String(infoSpy.mock.calls[0]?.[0])).toContain("http://127.0.0.1:11435");
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      infoSpy.mockRestore();
+      removeConnection(ws);
+    }
+  });
+
+  it("emits status lines once when informational logs are enabled", () => {
+    const send = mock((data: string) => {
+      void data;
+    });
+    const ws = { send } as unknown as ServerWebSocket<unknown>;
+    const infoSpy = spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      addConnection(ws);
+      setSilent(false);
+      setConfiguredLogLevel("info");
+
+      logStatus("Starting LlamaForge Server on http://127.0.0.1:11435");
+
+      expect(infoSpy).toHaveBeenCalledTimes(1);
+      expect(send).toHaveBeenCalledTimes(1);
+      const payload = send.mock.calls[0]?.[0];
+      expect(typeof payload).toBe("string");
+      if (typeof payload !== "string") {
+        throw new Error("expected a status log payload");
+      }
+      const sent = JSON.parse(payload) as { level: string; body: string };
+      expect(sent.level).toBe("info");
+      expect(sent.body).toContain("http://127.0.0.1:11435");
+    } finally {
+      infoSpy.mockRestore();
+      removeConnection(ws);
+    }
+  });
+
+  it("keeps status lines quiet while the logger is silent", () => {
+    const infoSpy = spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      setSilent(true);
+      setConfiguredLogLevel("off");
+      logStatus("Starting LlamaForge Server on http://127.0.0.1:11435");
+      expect(infoSpy).not.toHaveBeenCalled();
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
   it("filters emitted logs according to the configured backend log level", () => {
     const send = mock((data: string) => {
       void data;
@@ -235,10 +302,34 @@ describe("wsHub", () => {
     }
   });
 
-  it("closes stale sockets and stops the heartbeat when the last connection disappears", () => {
-    const originalClearInterval = globalThis.clearInterval.bind(globalThis);
+  it("does not treat one delayed heartbeat tick as a dead browser", () => {
     const nowSpy = spyOn(Date, "now");
     let now = 5_000;
+    nowSpy.mockImplementation(() => now);
+    const heartbeat = captureHeartbeatInterval();
+
+    try {
+      const ping = mock(() => {});
+      const close = mock(() => {});
+      const ws = { send: mock(() => {}), ping, close } as unknown as ServerWebSocket<unknown>;
+
+      addConnection(ws);
+      now += 70_000;
+      heartbeat.getTick()?.();
+
+      expect(close).not.toHaveBeenCalled();
+      expect(ping).toHaveBeenCalledTimes(1);
+      removeConnection(ws);
+    } finally {
+      nowSpy.mockRestore();
+      heartbeat.restore();
+    }
+  });
+
+  it("closes a socket only after repeated silent checks, and keeps it when the client answers", () => {
+    const originalClearInterval = globalThis.clearInterval.bind(globalThis);
+    const nowSpy = spyOn(Date, "now");
+    let now = 0;
     nowSpy.mockImplementation(() => now);
     const heartbeat = captureHeartbeatInterval();
     const clearIntervalSpy = spyOn(globalThis, "clearInterval").mockImplementation((id) => {
@@ -251,16 +342,53 @@ describe("wsHub", () => {
       const ws = { send: mock(() => {}), ping, close } as unknown as ServerWebSocket<unknown>;
 
       addConnection(ws);
-      now += 70_000;
+      for (const at of [15_000, 30_000, 45_000, 60_000]) {
+        now = at;
+        heartbeat.getTick()?.();
+        expect(close).not.toHaveBeenCalled();
+      }
+      now = 75_000;
       heartbeat.getTick()?.();
-
       expect(close).toHaveBeenCalledWith(1001, "Heartbeat timeout");
-      expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
-      expect(ping).not.toHaveBeenCalled();
+      expect(clearIntervalSpy).toHaveBeenCalled();
+
+      close.mockClear();
+      clearIntervalSpy.mockClear();
+      const active = {
+        send: mock(() => {}),
+        ping: mock(() => {}),
+        close,
+      } as unknown as ServerWebSocket<unknown>;
+      now = 80_000;
+      addConnection(active);
+      for (const at of [95_000, 110_000, 125_000, 140_000]) {
+        now = at;
+        heartbeat.getTick()?.();
+      }
+      expect(close).not.toHaveBeenCalled();
+      recordPong(active);
+      now = 155_000;
+      heartbeat.getTick()?.();
+      expect(close).not.toHaveBeenCalled();
+      removeConnection(active);
     } finally {
       nowSpy.mockRestore();
       clearIntervalSpy.mockRestore();
       heartbeat.restore();
     }
+  });
+
+  it("keeps the socket open when a frame hits send backpressure", () => {
+    const close = mock(() => {});
+    const ws = {
+      send: mock(() => -1),
+      close,
+      ping: mock(() => {}),
+    } as unknown as ServerWebSocket<unknown>;
+
+    addConnection(ws);
+    broadcast({ type: "token", delta: "x" } as never);
+    expect(close).not.toHaveBeenCalled();
+    removeConnection(ws);
   });
 });

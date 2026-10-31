@@ -367,4 +367,182 @@ describe("ModelSelector Component", () => {
     expect(await screen.findByText("Primary Chat Model")).toBeTruthy();
     expect(screen.queryByText("Draft Speculator")).toBeNull();
   });
+
+  it("lists only load presets for that model, matching paths with different slashes", async () => {
+    useAppStore.setState({
+      models: [
+        {
+          publisher: "unsloth",
+          modelName: "embe...",
+          primaryPath: "D:/Programs/test/embe.gguf",
+          metadata: ggufDisplayMetadata({ name: "embe..." }),
+        },
+      ],
+      loadModel: async () => true,
+      unloadModel: async () => {},
+      serverStatus: "idle" as const,
+      loadedModel: null,
+      messages: [],
+      isGenerating: false,
+    });
+    global.fetch = asFetch(
+      mock((input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/presets/load")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify([
+                {
+                  id: "slash",
+                  name: "Slash Variant",
+                  modelPath: "D:\\Programs\\test\\embe.gguf",
+                  isDefault: false,
+                  isReadonly: false,
+                  config: { modelPath: "D:\\Programs\\test\\embe.gguf" },
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+                {
+                  id: "foreign",
+                  name: "Foreign Load Preset",
+                  modelPath: "D:/Programs/test/other.gguf",
+                  isDefault: false,
+                  isReadonly: false,
+                  config: { modelPath: "D:/Programs/test/other.gguf" },
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+                {
+                  id: "global",
+                  name: "Global Load",
+                  modelPath: "",
+                  isDefault: true,
+                  isReadonly: true,
+                  config: { modelPath: "" },
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+              ]),
+              { headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify([])));
+      }),
+    );
+
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelSelector />
+        </QueryClientProvider>,
+      );
+    });
+
+    const select = (await screen.findByRole("combobox", {
+      name: "Load preset for embe...",
+    })) as HTMLSelectElement;
+    const names = [...select.options].map((option) => option.textContent ?? "");
+    expect(names.some((name) => name.includes("Slash Variant"))).toBe(true);
+    expect(names.some((name) => name.includes("Global Load"))).toBe(true);
+    expect(names.some((name) => name.includes("Foreign Load Preset"))).toBe(false);
+    expect(select.value).toBe("slash");
+  });
+
+  it("shows each quant as its own model and only that quant's preset", async () => {
+    const q4 = "D:/Models/Aura/Aura-Q4_K_S.gguf";
+    const q8 = "D:/Models/Aura/Aura-Q8_0.gguf";
+    useAppStore.setState({
+      models: [
+        {
+          publisher: "publisher",
+          modelName: "Aura",
+          primaryPath: q4,
+          metadata: ggufDisplayMetadata({ name: "Aura" }),
+        },
+        {
+          publisher: "publisher",
+          modelName: "Aura",
+          primaryPath: q8,
+          metadata: ggufDisplayMetadata({ name: "Aura" }),
+        },
+      ],
+      loadModel: async () => true,
+      unloadModel: async () => {},
+      serverStatus: "idle" as const,
+      loadedModel: null,
+      messages: [],
+      isGenerating: false,
+    });
+    global.fetch = asFetch(
+      mock((input) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/api/presets/load")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify([
+                {
+                  id: "balanced",
+                  name: "Balanced Default",
+                  modelPath: "",
+                  isDefault: true,
+                  isReadonly: true,
+                  config: { modelPath: "" },
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+                {
+                  id: "q4",
+                  name: "Aura-Q4_K_S",
+                  modelPath: q4,
+                  isDefault: false,
+                  isReadonly: false,
+                  config: { modelPath: q4 },
+                  createdAt: 2,
+                  updatedAt: 2,
+                },
+                {
+                  id: "q8",
+                  name: "Aura-Q8_0",
+                  modelPath: q8,
+                  isDefault: false,
+                  isReadonly: false,
+                  config: { modelPath: q8 },
+                  createdAt: 3,
+                  updatedAt: 3,
+                },
+              ]),
+              { headers: { "Content-Type": "application/json" } },
+            ),
+          );
+        }
+        return Promise.resolve(new Response(JSON.stringify([])));
+      }),
+    );
+
+    await act(async () => {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <ModelSelector />
+        </QueryClientProvider>,
+      );
+    });
+
+    const headings = (await screen.findAllByRole("heading", { level: 3 })).map(
+      (heading) => heading.textContent,
+    );
+    expect(headings).toEqual(["Aura-Q4_K_S", "Aura-Q8_0"]);
+
+    const q4Select = screen.getByRole("combobox", {
+      name: "Load preset for Aura-Q4_K_S",
+    }) as HTMLSelectElement;
+    const q8Select = screen.getByRole("combobox", {
+      name: "Load preset for Aura-Q8_0",
+    }) as HTMLSelectElement;
+    const q4Names = [...q4Select.options].map((option) => option.textContent);
+    const q8Names = [...q8Select.options].map((option) => option.textContent);
+    expect(q4Names).toEqual(["Balanced Default", "Aura-Q4_K_S"]);
+    expect(q8Names).toEqual(["Balanced Default", "Aura-Q8_0"]);
+    expect(q4Names.join(" ").match(/\bdefault\b/gi)).toEqual(["Default"]);
+  });
 });

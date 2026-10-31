@@ -21,7 +21,10 @@ import {
   updateSystemPreset,
   assertWritableLoadPresetConfig,
 } from "../../src/server/persistence/presetRepo";
-import { testInferencePreset, testLoadConfig } from "../fixtures";
+import { loadPresetsForModel } from "../../src/shared/presetScope";
+import { modelPathsMatch } from "../../src/shared/templateCapabilities";
+import type { LoadPreset, ModelEntry } from "../../src/shared/types";
+import { ggufDisplayMetadata, testInferencePreset, testLoadConfig } from "../fixtures";
 
 describe("presetRepo", () => {
   beforeEach(async () => {
@@ -310,7 +313,7 @@ describe("presetRepo", () => {
     );
 
     expect(loadPreset).toBeDefined();
-    expect(loadPreset?.name).toBe("Default (from GGUF) for Gemma");
+    expect(loadPreset?.name).toBe("Gemma");
     expect(loadPresets.filter((preset) => preset.isDefault).length).toBeLessThanOrEqual(1);
     expect(loadPreset?.isReadonly).toBe(false);
     expect(loadPreset?.chatTemplateOverride).toBe("gguf-template");
@@ -324,7 +327,7 @@ describe("presetRepo", () => {
     );
 
     expect(inferencePreset).toBeDefined();
-    expect(inferencePreset?.name).toBe("Default (from GGUF) for Gemma");
+    expect(inferencePreset?.name).toBe("Gemma");
     expect(inferencePresets.filter((preset) => preset.isDefault).length).toBeLessThanOrEqual(1);
   });
 
@@ -449,5 +452,194 @@ describe("presetRepo", () => {
     expect(preset?.topK).toBe(40);
     expect(preset?.minP).toBe(0.05);
     expect(preset?.repeatPenalty).toBe(1.1);
+  });
+
+  /**
+   * Minimal scanned model with metadata so preset creation runs.
+   *
+   * @param modelName - Folder title shared by quant files of one model.
+   * @param primaryPath - Absolute GGUF path.
+   * @returns A model entry.
+   */
+  function scannedModel(modelName: string, primaryPath: string): ModelEntry {
+    return {
+      publisher: "Publisher",
+      modelName,
+      primaryPath,
+      metadata: ggufDisplayMetadata({ name: modelName }),
+    };
+  }
+
+  /**
+   * Inserts a load preset directly, including duplicate names the write path would refuse.
+   *
+   * @param id - Row id.
+   * @param name - Stored name, which may collide.
+   * @param modelPath - Bound GGUF.
+   * @param isDefault - `1` when the row is marked default.
+   * @param createdAt - Creation time used to decide which duplicate keeps its name.
+   * @returns No return value.
+   */
+  function insertLoadRow(
+    id: string,
+    name: string,
+    modelPath: string,
+    isDefault: number,
+    createdAt: number,
+  ): void {
+    getDb()
+      .prepare(
+        "INSERT INTO load_presets (id, name, model_path, is_default, is_readonly, config_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run(
+        id,
+        name,
+        modelPath,
+        isDefault,
+        0,
+        JSON.stringify(testLoadConfig(modelPath)),
+        createdAt,
+        createdAt,
+      );
+  }
+
+  /**
+   * Saves a load preset through the normal write path.
+   *
+   * @param id - Preset id.
+   * @param name - Requested name.
+   * @param modelPath - Bound GGUF.
+   * @returns The stored preset.
+   */
+  async function saveLoad(id: string, name: string, modelPath: string): Promise<void> {
+    const preset: LoadPreset = {
+      id,
+      name,
+      modelPath,
+      isDefault: false,
+      isReadonly: false,
+      config: testLoadConfig(modelPath),
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    await createLoadPreset(preset);
+  }
+
+  it("names each quant separately and lists that preset only on its own model", async () => {
+    const q4 = "D:/Models/Aura/Aura-Q4_K_S.gguf";
+    const q8 = "D:/Models/Aura/Aura-Q8_0.gguf";
+    await ensureModelDefaultPresets([
+      scannedModel("Aura", q4),
+      scannedModel("Aura", q8),
+      scannedModel("Gemma", "/models/Gemma/gemma.gguf"),
+    ]);
+
+    const loadPresets = await getLoadPresets();
+    const inferencePresets = await getInferencePresets();
+    const loadNames = loadPresets.map((preset) => preset.name);
+    const inferenceNames = inferencePresets.map((preset) => preset.name);
+
+    expect(loadNames).toContain("Aura-Q4_K_S");
+    expect(loadNames).toContain("Aura-Q8_0");
+    expect(loadNames).toContain("Gemma");
+    expect(loadNames).not.toContain("Default (from GGUF) for Aura");
+    expect(new Set(loadNames).size).toBe(loadNames.length);
+    expect(new Set(inferenceNames).size).toBe(inferenceNames.length);
+    expect(loadPresets.filter((preset) => preset.isDefault)).toHaveLength(1);
+
+    const q4Choices = loadPresetsForModel(loadPresets, q4).map((preset) => preset.name);
+    const q8Choices = loadPresetsForModel(loadPresets, q8).map((preset) => preset.name);
+    expect(q4Choices).toContain("Aura-Q4_K_S");
+    expect(q4Choices).toContain("Balanced Default");
+    expect(q4Choices).not.toContain("Aura-Q8_0");
+    expect(q8Choices).toContain("Aura-Q8_0");
+    expect(q8Choices).not.toContain("Aura-Q4_K_S");
+  });
+
+  it("rewrites duplicate generated names and keeps a hand-written name", async () => {
+    const q4 = "/models/Aura/Aura-Q4_K_S.gguf";
+    const q8 = "/models/Aura/Aura-Q8_0.gguf";
+    const gemmaPath = "/models/Gemma/gemma.gguf";
+    insertLoadRow("q4", "Default (from GGUF) for Aura", q4, 1, 10);
+    insertLoadRow("q8", "Default (from GGUF) for Aura", q8, 1, 20);
+    insertLoadRow("ben", "BenGemma", gemmaPath, 0, 30);
+
+    await ensureModelDefaultPresets([
+      scannedModel("Aura", q4),
+      scannedModel("Aura", q8),
+      scannedModel("Gemma", gemmaPath),
+    ]);
+
+    const loadPresets = await getLoadPresets();
+    expect(loadPresets.find((preset) => preset.id === "q4")?.name).toBe("Aura-Q4_K_S");
+    expect(loadPresets.find((preset) => preset.id === "q8")?.name).toBe("Aura-Q8_0");
+    expect(loadPresets.find((preset) => preset.id === "ben")?.name).toBe("BenGemma");
+    expect(
+      loadPresets.filter((preset) => modelPathsMatch(preset.modelPath, gemmaPath)),
+    ).toHaveLength(1);
+    const defaults = loadPresets.filter((preset) => preset.isDefault);
+    expect(defaults.map((preset) => preset.name)).toEqual(["Balanced Default"]);
+    expect(new Set(loadPresets.map((preset) => preset.name.toLowerCase())).size).toBe(
+      loadPresets.length,
+    );
+  });
+
+  it("does not create a second preset when an existing path only differs by slashes", async () => {
+    await saveLoad("slash", "BenQ4", "D:\\Models\\Aura\\Aura-Q4_K_S.gguf");
+    await ensureModelDefaultPresets([
+      scannedModel("Aura", "D:/Models/Aura/Aura-Q4_K_S.gguf"),
+      scannedModel("Aura", "D:/Models/Aura/Aura-Q8_0.gguf"),
+    ]);
+
+    const loadPresets = await getLoadPresets();
+    const q4 = loadPresets.filter((preset) =>
+      modelPathsMatch(preset.modelPath, "D:/Models/Aura/Aura-Q4_K_S.gguf"),
+    );
+    expect(q4.map((preset) => preset.name)).toEqual(["BenQ4"]);
+    expect(
+      loadPresets.find((preset) =>
+        modelPathsMatch(preset.modelPath, "D:/Models/Aura/Aura-Q8_0.gguf"),
+      )?.name,
+    ).toBe("Aura-Q8_0");
+  });
+
+  it("refuses a duplicate name on create and on update", async () => {
+    await saveLoad("first", "Same", "/models/a.gguf");
+    await saveLoad("second", "same", "/models/b.gguf");
+    let presets = await getLoadPresets();
+    expect(presets.find((preset) => preset.id === "first")?.name).toBe("Same");
+    expect(presets.find((preset) => preset.id === "second")?.name).toBe("same (2)");
+
+    await updateLoadPreset("second", { name: "Same" });
+    presets = await getLoadPresets();
+    expect(presets.find((preset) => preset.id === "second")?.name).toBe("Same (2)");
+    expect(new Set(presets.map((preset) => preset.name.toLowerCase())).size).toBe(presets.length);
+
+    await createSystemPreset({
+      id: "voice-a",
+      name: "Voice",
+      content: "a",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    await createSystemPreset({
+      id: "voice-b",
+      name: "voice",
+      content: "b",
+      createdAt: 2,
+      updatedAt: 2,
+    });
+    const systemPresets = await getSystemPresets();
+    expect(systemPresets.find((preset) => preset.id === "voice-b")?.name).toBe("voice (2)");
+  });
+
+  it("keeps a repaired name when a save sends the old generated title", async () => {
+    const path = "/models/Aura/only.gguf";
+    insertLoadRow("only", "Default (from GGUF) for Aura", path, 0, 5);
+    await ensureModelDefaultPresets([scannedModel("Aura", path)]);
+    expect((await getLoadPresets()).find((preset) => preset.id === "only")?.name).toBe("Aura");
+
+    await updateLoadPreset("only", { name: "Default (from GGUF) for Aura" });
+    expect((await getLoadPresets()).find((preset) => preset.id === "only")?.name).toBe("Aura");
   });
 });

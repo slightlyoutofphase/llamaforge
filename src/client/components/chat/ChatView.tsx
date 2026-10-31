@@ -5,6 +5,8 @@
  */
 
 import { resolveInferencePreset } from "@shared/inferencePresetResolve.js";
+import { modelOptionLabel, presetMenuLabels } from "@shared/presetNames.js";
+import { inferencePresetsForModel } from "@shared/presetScope.js";
 import { chatTemplateSupportsToolCalling } from "@shared/templateCapabilities.js";
 import { parseToolCallsJson } from "@shared/toolCalls.js";
 import type { ChatMessage } from "@shared/types.js";
@@ -33,7 +35,7 @@ import {
   useUpdateChat,
   useUpdateMessage,
 } from "../../queries";
-import { useAppStore } from "../../store";
+import { acceptInboundGeneration, useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { InputBar } from "./InputBar";
 import { MessageBubble } from "./MessageBubble";
@@ -202,6 +204,7 @@ export function ChatView() {
   const sendMessage = useAppStore((s) => s.sendMessage);
   const stopGeneration = useAppStore((s) => s.stopGeneration);
   const loadedModel = useAppStore((s) => s.loadedModel);
+  const models = useAppStore((s) => s.models);
   const loadedConfig = useAppStore((s) => s.loadedConfig);
   const toolsCapable = useMemo(
     () =>
@@ -228,9 +231,7 @@ export function ChatView() {
   const [isAutoScroll, setIsAutoScroll] = useState(true);
   const [showInfSwitch, setShowInfSwitch] = useState(false);
   const [showSysSwitch, setShowSysSwitch] = useState(false);
-  // S10 fix: refs for outside-click dismiss
-  const infDropdownRef = useRef<HTMLDivElement>(null);
-  const sysDropdownRef = useRef<HTMLDivElement>(null);
+  const headerMenuRef = useRef<HTMLDivElement>(null);
   const toolResultsByCallId = useMemo(() => {
     const map = new Map<string, (typeof messages)[number]>();
     for (const message of messages) {
@@ -245,24 +246,15 @@ export function ChatView() {
   // S10 fix: close dropdowns when clicking outside
   useEffect(() => {
     /**
-     * Closes preset dropdown menus when the user clicks outside their containers.
+     * Closes preset menus when the user clicks outside the chat header.
      *
      * @param e - Mouse event raised on the document.
      * @returns No return value.
      */
     const handleClickOutside = (e: MouseEvent) => {
-      if (
-        showInfSwitch &&
-        infDropdownRef.current &&
-        !infDropdownRef.current.contains(e.target as Node)
-      ) {
+      if (!showInfSwitch && !showSysSwitch) return;
+      if (headerMenuRef.current && !headerMenuRef.current.contains(e.target as Node)) {
         setShowInfSwitch(false);
-      }
-      if (
-        showSysSwitch &&
-        sysDropdownRef.current &&
-        !sysDropdownRef.current.contains(e.target as Node)
-      ) {
         setShowSysSwitch(false);
       }
     };
@@ -299,6 +291,19 @@ export function ChatView() {
     preferredPresetId: loadedModel ? selectedInfPresets[loadedModel.primaryPath] : undefined,
     modelPath: loadedModel?.primaryPath,
   });
+  const visibleInfPresets = useMemo(() => {
+    const applicable = inferencePresetsForModel(infPresets ?? [], loadedModel?.primaryPath);
+    if (!activeInfPreset || applicable.some((preset) => preset.id === activeInfPreset.id)) {
+      return applicable;
+    }
+    return [activeInfPreset, ...applicable];
+  }, [activeInfPreset, infPresets, loadedModel?.primaryPath]);
+  const modelCatalog = models.filter((model) => !model.metadata?.isDraftModel);
+  const modelLabel = loadedModel ? modelOptionLabel(loadedModel, modelCatalog) : "No Model Loaded";
+  const infLabels = presetMenuLabels(visibleInfPresets);
+  const activeInfLabel = activeInfPreset
+    ? (infLabels.get(activeInfPreset.id) ?? activeInfPreset.name)
+    : "Standard";
   const activeSysPreset = sysPresets?.find((p) => p.id === currentChatMetadata?.systemPresetId);
   const bubbleStyle = settings?.chatBubbleStyle ?? "bubble";
 
@@ -421,6 +426,7 @@ export function ChatView() {
                 : message,
             );
             const kept = messagesKeptForInPlaceRegenerate(updated, messageId);
+            acceptInboundGeneration();
             useAppStore.setState({
               messages: kept,
               totalMessages: totalMessagesAfterDrop(
@@ -538,6 +544,7 @@ export function ChatView() {
           navigate({ to: "/chat/$chatId", params: { chatId: newChatId } });
         } else {
           const kept = messagesKeptForInPlaceRegenerate(messages, id);
+          acceptInboundGeneration();
           useAppStore.setState({
             messages: kept,
             totalMessages: totalMessagesAfterDrop(
@@ -596,6 +603,7 @@ export function ChatView() {
 
           navigate({ to: "/chat/$chatId", params: { chatId: newChatId } });
         } else {
+          acceptInboundGeneration();
           useAppStore.setState({ isGenerating: true, generationStats: null });
           await continueMutation.mutateAsync(currentChatId);
         }
@@ -751,18 +759,21 @@ export function ChatView() {
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-[var(--color-bg)] overflow-hidden">
       {/* Header Chips */}
-      <div className="h-12 border-b border-[var(--color-border)] bg-[var(--color-surface)] flex items-center px-4 space-x-2 shrink-0 z-30 shadow-sm">
+      <div
+        ref={headerMenuRef}
+        className="relative z-30 flex min-h-12 shrink-0 items-stretch gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-1.5 shadow-sm">
         <button
           type="button"
-          className="flex items-center space-x-1.5 px-3 py-1 text-xs font-semibold rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-surface-elevated)] transition-colors data-[active=true]:border-[var(--color-accent)] data-[active=true]:text-[var(--color-accent)]"
+          className="flex min-w-0 flex-[1.4] items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1 text-left text-xs font-semibold transition-colors hover:bg-[var(--color-surface-elevated)] data-[active=true]:border-[var(--color-accent)] data-[active=true]:text-[var(--color-accent)]"
           data-active={active}
+          title={modelLabel}
           onClick={() => setRightPanelView("modelLibrary")}>
-          <Cpu size={14} />
-          <span className="truncate max-w-[200px]">
-            {loadedModel?.modelName || "No Model Loaded"}
+          <Cpu size={14} className="shrink-0" />
+          <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">
+            {modelLabel}
           </span>
           {loadedModel && (
-            <div className="flex gap-1">
+            <div className="flex shrink-0 gap-1">
               {loadedModel.metadata?.hasVisionEncoder && (
                 <div
                   className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"
@@ -783,94 +794,108 @@ export function ChatView() {
               )}
             </div>
           )}
-          <ChevronDown size={14} className="opacity-50" />
+          <ChevronDown size={14} className="shrink-0 opacity-50" />
         </button>
 
-        <div className="relative" ref={infDropdownRef}>
-          <button
-            type="button"
-            className="flex items-center space-x-1.5 px-3 py-1 text-xs font-semibold rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-surface-elevated)] transition-colors text-[var(--color-text-secondary)]"
-            onClick={() => setShowInfSwitch(!showInfSwitch)}>
-            <Settings2 size={14} />
-            <span>Inf: {activeInfPreset?.name || "Standard"}</span>
-            <ChevronDown size={14} className="opacity-50" />
-          </button>
-          {showInfSwitch && (
-            <div className="absolute top-full left-0 mt-1 w-48 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-lg shadow-xl py-1 z-50">
-              <div className="px-3 py-1 text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-wider border-b border-[var(--color-border)] mb-1">
-                Pick Inference Preset
-              </div>
-              {infPresets?.map((p) => (
-                <div
-                  key={p.id}
-                  className="w-full px-3 py-1.5 text-xs hover:bg-[var(--color-accent)] hover:text-white transition-colors flex items-center justify-between group">
-                  <button
-                    type="button"
-                    onClick={() => updatePreset("inference", p.id)}
-                    className="min-w-0 flex-1 text-left truncate">
-                    {p.name} {p.isDefault ? "(Default)" : ""}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRightPanelView("inferencePreset", p.id);
-                      setShowInfSwitch(false);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-white/20 rounded">
-                    <Settings2 size={12} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1 text-left text-xs font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-elevated)]"
+          title={`Inf: ${activeInfLabel}`}
+          onClick={() => {
+            setShowInfSwitch((open) => !open);
+            setShowSysSwitch(false);
+          }}>
+          <Settings2 size={14} className="shrink-0" />
+          <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">
+            Inf: {activeInfLabel}
+          </span>
+          <ChevronDown size={14} className="shrink-0 opacity-50" />
+        </button>
 
-        <div className="relative" ref={sysDropdownRef}>
-          <button
-            type="button"
-            className="flex items-center space-x-1.5 px-3 py-1 text-xs font-semibold rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] hover:bg-[var(--color-surface-elevated)] transition-colors text-[var(--color-text-secondary)]"
-            onClick={() => setShowSysSwitch(!showSysSwitch)}>
-            <FileText size={14} />
-            <span>Sys: {activeSysPreset?.name || "None"}</span>
-            <ChevronDown size={14} className="opacity-50" />
-          </button>
-          {showSysSwitch && (
-            <div className="absolute top-full left-0 mt-1 w-48 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-lg shadow-xl py-1 z-50">
-              <div className="px-3 py-1 text-[10px] font-bold text-[var(--color-text-muted)] uppercase tracking-wider border-b border-[var(--color-border)] mb-1">
-                Pick System Prompt
-              </div>
-              <button
-                type="button"
-                onClick={() => updatePreset("system", "")}
-                className="w-full text-left px-3 py-1.5 text-xs hover:bg-[var(--color-accent)] hover:text-white transition-colors">
-                None
-              </button>
-              {sysPresets?.map((p) => (
-                <div
-                  key={p.id}
-                  className="w-full px-3 py-1.5 text-xs hover:bg-[var(--color-accent)] hover:text-white transition-colors flex items-center justify-between group">
-                  <button
-                    type="button"
-                    onClick={() => updatePreset("system", p.id)}
-                    className="min-w-0 flex-1 text-left truncate">
-                    {p.name}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setRightPanelView("systemPreset", p.id);
-                      setShowSysSwitch(false);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 p-0.5 hover:bg-white/20 rounded">
-                    <Settings2 size={12} />
-                  </button>
-                </div>
-              ))}
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1 text-left text-xs font-semibold text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-elevated)]"
+          title={`Sys: ${activeSysPreset?.name || "None"}`}
+          onClick={() => {
+            setShowSysSwitch((open) => !open);
+            setShowInfSwitch(false);
+          }}>
+          <FileText size={14} className="shrink-0" />
+          <span className="min-w-0 flex-1 whitespace-normal break-words leading-snug">
+            Sys: {activeSysPreset?.name || "None"}
+          </span>
+          <ChevronDown size={14} className="shrink-0 opacity-50" />
+        </button>
+
+        {showInfSwitch && (
+          <div
+            data-testid="inference-preset-menu"
+            className="absolute left-4 right-4 top-full z-50 mt-1 max-h-80 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] py-1 shadow-xl">
+            <div className="mb-1 border-b border-[var(--color-border)] px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+              Pick Inference Preset
             </div>
-          )}
-        </div>
+            {visibleInfPresets.map((p) => (
+              <div
+                key={p.id}
+                className="group flex w-full items-start justify-between gap-2 px-3 py-1.5 text-xs transition-colors hover:bg-[var(--color-accent)] hover:text-white">
+                <button
+                  type="button"
+                  onClick={() => updatePreset("inference", p.id)}
+                  className="min-w-0 flex-1 whitespace-normal break-words text-left leading-snug">
+                  {infLabels.get(p.id) ?? p.name}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRightPanelView("inferencePreset", p.id);
+                    setShowInfSwitch(false);
+                  }}
+                  className="shrink-0 rounded p-0.5 opacity-0 hover:bg-white/20 group-hover:opacity-100">
+                  <Settings2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {showSysSwitch && (
+          <div
+            data-testid="system-preset-menu"
+            className="absolute left-4 right-4 top-full z-50 mt-1 max-h-80 overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] py-1 shadow-xl">
+            <div className="mb-1 border-b border-[var(--color-border)] px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+              Pick System Prompt
+            </div>
+            <button
+              type="button"
+              onClick={() => updatePreset("system", "")}
+              className="w-full whitespace-normal break-words px-3 py-1.5 text-left text-xs leading-snug transition-colors hover:bg-[var(--color-accent)] hover:text-white">
+              None
+            </button>
+            {sysPresets?.map((p) => (
+              <div
+                key={p.id}
+                className="group flex w-full items-start justify-between gap-2 px-3 py-1.5 text-xs transition-colors hover:bg-[var(--color-accent)] hover:text-white">
+                <button
+                  type="button"
+                  onClick={() => updatePreset("system", p.id)}
+                  className="min-w-0 flex-1 whitespace-normal break-words text-left leading-snug">
+                  {p.name}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRightPanelView("systemPreset", p.id);
+                    setShowSysSwitch(false);
+                  }}
+                  className="shrink-0 rounded p-0.5 opacity-0 hover:bg-white/20 group-hover:opacity-100">
+                  <Settings2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Messages Area */}

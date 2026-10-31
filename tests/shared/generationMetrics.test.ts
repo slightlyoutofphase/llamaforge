@@ -69,6 +69,7 @@ describe("generationMetrics", () => {
     expect(formatThoughtDuration(40)).toBe("Thought for <0.1 seconds");
     expect(formatStopReasonLabel("eos")).toBe("EOS Token Found");
     expect(formatStopReasonLabel("contextLengthReached")).toBe("Context Length Reached");
+    expect(formatStopReasonLabel("cancelled")).toBe("Cancelled");
   });
 
   it("builds thinking headers for live and completed traces", () => {

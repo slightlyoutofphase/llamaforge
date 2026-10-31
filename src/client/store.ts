@@ -389,6 +389,103 @@ function isCurrentChatLoadRequest(requestId: number, chatId: string): boolean {
   return requestId === activeChatLoadRequestId && latestRequestedChatId === chatId;
 }
 
+const CLIENT_HEARTBEAT_MS = 10_000;
+const INBOUND_WATCHDOG_MS = 45_000;
+const WATCHDOG_POLL_MS = 5_000;
+
+let socketSerial = 0;
+let dropTokenEpoch = 0;
+let acceptedTokenEpoch = 0;
+let lastInboundAt = 0;
+let heartbeatTimer: number | null = null;
+let watchdogTimer: number | null = null;
+
+/**
+ * True after unload, disconnect, or a dead stream until the user starts a new one.
+ *
+ * Late token frames must not turn the composer back into a generating state.
+ *
+ * @returns `true` when live token and tool frames should be ignored.
+ */
+function inboundGenerationSuppressed(): boolean {
+  return acceptedTokenEpoch !== dropTokenEpoch;
+}
+
+/**
+ * Drops subsequent token and tool frames until {@link releaseInboundGeneration}.
+ *
+ * @returns No return value.
+ */
+function suppressInboundGeneration(): void {
+  dropTokenEpoch += 1;
+}
+
+/**
+ * Allows token frames again. Used when the user sends a message or finishes a load.
+ *
+ * @returns No return value.
+ */
+function releaseInboundGeneration(): void {
+  acceptedTokenEpoch = dropTokenEpoch;
+}
+
+/**
+ * Lets token frames through again because the user started another generation.
+ *
+ * Regenerate and continue update the store directly, so they call this before
+ * flipping `isGenerating` or a disconnect fence would swallow the new stream.
+ *
+ * @returns No return value.
+ */
+export function acceptInboundGeneration(): void {
+  releaseInboundGeneration();
+}
+
+/**
+ * Stops the keepalive and dead-server timers for the current browser socket.
+ *
+ * @returns No return value.
+ */
+function clearSocketTimers(): void {
+  if (heartbeatTimer !== null) {
+    window.clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  if (watchdogTimer !== null) {
+    window.clearInterval(watchdogTimer);
+    watchdogTimer = null;
+  }
+}
+
+/**
+ * Starts a window interval and detaches it from the test runner when the host allows it.
+ *
+ * @param callback - Function invoked on each tick.
+ * @param intervalMs - Delay between ticks in milliseconds.
+ * @returns The timer id passed to `clearInterval`.
+ */
+function scheduleInterval(callback: () => void, intervalMs: number): number {
+  const id = window.setInterval(callback, intervalMs);
+  const timer = id as unknown as { unref?: () => void };
+  if (typeof timer === "object" && timer !== null && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  return id;
+}
+
+/**
+ * Token and tool frames are the ones that make the page look like inference is still running.
+ *
+ * @param frame - Parsed server frame.
+ * @returns `true` when the frame should be discarded because generation was halted locally.
+ */
+function shouldDropLiveFrame(frame: WsFrame): boolean {
+  if (!inboundGenerationSuppressed()) return false;
+  return (
+    frame.type === "token" || frame.type === "tool_call" || frame.type === "tool_approval_state"
+  );
+}
+
 /**
  * Main application hook for accessing the global Zustand store.
  * Manages server connectivity, model lifecycle, chat history, and UI state.
@@ -462,15 +559,55 @@ export const useAppStore = create<AppState>((set, get) => ({
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
-    ws = new WebSocket(wsUrl);
+    const socket = new WebSocket(wsUrl);
+    const serial = ++socketSerial;
+    ws = socket;
 
-    ws.onopen = () => {
+    socket.onopen = () => {
+      if (serial !== socketSerial) return;
       currentReconnectDelay = 2000;
+      lastInboundAt = Date.now();
+      clearSocketTimers();
+      heartbeatTimer = scheduleInterval(() => {
+        if (serial !== socketSerial || socket.readyState !== WebSocket.OPEN) return;
+        try {
+          socket.send(JSON.stringify({ type: "heartbeat" }));
+        } catch {
+          // The socket is already closing.
+        }
+      }, CLIENT_HEARTBEAT_MS);
+      watchdogTimer = scheduleInterval(() => {
+        if (serial !== socketSerial) return;
+        const state = get();
+        if (!state.isGenerating && !state.isWaitingForToolApproval) return;
+        if (Date.now() - lastInboundAt < INBOUND_WATCHDOG_MS) return;
+        suppressInboundGeneration();
+        try {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "session_close" }));
+          }
+        } catch {
+          // The socket is already closing.
+        }
+        set({
+          isGenerating: false,
+          isWaitingForToolApproval: false,
+          currentGenerationId: null,
+          isConnected: false,
+          errorMessage: "Lost contact with LlamaForge while a response was still streaming.",
+          errorActionLabel: "Reconnect",
+          errorAction: () => get().connectWs(),
+        });
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+          socket.close(4000, "Inbound watchdog");
+        }
+      }, WATCHDOG_POLL_MS);
       set({ isConnected: true, errorMessage: null, errorActionLabel: null, errorAction: null });
       logInfo("WS connected");
     };
 
-    ws.onerror = () => {
+    socket.onerror = () => {
+      if (serial !== socketSerial) return;
       set({
         isConnected: false,
         isGenerating: false,
@@ -482,9 +619,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     };
 
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (serial !== socketSerial) return;
       const shouldReconnect = get().shouldReconnect;
-      ws = null;
+      if (ws === socket) ws = null;
+      clearSocketTimers();
       set({
         isConnected: false,
         isGenerating: false,
@@ -508,7 +647,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
     };
 
-    ws.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (serial !== socketSerial) return;
       let frame: WsFrame;
       try {
         frame = JSON.parse(event.data) as WsFrame;
@@ -516,9 +656,18 @@ export const useAppStore = create<AppState>((set, get) => ({
         logError("Failed to parse WS message", err);
         return;
       }
+      lastInboundAt = Date.now();
+      if (frame.type === "heartbeat") return;
+      if (shouldDropLiveFrame(frame)) return;
 
       try {
         if (frame.type === "server_status") {
+          if (frame.status === "idle") {
+            const live = get();
+            if (live.isGenerating || live.isWaitingForToolApproval || live.currentGenerationId) {
+              suppressInboundGeneration();
+            }
+          }
           set(() => {
             const updates: Partial<AppState> = { serverStatus: frame.status };
             if (frame.status === "idle") {
@@ -786,6 +935,14 @@ export const useAppStore = create<AppState>((set, get) => ({
         } else if (frame.type === "presets_updated") {
           window.dispatchEvent(new CustomEvent("llamaforge:presets-invalidate"));
         } else if (frame.type === "error") {
+          if (inboundGenerationSuppressed()) {
+            set({
+              isGenerating: false,
+              isWaitingForToolApproval: false,
+              currentGenerationId: null,
+            });
+            return;
+          }
           logError("WS Error frame:", frame.message);
           set((state) => {
             if (frame.chatId && frame.chatId !== state.currentChatId) {
@@ -864,6 +1021,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       throw error;
     }
     const optimisticMessageId = `temp-${crypto.randomUUID()}`;
+    releaseInboundGeneration();
     set((s) => ({
       messages: [
         ...s.messages,
@@ -1003,6 +1161,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   disconnectWs: () => {
+    suppressInboundGeneration();
+    clearSocketTimers();
     set({
       shouldReconnect: false,
       isConnected: false,
@@ -1010,13 +1170,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       isWaitingForToolApproval: false,
       currentGenerationId: null,
       errorMessage: null, // Clear error on disconnect
+      errorActionLabel: null,
+      errorAction: null,
     });
     if (reconnectTimer !== null) {
       window.clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
-    if (ws && ws.readyState !== WebSocket.CLOSED) {
-      ws.close(1000, "Client initiated disconnect");
+    const socket = ws;
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      try {
+        socket.send(JSON.stringify({ type: "session_close" }));
+      } catch {
+        // The socket is already closing.
+      }
+    }
+    if (socket && socket.readyState !== WebSocket.CLOSED) {
+      socket.close(1000, "Client initiated disconnect");
     }
   },
 
@@ -1297,6 +1467,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (res.ok) {
         const data = await res.json();
         const modelPath = data.config?.modelPath;
+        if (data.status === "idle") {
+          const live = get();
+          if (live.isGenerating || live.isWaitingForToolApproval || live.currentGenerationId) {
+            suppressInboundGeneration();
+          }
+        }
         set((state) => {
           let loadedModel = null;
           if (modelPath) {
@@ -1339,6 +1515,13 @@ export const useAppStore = create<AppState>((set, get) => ({
             loadedModel,
             loadedConfig: data.config ?? null,
             errorMessage: null,
+            ...(data.status === "idle"
+              ? {
+                  isGenerating: false,
+                  isWaitingForToolApproval: false,
+                  currentGenerationId: null,
+                }
+              : {}),
           };
         });
         void get().refreshContextUsage();
@@ -1422,6 +1605,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   loadModel: async (config: LoadModelRequest): Promise<boolean> => {
+    const generationWasSuppressed = inboundGenerationSuppressed();
+    suppressInboundGeneration();
+    const restoreGenerationFence = () => {
+      if (!generationWasSuppressed) releaseInboundGeneration();
+    };
     if (useUiStore.getState().rightPanelView === "modelLibrary") {
       useUiStore.getState().setRightPanelView(null);
     }
@@ -1456,9 +1644,11 @@ export const useAppStore = create<AppState>((set, get) => ({
           loadProgressDetail: null,
         });
         get().setError(errorMessage, action ? "Settings" : null, action);
+        restoreGenerationFence();
         return false;
       } else {
         set({ errorMessage: null, errorActionLabel: null, errorAction: null });
+        releaseInboundGeneration();
         await get().fetchServerStatus();
         return true;
       }
@@ -1470,19 +1660,35 @@ export const useAppStore = create<AppState>((set, get) => ({
         loadProgressDetail: null,
         errorMessage: e instanceof Error ? e.message : "Model load failed.",
       });
+      restoreGenerationFence();
       return false;
     }
   },
 
   unloadModel: async () => {
-    set({ errorMessage: null }); // Clear any stale errors
+    suppressInboundGeneration();
+    set({
+      errorMessage: null,
+      isGenerating: false,
+      isWaitingForToolApproval: false,
+      currentGenerationId: null,
+    });
     try {
       const res = await fetch("/api/server/unload", { method: "POST" });
       if (res.ok) {
-        set({ serverStatus: "idle", loadedConfig: null, loadedModel: null, errorMessage: null });
+        set({
+          serverStatus: "idle",
+          loadedConfig: null,
+          loadedModel: null,
+          errorMessage: null,
+          isGenerating: false,
+          isWaitingForToolApproval: false,
+          currentGenerationId: null,
+        });
         void get().refreshProcessUsage();
         void get().refreshContextUsage();
       } else {
+        releaseInboundGeneration();
         const errorBody = await res.text().catch(() => "");
         get().addNotification(
           `Failed to unload model: ${res.status}${errorBody ? `: ${errorBody}` : ""}`,
@@ -1492,6 +1698,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         );
       }
     } catch (e: unknown) {
+      releaseInboundGeneration();
       logError("Unload failed", e);
       get().addNotification(
         e instanceof Error ? e.message : "Model unload failed.",

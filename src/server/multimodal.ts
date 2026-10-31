@@ -594,7 +594,28 @@ export async function buildContentParts(
   let finalString = "";
   const parts: ChatContentPart[] = [];
   const extractedTextAttachments: ProcessedAttachment[] = [];
+  const emittedSoundtrackPaths = new Set<string>();
+  /**
+   * Index where the next autoextracted soundtrack is inserted.
+   * Gemma 4 ignores `input_audio` that follows an image or video in the same
+   * user turn, so extracted soundtracks stay in a block at the front.
+   */
+  let extractedAudioInsertAt = 0;
   let includeVideoAudio: boolean | undefined;
+
+  /**
+   * Inserts an autoextracted soundtrack before any image or video part.
+   *
+   * @param part - `input_audio` part for the soundtrack.
+   * @param filePath - Stored attachment path, used to avoid sending it twice.
+   * @returns No return value.
+   */
+  function pushExtractedAudio(part: ChatContentPart, filePath: string): void {
+    if (emittedSoundtrackPaths.has(filePath)) return;
+    emittedSoundtrackPaths.add(filePath);
+    parts.splice(extractedAudioInsertAt, 0, part);
+    extractedAudioInsertAt += 1;
+  }
 
   /**
    * Resolves whether extracted video soundtracks should be sent with `input_video`.
@@ -742,6 +763,12 @@ export async function buildContentParts(
         }
         const isAudio = a.mimeType.startsWith("audio/");
         const isVideo = a.mimeType.startsWith("video/");
+        if (isAudio && isExtractedVideoAudioAttachment(a)) {
+          if (emittedSoundtrackPaths.has(a.filePath)) continue;
+          logInfo(`Pushing extracted video audio URL path: ${url}`);
+          pushExtractedAudio({ type: "input_audio", input_audio: { url } }, a.filePath);
+          continue;
+        }
         if (isVideo && !preferNativeInputVideo) {
           const frames = await extractVideoFramesImpl(absPath, path.dirname(absPath));
           if (frames.length > 0) {
@@ -765,11 +792,23 @@ export async function buildContentParts(
           : isVideo
             ? { type: "input_video", input_video: { url } }
             : { type: "image_url", image_url: { url } };
-        logInfo(`Pushing media URL path: ${url}`);
-        parts.push(mediaPart);
         if (mediaPart.type === "input_video" && (await shouldIncludeVideoAudio())) {
           try {
-            if (!findExistingSoundtrack(attachments, a)) {
+            const existing = findExistingSoundtrack(attachments, a);
+            if (existing) {
+              if (!emittedSoundtrackPaths.has(existing.filePath)) {
+                const audioUrl = toLocalMediaUrl(existing.filePath);
+                if (!audioUrl) {
+                  logWarn(`Invalid extracted video audio path: ${existing.filePath}`);
+                } else {
+                  logInfo(`Pushing extracted video audio URL path: ${audioUrl}`);
+                  pushExtractedAudio(
+                    { type: "input_audio", input_audio: { url: audioUrl } },
+                    existing.filePath,
+                  );
+                }
+              }
+            } else {
               const audioAbs = await resolveVideoAudioSidecarImpl(absPath);
               if (audioAbs) {
                 const soundtrack = persistVideoSoundtrackAttachment(a, audioAbs);
@@ -778,7 +817,10 @@ export async function buildContentParts(
                   logWarn(`Invalid extracted video audio path: ${soundtrack.filePath}`);
                 } else {
                   logInfo(`Pushing extracted video audio URL path: ${audioUrl}`);
-                  parts.push({ type: "input_audio", input_audio: { url: audioUrl } });
+                  pushExtractedAudio(
+                    { type: "input_audio", input_audio: { url: audioUrl } },
+                    soundtrack.filePath,
+                  );
                 }
               }
             }
@@ -786,6 +828,8 @@ export async function buildContentParts(
             logWarn(`Failed resolving extracted audio for video: ${a.filePath}`, audioError);
           }
         }
+        logInfo(`Pushing media URL path: ${url}`);
+        parts.push(mediaPart);
       } catch (e) {
         logWarn(`Failed resolving attachment file: ${a.filePath}`, e);
       }

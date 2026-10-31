@@ -10,7 +10,7 @@ import { buildMessageMetrics } from "../shared/generationMetrics";
 import { resolveInferencePreset } from "../shared/inferencePresetResolve";
 import { parseToolCallsJson, toApiToolCalls } from "../shared/toolCalls";
 import { toStoredToolDefinition } from "../shared/toolModule";
-import type { ChatMessage } from "../shared/types";
+import type { ChatMessage, LlamaTimings } from "../shared/types";
 import { triggerAutoname } from "./autoname";
 import {
   applyAssistantStreamDelta,
@@ -21,7 +21,11 @@ import {
   shouldReconstructPreservedAssistantContent,
   shouldSendAssistantReasoningContent,
 } from "./chatTemplateEngine";
-import { getActiveGenerations } from "./generationRegistry";
+import {
+  type GenerationAbortReason,
+  type GenerationSession,
+  getActiveGenerations,
+} from "./generationRegistry";
 import {
   getActiveThinkingTagOverride,
   getProc,
@@ -48,6 +52,93 @@ export { getActiveGenerationChatIds } from "./generationRegistry";
 
 const activeGenerations = getActiveGenerations();
 const MAX_TOOL_RECURSION_DEPTH = 5;
+const abortReasons = new Map<string, GenerationAbortReason>();
+
+const EMPTY_TIMINGS: LlamaTimings = {
+  predicted_ms: 0,
+  predicted_n: 0,
+  predicted_per_second: 0,
+  predicted_per_token_ms: 0,
+  prompt_ms: 0,
+  prompt_n: 0,
+  prompt_per_second: 0,
+  prompt_per_token_ms: 0,
+  tokens_cached: 0,
+  tokens_evaluated: 0,
+};
+
+/**
+ * Maps a generation abort onto the tool-approval cancellation vocabulary.
+ *
+ * @param reason - Why the generation is stopping.
+ * @returns The approval reason stored with a rejected tool call.
+ */
+function approvalCancelReason(
+  reason: GenerationAbortReason,
+): "cancelled" | "disconnected" | "unloaded" {
+  if (reason === "disconnected") return "disconnected";
+  if (reason === "unloaded") return "unloaded";
+  return "cancelled";
+}
+
+/**
+ * Reads and forgets the abort reason recorded for a generation.
+ *
+ * @param generationId - Generation whose abort reason should be consumed.
+ * @returns The recorded reason, or `cancelled` when the signal fired without one.
+ */
+function takeAbortReason(generationId: string): GenerationAbortReason {
+  const reason = abortReasons.get(generationId) ?? "cancelled";
+  abortReasons.delete(generationId);
+  return reason;
+}
+
+/**
+ * Tells connected browsers that a generation ended because it was stopped,
+ * rather than because llama-server failed.
+ *
+ * Timeouts still emit an error frame so the existing banner remains. Unload,
+ * disconnect, and the stop button emit a normal stop so the composer does not
+ * turn a deliberate halt into a red error.
+ *
+ * @param params - Identifiers and any partial text already produced.
+ * @returns No return value.
+ */
+function finishAbortedGeneration(params: {
+  chatId: string;
+  messageId: string;
+  generationId: string;
+  reason: GenerationAbortReason;
+  fullContent?: string | undefined;
+  fullRawContent?: string | undefined;
+  fullThinking?: string | undefined;
+  promptTokens?: number | undefined;
+  contextSize?: number | undefined;
+}): void {
+  if (params.reason === "timeout") {
+    broadcast({
+      type: "error",
+      chatId: params.chatId,
+      messageId: params.messageId,
+      generationId: params.generationId,
+      message: "Generation cancelled or timed out.",
+    });
+    return;
+  }
+  broadcast({
+    type: "stop",
+    chatId: params.chatId,
+    messageId: params.messageId,
+    generationId: params.generationId,
+    stopReason: "cancelled",
+    timings: EMPTY_TIMINGS,
+    ...(params.promptTokens !== undefined ? { promptTokens: params.promptTokens } : {}),
+    ...(params.contextSize !== undefined ? { contextSize: params.contextSize } : {}),
+    ...(params.fullContent !== undefined ? { fullContent: params.fullContent } : {}),
+    ...(params.fullRawContent !== undefined ? { fullRawContent: params.fullRawContent } : {}),
+    ...(params.fullThinking !== undefined ? { fullThinking: params.fullThinking } : {}),
+  });
+}
 
 type ChatCompletionMessage = {
   role: string;
@@ -202,26 +293,55 @@ function formatTransportErrorMessage(
 }
 
 /**
+ * Stops one generation and remembers why, so the stream catch can finish the
+ * message without reporting a transport failure.
+ *
+ * @param id - Generation id.
+ * @param session - Live session to abort.
+ * @param reason - Why the generation is stopping.
+ * @returns No return value.
+ */
+function abortSession(id: string, session: GenerationSession, reason: GenerationAbortReason): void {
+  abortReasons.set(id, reason);
+  session.abortReason = reason;
+  session.controller.abort();
+  cancelPendingApprovals(session.chatId, approvalCancelReason(reason));
+  activeGenerations.delete(id);
+}
+
+/**
  * Terminate an active generation.
  *
  * @param idOrChatId - The generation session ID or chat ID.
+ * @param reason - Why the generation is stopping. Defaults to an explicit user cancel.
  * @returns No return value.
  */
-export function abortGeneration(idOrChatId: string) {
+export function abortGeneration(idOrChatId: string, reason: GenerationAbortReason = "cancelled") {
   const exact = activeGenerations.get(idOrChatId);
   if (exact) {
-    exact.controller.abort();
-    cancelPendingApprovals(exact.chatId, "cancelled");
-    activeGenerations.delete(idOrChatId);
+    abortSession(idOrChatId, exact, reason);
     return;
   }
 
   for (const [id, session] of activeGenerations.entries()) {
     if (session.chatId === idOrChatId) {
-      session.controller.abort();
-      cancelPendingApprovals(session.chatId, "cancelled");
-      activeGenerations.delete(id);
+      abortSession(id, session, reason);
     }
+  }
+}
+
+/**
+ * Stops every in-flight generation.
+ *
+ * Disconnect, unload, and process shutdown all use this so a browser that has
+ * gone away cannot keep receiving tokens from a stream nobody is watching.
+ *
+ * @param reason - Why every generation is stopping.
+ * @returns No return value.
+ */
+export function abortAllGenerations(reason: GenerationAbortReason = "cancelled"): void {
+  for (const id of [...activeGenerations.keys()]) {
+    abortGeneration(id, reason);
   }
 }
 
@@ -873,7 +993,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       if (inactivityTimer) clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(() => {
         logWarn(`Generation timeout for generation ${generationId} (${timeoutMs}ms)`);
-        abortGeneration(generationId);
+        abortGeneration(generationId, "timeout");
       }, timeoutMs);
     };
 
@@ -1309,13 +1429,24 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
           const aborted =
             abortController.signal.aborted || (err instanceof Error && err.name === "AbortError");
           if (aborted) {
+            const reason = takeAbortReason(generationId);
+            const stopReason = reason === "timeout" ? "error" : "cancelled";
+            const thinkingDurationMs =
+              thinkingStartedAt !== null
+                ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
+                : undefined;
+            const metrics = buildMessageMetrics(EMPTY_TIMINGS, promptTokensCount, {
+              stopReason,
+              ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+            });
             const db = await import("./persistence/db").then((m) => m.getDb());
             db.prepare(
-              "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ? WHERE id = ?",
+              "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
             ).run(
               streamState.prevContent,
               streamState.fullRawContent,
               streamState.prevThinking || null,
+              JSON.stringify(metrics),
               assistantMessageId,
             );
             cleanupEmptyAssistantMessage();
@@ -1323,13 +1454,18 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               chatId,
               assistantMessageId,
               generationId,
+              reason,
             });
-            broadcast({
-              type: "error",
+            finishAbortedGeneration({
               chatId,
               messageId: assistantMessageId,
               generationId,
-              message: "Generation cancelled or timed out.",
+              reason,
+              fullContent: streamState.prevContent,
+              fullRawContent: streamState.fullRawContent,
+              fullThinking: streamState.prevThinking,
+              promptTokens: promptTokensCount,
+              contextSize: ctxSize,
             });
           } else {
             logStreamProxyError("stream-parse", err, {
@@ -1356,6 +1492,27 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         if (inactivityTimer) clearTimeout(inactivityTimer);
         cancelPendingApprovals(chatId);
         activeGenerations.delete(generationId);
+        const aborted =
+          abortController.signal.aborted || (err instanceof Error && err.name === "AbortError");
+        if (aborted) {
+          const reason = takeAbortReason(generationId);
+          cleanupEmptyAssistantMessage();
+          logWarn("[streamProxy] Generation aborted before the first token", {
+            chatId,
+            assistantMessageId,
+            generationId,
+            reason,
+          });
+          finishAbortedGeneration({
+            chatId,
+            messageId: assistantMessageId,
+            generationId,
+            reason,
+            promptTokens: promptTokensCount,
+            contextSize: ctxSize,
+          });
+          return;
+        }
         const failureContext = getModelFailureContext();
         logStreamProxyError("fetch-catch", err, {
           endpoint,

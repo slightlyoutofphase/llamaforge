@@ -53,9 +53,55 @@ describe("resolveInferencePreset", () => {
     ).not.toBe("first");
   });
 
-  it("uses the marked default when no chat, preference, or model match exists", () => {
-    expect(resolveInferencePreset(presets, { modelPath: "/models/other.gguf" })?.id).toBe(
+  it("uses an unbound preset instead of a default bound to a different model", () => {
+    expect(resolveInferencePreset(presets, { modelPath: "/models/other.gguf" })?.id).toBe("first");
+  });
+
+  it("uses an unbound default for a model that has no preset of its own", () => {
+    expect(
+      resolveInferencePreset(
+        [
+          {
+            id: "other-model",
+            name: "Other",
+            sourceModelPath: "/models/other.gguf",
+            isDefault: false,
+          },
+          { id: "standard", name: "Standard", isDefault: true },
+        ],
+        { modelPath: "/models/qwen.gguf" },
+      )?.id,
+    ).toBe("standard");
+  });
+
+  it("ignores a chat preset bound to a different model", () => {
+    expect(
+      resolveInferencePreset(presets, {
+        chatPresetId: "benqwen",
+        modelPath: "/models/other.gguf",
+      })?.id,
+    ).toBe("first");
+  });
+
+  it("matches a model path when only the slash direction differs", () => {
+    expect(resolveInferencePreset(presets, { modelPath: "\\models\\qwen.gguf" })?.id).toBe(
       "qwen-default",
     );
+  });
+
+  it("returns undefined when every preset is bound to a different model", () => {
+    expect(
+      resolveInferencePreset(
+        [
+          {
+            id: "qwen-default",
+            name: "Default Qwen",
+            sourceModelPath: "/models/qwen.gguf",
+            isDefault: true,
+          },
+        ],
+        { modelPath: "/models/other.gguf" },
+      ),
+    ).toBeUndefined();
   });
 });

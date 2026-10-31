@@ -946,4 +946,199 @@ describe("stores logic", () => {
     expect(useAppStore.getState().messages.map((message) => message.id)).toEqual(["u1"]);
     globalThis.WebSocket = originalWebSocket;
   });
+
+  it("disconnect stops live tokens and tells the server to abort", () => {
+    const originalWebSocket = globalThis.WebSocket;
+    const sent: string[] = [];
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+      send(data: string) {
+        sent.push(data);
+      }
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [
+          {
+            id: "a1",
+            chatId: "chat-1",
+            role: "assistant",
+            content: "partial",
+            rawContent: "partial",
+            position: 0,
+            createdAt: 1,
+          },
+        ],
+        isGenerating: true,
+        currentGenerationId: "gen-1",
+        shouldReconnect: true,
+      });
+      useAppStore.getState().connectWs();
+      MockWebSocket.instance?.onopen?.();
+    });
+
+    act(() => {
+      useAppStore.getState().disconnectWs();
+    });
+
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "token",
+          chatId: "chat-1",
+          messageId: "a1",
+          generationId: "gen-1",
+          delta: " more",
+        }),
+      });
+    });
+
+    const state = useAppStore.getState();
+    expect(sent.some((frame) => frame.includes('"type":"session_close"'))).toBe(true);
+    expect(state.isGenerating).toBe(false);
+    expect(state.shouldReconnect).toBe(false);
+    expect(state.messages[0]?.content).toBe("partial");
+    globalThis.WebSocket = originalWebSocket;
+  });
+
+  it("ignores token frames after a successful unload", async () => {
+    const originalWebSocket = globalThis.WebSocket;
+    const originalFetch = globalThis.fetch;
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 3;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+      send() {}
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    globalThis.fetch = asFetch(mock().mockResolvedValue(new Response(null, { status: 200 })));
+
+    act(() => {
+      useAppStore.setState({
+        serverStatus: "running",
+        currentChatId: "chat-1",
+        messages: [
+          {
+            id: "a1",
+            chatId: "chat-1",
+            role: "assistant",
+            content: "partial",
+            rawContent: "partial",
+            position: 0,
+            createdAt: 1,
+          },
+        ],
+        isGenerating: true,
+        currentGenerationId: "gen-1",
+      });
+      useAppStore.getState().connectWs();
+    });
+
+    await act(async () => {
+      await useAppStore.getState().unloadModel();
+    });
+
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "token",
+          chatId: "chat-1",
+          messageId: "a1",
+          generationId: "gen-1",
+          delta: " more",
+        }),
+      });
+    });
+
+    const state = useAppStore.getState();
+    expect(state.serverStatus).toBe("idle");
+    expect(state.isGenerating).toBe(false);
+    expect(state.messages[0]?.content).toBe("partial");
+    globalThis.WebSocket = originalWebSocket;
+    globalThis.fetch = originalFetch;
+  });
+
+  it("keeps the replacement socket when an older socket closes", () => {
+    const originalWebSocket = globalThis.WebSocket;
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+      send() {}
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    act(() => {
+      useAppStore.getState().connectWs();
+    });
+    const first = MockWebSocket.instance;
+    act(() => {
+      first?.onopen?.();
+    });
+    expect(useAppStore.getState().isConnected).toBe(true);
+
+    if (first) first.readyState = MockWebSocket.CLOSING;
+    act(() => {
+      useAppStore.getState().connectWs();
+    });
+    const second = MockWebSocket.instance;
+    expect(second).not.toBe(first);
+    act(() => {
+      second?.onopen?.();
+      first?.onclose?.();
+    });
+
+    expect(useAppStore.getState().isConnected).toBe(true);
+    expect(useAppStore.getState().shouldReconnect).toBe(true);
+    globalThis.WebSocket = originalWebSocket;
+  });
 });

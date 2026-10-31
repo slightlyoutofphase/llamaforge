@@ -11,12 +11,89 @@ const connections = new Set<ServerWebSocket<unknown>>();
 const logBuffer: Extract<WsFrame, { type: "log" }>[] = [];
 const MAX_BUFFER_SIZE = 200;
 
-const lastPongTimes = new WeakMap<ServerWebSocket<unknown>, number>();
+interface SocketHealth {
+  /** Last inbound client activity: protocol pong, heartbeat, or any message. */
+  lastInboundAt: number;
+  /** Consecutive scheduled checks with no inbound activity and no event-loop stall. */
+  missedPings: number;
+}
 
-// M4 fix: periodic WebSocket heartbeat to detect stale/half-open connections
-const PING_INTERVAL_MS = 30_000;
-const STALE_THRESHOLD_MS = 65_000;
+const socketHealth = new WeakMap<ServerWebSocket<unknown>, SocketHealth>();
+
+/**
+ * How often the server pings each browser socket and emits an application heartbeat.
+ * Menu panels and token rendering can stall a tick; the stall check below refuses
+ * to treat that delay as a dead browser.
+ */
+export const WS_PING_INTERVAL_MS = 15_000;
+
+/**
+ * Inbound silence required before a scheduled check counts as a missed ping.
+ * Two consecutive misses close the socket. A single late timer tick does not.
+ */
+export const WS_STALE_THRESHOLD_MS = 45_000;
+
+const MISSED_PINGS_TO_CLOSE = 2;
 let pingInterval: ReturnType<typeof setInterval> | null = null;
+let lastHeartbeatTickAt = 0;
+
+/**
+ * Notes that a browser socket is still receiving and answering.
+ *
+ * Protocol pongs are not sufficient on their own: a token flood can leave the
+ * ping frame queued behind unsent deltas, so the page also sends heartbeats
+ * and every client message counts.
+ *
+ * @param ws - Socket that just produced inbound traffic.
+ * @returns No return value.
+ */
+export function recordActivity(ws: ServerWebSocket<unknown>): void {
+  const health = socketHealth.get(ws);
+  if (!health) return;
+  health.lastInboundAt = Date.now();
+  health.missedPings = 0;
+}
+
+/**
+ * Sends one protocol ping and one small application heartbeat.
+ *
+ * A failed ping is a miss for a later tick to judge. It does not drop the
+ * socket on its own, because backpressure during inference is not a disconnect.
+ *
+ * @param ws - Socket to probe.
+ * @param now - Clock reading for the heartbeat payload.
+ * @returns No return value.
+ */
+function probeSocket(ws: ServerWebSocket<unknown>, now: number): void {
+  try {
+    if (typeof ws.ping !== "function") return;
+    const pingResult = ws.ping();
+    if (typeof pingResult === "number" && pingResult < 0) {
+      return;
+    }
+  } catch {
+    return;
+  }
+  sendPayload(ws, JSON.stringify({ type: "heartbeat", ts: now }));
+}
+
+/**
+ * Closes a socket the browser has stopped answering.
+ *
+ * @param ws - Socket to remove and close.
+ * @param reason - Close reason sent to the browser when the socket still accepts it.
+ * @returns No return value.
+ */
+function dropSocket(ws: ServerWebSocket<unknown>, reason: string): void {
+  connections.delete(ws);
+  socketHealth.delete(ws);
+  stopHeartbeatIfEmpty();
+  try {
+    ws.close(1001, reason);
+  } catch {
+    // Connection already dead
+  }
+}
 
 /**
  * Starts the periodic heartbeat loop used to detect stale WebSocket clients.
@@ -25,29 +102,36 @@ let pingInterval: ReturnType<typeof setInterval> | null = null;
  */
 function startHeartbeat(): void {
   if (pingInterval) return;
+  lastHeartbeatTickAt = Date.now();
   pingInterval = setInterval(() => {
     const now = Date.now();
+    const sinceLastTick = lastHeartbeatTickAt === 0 ? 0 : now - lastHeartbeatTickAt;
+    const stalled = sinceLastTick > WS_STALE_THRESHOLD_MS;
+    lastHeartbeatTickAt = now;
     for (const ws of Array.from(connections)) {
-      const lastPong = lastPongTimes.get(ws) ?? now;
-      if (now - lastPong > STALE_THRESHOLD_MS) {
-        logWarn("[wsHub] Closing stale WebSocket (no pong received)");
-        connections.delete(ws);
-        stopHeartbeatIfEmpty();
-        try {
-          ws.close(1001, "Heartbeat timeout");
-        } catch (_e) {
-          // Connection already dead
-        }
+      const health = socketHealth.get(ws);
+      if (!health) continue;
+      if (stalled) {
+        // The event loop was busy (a menu fetch, a long synchronous stretch).
+        // The browser did not get a fair chance to answer the previous ping.
+        health.missedPings = 0;
+        probeSocket(ws, now);
         continue;
       }
-      try {
-        ws.ping();
-      } catch (_e) {
-        connections.delete(ws);
-        stopHeartbeatIfEmpty();
+      if (now - health.lastInboundAt <= WS_STALE_THRESHOLD_MS) {
+        health.missedPings = 0;
+        probeSocket(ws, now);
+        continue;
       }
+      health.missedPings += 1;
+      if (health.missedPings >= MISSED_PINGS_TO_CLOSE) {
+        logWarn("[wsHub] Closing stale WebSocket (no pong received)");
+        dropSocket(ws, "Heartbeat timeout");
+        continue;
+      }
+      probeSocket(ws, now);
     }
-  }, PING_INTERVAL_MS);
+  }, WS_PING_INTERVAL_MS);
 }
 
 /**
@@ -59,6 +143,7 @@ function stopHeartbeatIfEmpty(): void {
   if (connections.size === 0 && pingInterval) {
     clearInterval(pingInterval);
     pingInterval = null;
+    lastHeartbeatTickAt = 0;
   }
 }
 
@@ -74,7 +159,7 @@ export function addConnection(ws: ServerWebSocket<unknown>): void {
   for (const log of logBuffer) {
     sendPayload(ws, JSON.stringify(log));
   }
-  lastPongTimes.set(ws, Date.now());
+  socketHealth.set(ws, { lastInboundAt: Date.now(), missedPings: 0 });
   startHeartbeat();
 }
 
@@ -86,6 +171,7 @@ export function addConnection(ws: ServerWebSocket<unknown>): void {
  */
 export function removeConnection(ws: ServerWebSocket<unknown>): void {
   connections.delete(ws);
+  socketHealth.delete(ws);
   stopHeartbeatIfEmpty();
 }
 
@@ -96,7 +182,31 @@ export function removeConnection(ws: ServerWebSocket<unknown>): void {
  * @returns No return value.
  */
 export function recordPong(ws: ServerWebSocket<unknown>): void {
-  lastPongTimes.set(ws, Date.now());
+  recordActivity(ws);
+}
+
+/**
+ * Closes every registered browser socket.
+ *
+ * Used when the process itself is going away so the page observes a close
+ * frame instead of a half-open connection that keeps the composer in a
+ * generating state.
+ *
+ * @param code - WebSocket close code.
+ * @param reason - Short close reason.
+ * @returns No return value.
+ */
+export function closeAllConnections(code = 1001, reason = "Server shutting down"): void {
+  for (const ws of Array.from(connections)) {
+    connections.delete(ws);
+    socketHealth.delete(ws);
+    try {
+      ws.close(code, reason);
+    } catch {
+      // Connection already dead
+    }
+  }
+  stopHeartbeatIfEmpty();
 }
 
 /**
@@ -119,19 +229,14 @@ function sendPayload(ws: ServerWebSocket<unknown>, data: string): boolean {
   try {
     const result = ws.send(data);
     if (typeof result === "number" && result < 0) {
-      connections.delete(ws);
-      stopHeartbeatIfEmpty();
-      try {
-        ws.close(1013, "Backpressure");
-      } catch {
-        // Connection already dead
-      }
+      // The browser is behind (a large render, an open menu, a token flood).
+      // Drop this frame and keep the socket. Closing here used to kill a live
+      // generation and then the reconnect path painted the rest of it anyway.
       return false;
     }
     return true;
   } catch (err) {
-    connections.delete(ws);
-    stopHeartbeatIfEmpty();
+    dropSocket(ws, "Send failed");
     logWarn("Failed to send frame to websocket, removing connection:", err);
     return false;
   }

@@ -6,12 +6,14 @@
  * and starts the HTTP + WebSocket server.
  */
 import { serve } from "bun";
-import { loadModel, unloadModel } from "./llamaServer";
-import { logError, logInfo } from "./logger";
+import { killActiveModelProcessSync, loadModel, unloadModel } from "./llamaServer";
+import { logError, logInfo, logStatus } from "./logger";
 import { scanModels } from "./modelScanner";
 import { initDb, resetDb } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
 import { createRouter } from "./router";
+import { closeAllConnections } from "./wsHub";
+import { installWindowsConsoleCloseHandler } from "./windowsLifetime";
 
 /**
  * Resolves the Bun server listen port from persisted settings.
@@ -88,7 +90,7 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
   const port = resolveServerPort(settings);
   const hostname = "127.0.0.1";
 
-  logInfo(`Starting LlamaForge Server on http://${hostname}:${port} (Prod: ${isProd})`);
+  logStatus(`Starting LlamaForge Server on http://${hostname}:${port} (Prod: ${isProd})`);
 
   const router = createRouter();
 
@@ -145,6 +147,35 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
 
   let shutdownInProgress = false;
   /**
+   * Kills llama-server, closes browser sockets, and exits without waiting.
+   *
+   * Closing the terminal on Windows does not raise SIGINT. This path runs from
+   * that console notification and from stdin closing with the window, so a
+   * generation cannot keep streaming into a page whose server "already exited".
+   *
+   * @returns No return value.
+   */
+  const forceExit = () => {
+    if (shutdownInProgress) return;
+    shutdownInProgress = true;
+    try {
+      killActiveModelProcessSync();
+    } catch (e) {
+      logError("Failed to kill llama-server during forced shutdown:", e);
+    }
+    try {
+      closeAllConnections(1001, "Server shutting down");
+    } catch (e) {
+      logError("Failed to close WebSocket clients during forced shutdown:", e);
+    }
+    try {
+      server.stop(true);
+    } catch (e) {
+      logError("Failed to stop the HTTP server during forced shutdown:", e);
+    }
+    process.exit(0);
+  };
+  /**
    * Shuts down the Bun server, active llama-server process, and database cleanly.
    *
    * @returns No return value.
@@ -160,11 +191,20 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
         logError("Failed to unload model during shutdown:", e);
       }
       try {
+        closeAllConnections(1001, "Server shutting down");
+      } catch (e) {
+        logError("Failed to close WebSocket clients during shutdown:", e);
+      }
+      try {
         resetDb();
       } catch (e) {
         logError("Failed to close database during shutdown:", e);
       }
-      server.stop();
+      try {
+        server.stop(true);
+      } catch (e) {
+        logError("Failed to stop the HTTP server during shutdown:", e);
+      }
       process.exit(0);
     })();
   };
@@ -172,6 +212,18 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
   process.on("SIGHUP", cleanup);
+  if (process.platform === "win32") {
+    process.on("SIGBREAK", cleanup);
+  }
+
+  if (import.meta.main) {
+    installWindowsConsoleCloseHandler(forceExit);
+    if (process.platform === "win32" && process.stdin.isTTY) {
+      process.stdin.resume();
+      process.stdin.on("end", forceExit);
+      process.stdin.on("close", forceExit);
+    }
+  }
 
   return server;
 }

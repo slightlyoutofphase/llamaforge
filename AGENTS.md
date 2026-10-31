@@ -1,5 +1,5 @@
 # STRICTLY PROHIBITED:
-- ANY use of PowerShell scripts WHATSOEVER for tasks that specifically could more easily be accomplished via the specific native Agent tools that are available to you here in the specific context of the Cursor IDE environment.
+- ANY use of PowerShell scripts WHATSOEVER for tasks that specifically COULD more easily be accomplished via the specific native Agent tools that are available to you here in the specific context of the Cursor IDE environment. Other use of Powershell is acceptable if actually necessary.
 - Stub code, placeholder code, todos, simplifications, and any other kind of deficient code.
 - Using any Git command whatsoever without explicit user permission (which you may directly request from them if necessary)
 # REMEMBER:
@@ -10,7 +10,7 @@
 - All code requires proper TypeDoc documentation.
 - Always run `npm run lint` after completing large batches of code changes.
 # ULTIMATE SOURCES OF TRUTH:
-The complete latest documentation for the llama-server CLI executable itself are in the `llama-server-docs.md` file which can be found in the top-level workspace directory. Additionally, the hyperlinks listed below are all relevant.
+The complete latest documentation for the llama-server CLI executable itself are in the `./llama-server-docs.md` file which can be found in the top-level workspace directory. Additionally, the hyperlinks listed below are all relevant.
 Gemma 4 prompt formatting docs:
 https://ai.google.dev/gemma/docs/core/prompt-formatting-gemma4
 Gemma 4 vision docs:

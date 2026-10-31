@@ -429,11 +429,9 @@ describe("multimodal", () => {
     const res = await buildContentParts("Watch this", attachments, metadata);
     expect(Array.isArray(res)).toBe(true);
     const parts = res as any[];
-    expect(parts[0].type).toBe("input_video");
-    expect(parts[0].input_video.url).toBe("file://attachments/video.mp4");
-    expect(parts[1].type).toBe("input_audio");
-    expect(parts[1].input_audio.url).toBe("file://attachments/video.extracted-audio.wav");
-    expect(parts[2].type).toBe("text");
+    expect(parts.map((part) => part.type)).toEqual(["input_audio", "input_video", "text"]);
+    expect(parts[0].input_audio.url).toBe("file://attachments/video.extracted-audio.wav");
+    expect(parts[1].input_video.url).toBe("file://attachments/video.mp4");
     expect(parts[2].text).toBe("Watch this");
   });
 
@@ -495,8 +493,8 @@ describe("multimodal", () => {
     );
     expect(resolved).toBe(1);
     expect((second as any[]).map((part) => part.type)).toEqual([
-      "input_video",
       "input_audio",
+      "input_video",
       "text",
     ]);
     expect(
@@ -537,7 +535,7 @@ describe("multimodal", () => {
 
     const res = await buildContentParts("Watch this", attachments, metadata);
     expect(resolved).toBe(0);
-    expect((res as any[]).map((part) => part.type)).toEqual(["input_video", "input_audio", "text"]);
+    expect((res as any[]).map((part) => part.type)).toEqual(["input_audio", "input_video", "text"]);
   });
 
   it("does not send a persisted soundtrack when the global toggle is off", async () => {
@@ -682,6 +680,62 @@ describe("multimodal", () => {
     );
     expect(parts.filter((part) => part.type === "input_video")).toHaveLength(2);
     expect(parts.filter((part) => part.type === "input_audio")).toHaveLength(2);
+    expect(parts.map((part) => part.type)).toEqual([
+      "input_audio",
+      "input_audio",
+      "input_video",
+      "input_video",
+      "text",
+    ]);
+    expect(parts[0].input_audio.url).toContain("one.extracted-audio.wav");
+    expect(parts[1].input_audio.url).toContain("two.mp4.extracted-audio.wav");
+  });
+
+  it("puts autoextracted audio before earlier images and a manual audio clip", async () => {
+    await saveSettings({ includeVideoAudio: true });
+    __setResolveVideoAudioSidecar(async () =>
+      path.join(getAppDataDir(), "attachments", "video.extracted-audio.wav"),
+    );
+    const attachments = [
+      {
+        id: "voice",
+        messageId: "2",
+        mimeType: "audio/wav",
+        fileName: "voice.wav",
+        filePath: "attachments/voice.wav",
+        createdAt: 0,
+      },
+      {
+        id: "pic",
+        messageId: "2",
+        mimeType: "image/jpeg",
+        fileName: "pic.jpg",
+        filePath: "attachments/pic.jpg",
+        createdAt: 1,
+      },
+      {
+        id: "vid",
+        messageId: "2",
+        mimeType: "video/mp4",
+        fileName: "video.mp4",
+        filePath: "attachments/video.mp4",
+        createdAt: 2,
+      },
+    ] as any;
+    const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
+
+    const parts = (await buildContentParts("what is this", attachments, metadata)) as any[];
+    expect(parts.map((part) => part.type)).toEqual([
+      "input_audio",
+      "input_audio",
+      "image_url",
+      "input_video",
+      "text",
+    ]);
+    expect(parts[0].input_audio.url).toBe("file://attachments/video.extracted-audio.wav");
+    expect(parts[1].input_audio.url).toBe("file://attachments/voice.wav");
+    expect(parts[2].image_url.url).toBe("file://attachments/pic.jpg");
+    expect(parts[3].input_video.url).toBe("file://attachments/video.mp4");
   });
 
   afterAll(() => {

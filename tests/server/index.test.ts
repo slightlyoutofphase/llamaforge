@@ -125,6 +125,39 @@ describe("server index startup", () => {
     server.stop();
   });
 
+  it("prints the listen address when the log level is off", async () => {
+    loggerModule.setSilent(false);
+    loggerModule.setConfiguredLogLevel("off");
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+
+    try {
+      spyOn(dbModule, "initDb").mockResolvedValue();
+      spyOn(settingsRepoModule, "loadSettings").mockResolvedValue({
+        ...productionSettings,
+        logLevel: "off",
+      });
+      spyOn(modelScannerModule, "scanModels").mockResolvedValue([]);
+      spyOn(modelScannerModule, "populateMetadata").mockImplementation(
+        async (model: ModelEntry) => model,
+      );
+      spyOn(presetRepoModule, "ensureModelDefaultPresets").mockResolvedValue();
+      spyOn(cleanupModule, "cleanupOrphanedAttachments").mockResolvedValue();
+      spyOn(llamaServerModule, "loadModel").mockResolvedValue(12000);
+      spyOn(loggerModule, "logError").mockImplementation(() => {});
+
+      const server = await startServer({ scheduleRecurringCleanup: false });
+      const printed = logSpy.mock.calls.map((call) => call.map((part) => String(part)).join(" "));
+
+      expect(printed.some((line) => line.includes("http://127.0.0.1:14001"))).toBe(true);
+      expect(printed.some((line) => line.includes("Synchronous model metadata"))).toBe(false);
+      server.stop();
+    } finally {
+      logSpy.mockRestore();
+      loggerModule.setSilent(Bun.env.NODE_ENV === "test");
+      loggerModule.setConfiguredLogLevel("info");
+    }
+  });
+
   it("survives a fatal scanModels error and still starts the server", async () => {
     spyOn(dbModule, "initDb").mockResolvedValue();
     spyOn(settingsRepoModule, "loadSettings").mockResolvedValue(productionSettings);
