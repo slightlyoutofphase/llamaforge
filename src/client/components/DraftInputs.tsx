@@ -108,12 +108,101 @@ export function parseToolArguments(raw: string): DraftParseResult<string> {
 /**
  * Reports whether an editor draft differs from the saved preset.
  *
+ * `createdAt` and `updatedAt` are ignored. The server stamps a new
+ * `updatedAt` on every successful save, and that stamp is not an unsaved edit.
+ * Key order is ignored so a refetched row matches the draft that was sent.
+ * Numbers are compared to six decimal places so float32 sampling values match
+ * the slider position the editor shows.
+ *
  * @param draft - Current editor state.
- * @param saved - Preset loaded from the server.
- * @returns `true` when the serialized values differ.
+ * @param saved - Preset loaded from the server, or the payload last sent.
+ * @returns `true` when the editable values differ.
  */
 export function presetDraftIsDirty(draft: unknown, saved: unknown): boolean {
-  return JSON.stringify(draft) !== JSON.stringify(saved);
+  if (draft == null || saved == null) return false;
+  return (
+    JSON.stringify(canonicalizePresetDraft(draft)) !==
+    JSON.stringify(canonicalizePresetDraft(saved))
+  );
+}
+
+/**
+ * Copies a preset into editor state without sharing nested config.
+ *
+ * @param preset - Preset to copy.
+ * @returns A shallow copy, with `config` copied when it is an object.
+ */
+export function clonePresetDraft<T>(preset: T): T {
+  if (!preset || typeof preset !== "object") return preset;
+  const record = preset as T & { config?: object };
+  if (record.config && typeof record.config === "object") {
+    return { ...record, config: { ...record.config } };
+  }
+  return { ...record };
+}
+
+/**
+ * Chooses the editor draft after the preset list refreshes.
+ *
+ * A save records the payload that was sent. When that draft is still on screen
+ * and the server row matches it, the editor adopts the server row so the new
+ * timestamp does not look like an unsaved edit. A change made after the save
+ * click is left in place.
+ *
+ * @param previous - Draft currently on screen.
+ * @param incoming - Preset row from the latest server list.
+ * @param pendingSavedJson - JSON of the payload sent by the in-flight save.
+ * @returns The draft the editor should show.
+ */
+export function resolvePresetEditorState<T extends { id?: string }>(
+  previous: T | null,
+  incoming: T,
+  pendingSavedJson: { current: string | null },
+): T {
+  if (!previous || previous.id !== incoming.id) {
+    pendingSavedJson.current = null;
+    return clonePresetDraft(incoming);
+  }
+  const pending = pendingSavedJson.current;
+  if (pending === null) return previous;
+  let sent: unknown;
+  try {
+    sent = JSON.parse(pending) as unknown;
+  } catch {
+    pendingSavedJson.current = null;
+    return previous;
+  }
+  if (!presetDraftIsDirty(previous, sent) && !presetDraftIsDirty(incoming, sent)) {
+    pendingSavedJson.current = null;
+    return clonePresetDraft(incoming);
+  }
+  return previous;
+}
+
+/**
+ * Builds a stable JSON-ready value for a preset draft comparison.
+ *
+ * @param value - Draft, saved preset, or nested field.
+ * @returns A key-sorted copy without timestamps or `undefined` fields.
+ */
+function canonicalizePresetDraft(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((entry) => canonicalizePresetDraft(entry));
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return value;
+    // GGUF sampling metadata is float32. A stored 0.1 can come back as
+    // 0.10000000149011612, which a slider then snaps to 0.1.
+    return Math.round(value * 1_000_000) / 1_000_000;
+  }
+  if (!value || typeof value !== "object") return value;
+  const source = value as Record<string, unknown>;
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(source).sort()) {
+    if (key === "createdAt" || key === "updatedAt") continue;
+    const child = source[key];
+    if (child === undefined) continue;
+    sorted[key] = canonicalizePresetDraft(child);
+  }
+  return sorted;
 }
 
 /**

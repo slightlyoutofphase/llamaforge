@@ -8,7 +8,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import type { SystemPromptPreset } from "../../../shared/types";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   allocateUniqueName,
   duplicatePresetName,
@@ -21,7 +21,12 @@ import {
   useUpdateChat,
   useUpdateSystemPreset,
 } from "../../queries";
-import { confirmDiscardUnsaved, PresetSaveStatus, presetDraftIsDirty } from "../DraftInputs";
+import {
+  confirmDiscardUnsaved,
+  PresetSaveStatus,
+  presetDraftIsDirty,
+  resolvePresetEditorState,
+} from "../DraftInputs";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
 import { useResolvedTheme } from "../../useResolvedTheme";
@@ -52,13 +57,15 @@ export function SystemPresetEditor() {
   const [localState, setLocalState] = useState<Partial<SystemPromptPreset> | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState(false);
+  const pendingSavedJson = useRef<string | null>(null);
 
   useEffect(() => {
     if (!activePreset) {
+      pendingSavedJson.current = null;
       setLocalState(null);
       return;
     }
-    setLocalState((prev) => (prev?.id === activePreset.id ? prev : activePreset));
+    setLocalState((prev) => resolvePresetEditorState(prev, activePreset, pendingSavedJson));
   }, [activePreset]);
 
   /**
@@ -120,6 +127,7 @@ export function SystemPresetEditor() {
     );
     const next = { ...localState, name };
     setLocalState(next);
+    pendingSavedJson.current = JSON.stringify(next);
     updateMut.mutate(
       { id: localState.id, updates: next },
       {

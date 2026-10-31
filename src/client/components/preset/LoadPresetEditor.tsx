@@ -8,7 +8,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import CodeMirror from "@uiw/react-codemirror";
 import { ChevronDown, ChevronRight, Copy, Plus, Save, Trash2, X, Zap } from "lucide-react";
 import type React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   clampVideoFps,
   createDefaultLoadConfig,
@@ -52,6 +52,7 @@ import {
   parseTensorSplit,
   PresetSaveStatus,
   presetDraftIsDirty,
+  resolvePresetEditorState,
 } from "../DraftInputs";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
@@ -282,12 +283,11 @@ export function LoadPresetEditor() {
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState(false);
   const [fieldValid, setFieldValid] = useState(true);
+  const pendingSavedJson = useRef<string | null>(null);
 
   useEffect(() => {
     if (!activePreset) return;
-    setLocalState((prev) =>
-      prev?.id === activePreset.id ? prev : { ...activePreset, config: { ...activePreset.config } },
-    );
+    setLocalState((prev) => resolvePresetEditorState(prev, activePreset, pendingSavedJson));
   }, [activePreset]);
 
   useEffect(() => {
@@ -396,13 +396,14 @@ export function LoadPresetEditor() {
       localState.name ?? "",
       (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
     );
-    const next = { ...localState, name };
-    setLocalState(next);
     const preserveThinking = templateCapabilities?.hasPreserveThinking
-      ? (next.preserveThinking ?? templateCapabilities.preserveThinkingDefault ?? false)
+      ? (localState.preserveThinking ?? templateCapabilities.preserveThinkingDefault ?? false)
       : false;
+    const next = { ...localState, name, preserveThinking };
+    setLocalState(next);
+    pendingSavedJson.current = JSON.stringify(next);
     updateMut.mutate(
-      { id: localState.id, updates: { ...next, preserveThinking } },
+      { id: localState.id, updates: next },
       {
         onSuccess: () => {
           setSaveError(false);

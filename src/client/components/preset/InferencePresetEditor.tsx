@@ -6,7 +6,7 @@
 import { json } from "@codemirror/lang-json";
 import CodeMirror from "@uiw/react-codemirror";
 import { Copy, Plus, Save, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createDefaultInferenceSampling } from "../../../shared/defaults";
 import {
   allocateUniqueName,
@@ -33,6 +33,7 @@ import {
   parseStopStrings,
   PresetSaveStatus,
   presetDraftIsDirty,
+  resolvePresetEditorState,
 } from "../DraftInputs";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
@@ -41,6 +42,54 @@ import { useResolvedTheme } from "../../useResolvedTheme";
 type CatalogTool = ToolDefinition & {
   source?: AvailableTool["source"];
 };
+
+/** Slider steps in the inference editor. Values are snapped before they are saved. */
+const INFERENCE_SLIDER_STEPS: Partial<Record<keyof InferencePreset, number>> = {
+  temperature: 0.05,
+  topP: 0.05,
+  minP: 0.01,
+  topK: 1,
+  typicalP: 0.05,
+  repeatPenalty: 0.05,
+  presencePenalty: 0.1,
+  frequencyPenalty: 0.1,
+  dryMultiplier: 0.1,
+  xtcProbability: 0.05,
+  xtcThreshold: 0.01,
+};
+
+/**
+ * Moves one sampling value onto its slider step.
+ *
+ * GGUF metadata stores these as float32. The raw value is not a valid position
+ * for the range input, so the browser rewrites it and the draft looks unsaved.
+ *
+ * @param value - Stored sampling value.
+ * @param step - Slider step for that field.
+ * @returns The nearest step, without binary residue.
+ */
+function snapSliderValue(value: number, step: number): number {
+  const snapped = Math.round(value / step) * step;
+  const decimals = (step.toString().split(".")[1] ?? "").length;
+  return Number(snapped.toFixed(decimals));
+}
+
+/**
+ * Snaps inference slider fields onto the steps the editor can actually display.
+ *
+ * @param preset - Draft about to be shown or saved.
+ * @returns A copy with slider fields quantized.
+ */
+function snapInferenceSliders<T extends Partial<InferencePreset>>(preset: T): T {
+  const next: T = { ...preset };
+  for (const [key, step] of Object.entries(INFERENCE_SLIDER_STEPS)) {
+    if (!step) continue;
+    const current = next[key as keyof T];
+    if (typeof current !== "number" || !Number.isFinite(current)) continue;
+    (next as Record<string, unknown>)[key] = snapSliderValue(current, step);
+  }
+  return next;
+}
 
 /**
  * Merges the live tool catalog with tools already stored on the inference preset.
@@ -100,10 +149,13 @@ export function InferencePresetEditor() {
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState(false);
   const [fieldValid, setFieldValid] = useState(true);
+  const pendingSavedJson = useRef<string | null>(null);
 
   useEffect(() => {
     if (!activePreset) return;
-    setLocalState((prev) => (prev?.id === activePreset.id ? prev : activePreset));
+    setLocalState((prev) =>
+      resolvePresetEditorState(prev, snapInferenceSliders(activePreset), pendingSavedJson),
+    );
   }, [activePreset]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: reset the schema editor when switching presets, not on every local keystroke
@@ -177,8 +229,9 @@ export function InferencePresetEditor() {
       localState.name ?? "",
       (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
     );
-    const next = { ...localState, name };
+    const next = snapInferenceSliders({ ...localState, name });
     setLocalState(next);
+    pendingSavedJson.current = JSON.stringify(next);
     updateMut.mutate(
       { id: localState.id, updates: next },
       {

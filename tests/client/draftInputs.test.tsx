@@ -13,6 +13,8 @@ import {
   parseStopStrings,
   parseTensorSplit,
   parseToolArguments,
+  presetDraftIsDirty,
+  resolvePresetEditorState,
 } from "../../src/client/components/DraftInputs";
 
 describe("draft field parsers", () => {
@@ -37,6 +39,49 @@ describe("draft field parsers", () => {
     expect(parseToolArguments('{"expression":"2+2"}').ok).toBe(true);
     expect(parseToolArguments("[").ok).toBe(false);
     expect(parseToolArguments("[]").ok).toBe(false);
+  });
+
+  it("does not treat a fresh server timestamp as an unsaved edit", () => {
+    const draft = {
+      id: "p1",
+      name: "LFM3",
+      updatedAt: 1,
+      config: { gpuLayers: -1, contextSize: 32768 },
+    };
+    const saved = {
+      config: { contextSize: 32768, gpuLayers: -1 },
+      name: "LFM3",
+      id: "p1",
+      updatedAt: 99,
+      createdAt: 1,
+    };
+    expect(presetDraftIsDirty(draft, saved)).toBe(false);
+    expect(
+      presetDraftIsDirty(draft, { ...saved, config: { gpuLayers: 10, contextSize: 32768 } }),
+    ).toBe(true);
+    expect(
+      presetDraftIsDirty(
+        { ...draft, temperature: 0.1, repeatPenalty: 1.1 },
+        { ...draft, temperature: 0.10000000149011612, repeatPenalty: 1.100000023841858 },
+      ),
+    ).toBe(false);
+    expect(presetDraftIsDirty({ temperature: 0.1 }, { temperature: 0.15 })).toBe(true);
+  });
+
+  it("adopts the saved server row and keeps a newer local edit", () => {
+    const sent = { id: "p1", name: "LFM3", updatedAt: 1, config: { gpuLayers: -1 } };
+    const pending = { current: JSON.stringify(sent) };
+    const fromServer = { ...sent, updatedAt: 50, config: { gpuLayers: -1 } };
+    expect(resolvePresetEditorState(sent, fromServer, pending)).toEqual({
+      ...fromServer,
+      config: { gpuLayers: -1 },
+    });
+    expect(pending.current).toBeNull();
+
+    const edited = { ...sent, config: { gpuLayers: 12 } };
+    const stillPending = { current: JSON.stringify(sent) };
+    expect(resolvePresetEditorState(edited, fromServer, stillPending)).toBe(edited);
+    expect(stillPending.current).toBe(JSON.stringify(sent));
   });
 });
 
