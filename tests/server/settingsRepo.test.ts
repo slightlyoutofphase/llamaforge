@@ -46,6 +46,12 @@ describe("settingsRepo", () => {
     );
   });
 
+  it("persists a disabled generation inactivity timeout", async () => {
+    await saveSettings({ requestTimeoutSeconds: 0 });
+    const saved = await loadSettings();
+    expect(saved.requestTimeoutSeconds).toBe(0);
+  });
+
   it("rejects inverted llama port ranges", async () => {
     await expect(
       saveSettings({

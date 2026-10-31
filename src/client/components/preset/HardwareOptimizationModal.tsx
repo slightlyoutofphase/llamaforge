@@ -33,7 +33,7 @@ export function HardwareOptimizationModal({
   onApply,
   modelPath,
 }: HardwareOptimizationModalProps) {
-  const { hardware: hardwareInfo } = useAppStore();
+  const hardwareInfo = useAppStore((state) => state.hardware);
   const optimizeMut = useOptimizeHardware();
   const { mutate } = optimizeMut;
   const [optimizedConfig, setOptimizedConfig] = useState<Partial<ModelLoadConfig> | null>(null);

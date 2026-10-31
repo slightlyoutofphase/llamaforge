@@ -43,6 +43,43 @@ describe("promptCache", () => {
     expect(stats).toEqual({ totalEvaluated: 25, totalCached: 15 });
   });
 
+  it("reads chat-completions cache_n and prompt_n", () => {
+    updatePromptCacheStats("chat-cache-n", {
+      predicted_ms: 661,
+      predicted_n: 35,
+      predicted_per_second: 52,
+      predicted_per_token_ms: 18,
+      prompt_ms: 31,
+      prompt_n: 1,
+      prompt_per_second: 32,
+      prompt_per_token_ms: 31,
+      cache_n: 236,
+    });
+
+    expect(getPromptCacheStats("chat-cache-n")).toEqual({
+      totalEvaluated: 237,
+      totalCached: 236,
+    });
+  });
+
+  it("does not store NaN when cache fields are missing", () => {
+    updatePromptCacheStats("chat-missing", {
+      predicted_ms: 1,
+      predicted_n: 1,
+      predicted_per_second: 1,
+      predicted_per_token_ms: 1,
+      prompt_ms: 1,
+      prompt_n: 4,
+      prompt_per_second: 1,
+      prompt_per_token_ms: 1,
+    });
+
+    const stats = getPromptCacheStats("chat-missing");
+    expect(stats).toEqual({ totalEvaluated: 4, totalCached: 0 });
+    expect(Number.isFinite(stats?.totalEvaluated)).toBe(true);
+    expect(Number.isFinite(stats?.totalCached)).toBe(true);
+  });
+
   it("returns undefined for unknown chat session", () => {
     expect(getPromptCacheStats("unknown")).toBeUndefined();
   });

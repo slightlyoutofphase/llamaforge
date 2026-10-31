@@ -133,6 +133,35 @@ describe("MessageBubble Component", () => {
     // Markdown transforms "**Bold text**" into strong
     expect(container.querySelector("strong")?.textContent).toBe("Bold text");
     expect(container.querySelector("em")?.textContent).toBe("italic");
+    expect(container.querySelector(".prose")?.className).not.toContain("prose-invert");
+  });
+
+  it("keeps user line breaks and does not interpret markdown", () => {
+    const msg: ChatMessage = {
+      id: "u-plain",
+      chatId: "c1",
+      role: "user",
+      content: "line one\nline two\n**not bold**",
+      rawContent: "line one\nline two\n**not bold**",
+      position: 1,
+      createdAt: 1,
+    };
+
+    render(
+      <MessageBubble
+        message={msg}
+        onEdit={() => {}}
+        onBranch={() => {}}
+        onRegenerate={() => {}}
+        onContinue={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+
+    const plain = screen.getByTestId("user-message-text");
+    expect(plain.className).toContain("whitespace-pre-wrap");
+    expect(plain.textContent).toBe("line one\nline two\n**not bold**");
+    expect(plain.querySelector("strong")).toBeNull();
   });
 
   it("renders thinking content when present", () => {
@@ -606,6 +635,38 @@ describe("MessageBubble Component", () => {
       "Language: English (implied by the content).",
     ]);
     expect(trace.querySelectorAll("p")).toHaveLength(4);
+  });
+
+  it("collapses a thinking trace after streaming finishes", () => {
+    const msg: ChatMessage = {
+      id: "a-think-live",
+      chatId: "c1",
+      role: "assistant",
+      content: "",
+      rawContent: "",
+      thinkingContent: "Working it out",
+      position: 11,
+      createdAt: 11,
+    };
+    const props = {
+      message: msg,
+      isStreaming: true,
+      onEdit: () => {},
+      onBranch: () => {},
+      onRegenerate: () => {},
+      onContinue: () => {},
+      onDelete: () => {},
+    };
+    const view = render(<MessageBubble {...props} />);
+    expect(within(view.container).getByTestId("thinking-trace")).toBeTruthy();
+    view.rerender(
+      <MessageBubble
+        {...props}
+        isStreaming={false}
+        message={{ ...msg, content: "Done", rawContent: "Done" }}
+      />,
+    );
+    expect(within(view.container).queryByTestId("thinking-trace")).toBeNull();
   });
 
   it("keeps markdown headings inside thinking traces compact instead of pre-wrapped", () => {

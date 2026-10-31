@@ -10,6 +10,7 @@ import { inferencePresetsForModel } from "@shared/presetScope.js";
 import { chatTemplateSupportsToolCalling } from "@shared/templateCapabilities.js";
 import { parseToolCallsJson } from "@shared/toolCalls.js";
 import type { ChatMessage } from "@shared/types.js";
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
   Check,
@@ -23,7 +24,7 @@ import {
   Terminal,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { request } from "../../http";
+import { request, responseErrorMessage } from "../../http";
 import { logError } from "../../logger";
 import {
   useBranchChat,
@@ -185,6 +186,36 @@ function ToolResultInline({ message }: { message: ChatMessage }) {
   );
 }
 
+const assistantToolCallCache = new Map<
+  string,
+  { raw: string | undefined; parsed: ReturnType<typeof parseToolCallsJson> }
+>();
+
+/**
+ * Parses assistant tool calls once per message until `toolCallsJson` changes.
+ *
+ * Streaming tokens replace the message object without changing tool-call JSON,
+ * so the chat view must not parse every row again on each token.
+ *
+ * @param messageId - Assistant message id.
+ * @param toolCallsJson - Raw tool-call JSON stored on that message.
+ * @returns Parsed tool calls, or `null` when the message has none.
+ */
+function cachedAssistantToolCalls(
+  messageId: string,
+  toolCallsJson: string | undefined,
+): ReturnType<typeof parseToolCallsJson> {
+  const cached = assistantToolCallCache.get(messageId);
+  if (cached && cached.raw === toolCallsJson) return cached.parsed;
+  const parsed = parseToolCallsJson(toolCallsJson);
+  assistantToolCallCache.set(messageId, { raw: toolCallsJson, parsed });
+  if (assistantToolCallCache.size > 2000) {
+    const oldest = assistantToolCallCache.keys().next().value;
+    if (oldest) assistantToolCallCache.delete(oldest);
+  }
+  return parsed;
+}
+
 /**
  * Main chat view container.
  * Handles scrolling, branching logic, regeneration, and preset switching chips.
@@ -192,6 +223,7 @@ function ToolResultInline({ message }: { message: ChatMessage }) {
  * @returns React functional component.
  */
 export function ChatView() {
+  const queryClient = useQueryClient();
   const { chatId } = useParams({ from: "/chat/$chatId" });
   const messages = useAppStore((s) => s.messages);
   const isGenerating = useAppStore((s) => s.isGenerating);
@@ -228,6 +260,7 @@ export function ChatView() {
   const { setRightPanelView } = useUiStore();
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const pinnedScrollChatIdRef = useRef<string | null>(null);
   const [isAutoScroll, setIsAutoScroll] = useState(true);
   const [showInfSwitch, setShowInfSwitch] = useState(false);
   const [showSysSwitch, setShowSysSwitch] = useState(false);
@@ -306,21 +339,31 @@ export function ChatView() {
     : "Standard";
   const activeSysPreset = sysPresets?.find((p) => p.id === currentChatMetadata?.systemPresetId);
   const bubbleStyle = settings?.chatBubbleStyle ?? "bubble";
+  const parsedAssistantToolCalls = useMemo(() => {
+    const parsed = new Map<string, ReturnType<typeof parseToolCallsJson>>();
+    for (const message of messages) {
+      if (message.role !== "assistant") continue;
+      parsed.set(message.id, cachedAssistantToolCalls(message.id, message.toolCallsJson));
+    }
+    return parsed;
+  }, [messages]);
 
   useEffect(() => {
     // S12 fix: only load if we have a real target chat ID from the route.
     // If we're on a virtual path or the home page, don't try to load anything from the server.
+    // Depend on the route id only. loadChat clears currentChatId while the request is in
+    // flight, and including that value here would fetch the same chat twice.
     if (!chatId || chatId === "default" || chatId === "default-chat") {
-      if (currentChatId) {
+      if (useAppStore.getState().currentChatId) {
         unloadChat();
       }
       return;
     }
 
-    if (chatId !== currentChatId) {
+    if (useAppStore.getState().currentChatId !== chatId) {
       loadChat(chatId);
     }
-  }, [chatId, currentChatId, loadChat, unloadChat]);
+  }, [chatId, loadChat, unloadChat]);
 
   useEffect(() => {
     if (
@@ -374,6 +417,44 @@ export function ChatView() {
   };
 
   const lastScrollTimeRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (!currentChatId) {
+      pinnedScrollChatIdRef.current = null;
+      return;
+    }
+    if (messages.length === 0 || pinnedScrollChatIdRef.current === currentChatId) return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    pinnedScrollChatIdRef.current = currentChatId;
+    requestAnimationFrame(() => {
+      if (pinnedScrollChatIdRef.current !== currentChatId) return;
+      const node = scrollContainerRef.current;
+      if (!node) return;
+      node.style.scrollBehavior = "auto";
+      node.scrollTop = node.scrollHeight;
+      node.style.scrollBehavior = "";
+    });
+  }, [currentChatId, messages.length]);
+
+  /**
+   * Loads older messages without jumping the viewport back to the top.
+   *
+   * @returns A promise that resolves after the scroll position has been restored.
+   */
+  const handleLoadOlder = async () => {
+    const container = scrollContainerRef.current;
+    const previousHeight = container?.scrollHeight ?? 0;
+    const previousTop = container?.scrollTop ?? 0;
+    await loadMoreMessages();
+    requestAnimationFrame(() => {
+      const node = scrollContainerRef.current;
+      if (!node) return;
+      node.style.scrollBehavior = "auto";
+      node.scrollTop = node.scrollHeight - previousHeight + previousTop;
+      node.style.scrollBehavior = "";
+    });
+  };
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Only scroll if isGenerating and isAutoScroll
   useEffect(() => {
@@ -440,7 +521,9 @@ export function ChatView() {
             const res = await request(`/api/chats/${currentChatId}/regenerate`, {
               method: "POST",
             });
-            if (!res.ok) throw new Error("Regeneration failed");
+            if (!res.ok) {
+              throw new Error(await responseErrorMessage(res, "Regeneration failed"));
+            }
           } else {
             const res = await request(`/api/chats/${currentChatId}/branch-and-edit`, {
               method: "POST",
@@ -457,6 +540,7 @@ export function ChatView() {
             const newChatId = data?.id;
             if (!newChatId) throw new Error("Response missing chat id.");
 
+            void queryClient.invalidateQueries({ queryKey: ["chats"] });
             navigate({ to: "/chat/$chatId", params: { chatId: newChatId } });
           }
         } else {
@@ -483,7 +567,7 @@ export function ChatView() {
         throw e;
       }
     },
-    [navigate, updateMessageMutation],
+    [navigate, queryClient, updateMessageMutation],
   );
 
   const handleBranch = useCallback(
@@ -532,15 +616,13 @@ export function ChatView() {
             body: JSON.stringify({ messageId: id }),
           });
           if (!res.ok) {
-            const errorBody = await res.text().catch(() => "");
-            throw new Error(
-              `Branch and Regenerate failed: ${res.status}${errorBody ? `: ${errorBody}` : ""}`,
-            );
+            throw new Error(await responseErrorMessage(res, "Branch and Regenerate failed"));
           }
           const data = await res.json();
           const newChatId = data?.id;
           if (!newChatId) throw new Error("Response missing chat id.");
 
+          void queryClient.invalidateQueries({ queryKey: ["chats"] });
           navigate({ to: "/chat/$chatId", params: { chatId: newChatId } });
         } else {
           const kept = messagesKeptForInPlaceRegenerate(messages, id);
@@ -568,7 +650,7 @@ export function ChatView() {
         );
       }
     },
-    [navigate, regenerateMutation],
+    [navigate, queryClient, regenerateMutation],
   );
 
   const handleContinue = useCallback(
@@ -592,15 +674,13 @@ export function ChatView() {
             body: JSON.stringify({ messageId: id }),
           });
           if (!res.ok) {
-            const errorBody = await res.text().catch(() => "");
-            throw new Error(
-              `Branch and Continue failed: ${res.status}${errorBody ? `: ${errorBody}` : ""}`,
-            );
+            throw new Error(await responseErrorMessage(res, "Branch and Continue failed"));
           }
           const data = await res.json();
           const newChatId = data?.id;
           if (!newChatId) throw new Error("Response missing chat id.");
 
+          void queryClient.invalidateQueries({ queryKey: ["chats"] });
           navigate({ to: "/chat/$chatId", params: { chatId: newChatId } });
         } else {
           acceptInboundGeneration();
@@ -618,7 +698,7 @@ export function ChatView() {
         );
       }
     },
-    [continueMutation, navigate],
+    [continueMutation, navigate, queryClient],
   );
 
   const handleDelete = useCallback(async (id: string) => {
@@ -946,7 +1026,7 @@ export function ChatView() {
               <div className="flex justify-center py-4">
                 <button
                   type="button"
-                  onClick={loadMoreMessages}
+                  onClick={() => void handleLoadOlder()}
                   className="px-4 py-2 text-xs font-semibold rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-[var(--color-text-secondary)] hover:bg-[var(--color-accent)] hover:text-white hover:border-[var(--color-accent)] transition-colors">
                   Load {Math.min(500, totalMessages - messages.length)} older messages
                   <span className="ml-2 text-[var(--color-text-muted)]">
@@ -960,7 +1040,7 @@ export function ChatView() {
               .filter((msg) => msg.role !== "tool")
               .map((msg, i, arr) => {
                 const parsedToolCalls =
-                  msg.role === "assistant" ? parseToolCallsJson(msg.toolCallsJson) : null;
+                  msg.role === "assistant" ? (parsedAssistantToolCalls.get(msg.id) ?? null) : null;
                 const toolResults =
                   parsedToolCalls
                     ?.map((tc) => toolResultsByCallId.get(tc.id))

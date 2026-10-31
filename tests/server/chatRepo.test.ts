@@ -445,5 +445,25 @@ describe("chatRepo", () => {
     expect(md).toContain("# MD Export");
     expect(md).toContain("### USER");
     expect(md).toContain("item 1");
+
+    await addMessage({
+      id: "exp3",
+      chatId: chat.id,
+      role: "assistant",
+      content: "Done",
+      rawContent: "Done",
+      position: 1,
+      createdAt: Date.now(),
+      toolCallsJson: JSON.stringify([
+        {
+          id: "call_1",
+          type: "function",
+          function: { name: "echo", arguments: "{}" },
+        },
+      ]),
+    });
+    const withTools = await exportChat(chat.id, "markdown");
+    expect(withTools).toContain("*Tool Calls:*\n\n```json");
+    expect(withTools).not.toContain("*Tool Calls:* ```json");
   });
 });

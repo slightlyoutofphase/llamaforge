@@ -5,6 +5,7 @@
 
 import { Check, ChevronDown, ChevronUp, Edit, Play, Terminal, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { parseToolArguments } from "../DraftInputs";
 import { useAppStore } from "../../store";
 
 /**
@@ -53,6 +54,7 @@ export function ToolCard({ messageId, toolCall, onApprove, onReject }: ToolCardP
   const [isEditing, setIsEditing] = useState(false);
   const [showResult, setShowResult] = useState(false);
   const [args, setArgs] = useState(toolCall.function.arguments);
+  const [argsError, setArgsError] = useState<string | null>(null);
   const sourceArgs = toolCall.function.arguments;
 
   useEffect(() => {
@@ -127,7 +129,10 @@ export function ToolCard({ messageId, toolCall, onApprove, onReject }: ToolCardP
               data-testid="tool-args-editor"
               aria-label="Edit tool arguments"
               value={args}
-              onChange={(e) => setArgs(e.target.value)}
+              onChange={(e) => {
+                setArgs(e.target.value);
+                setArgsError(null);
+              }}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-accent)] rounded-xl p-3 font-mono text-xs min-h-[100px] outline-none shadow-inner"
             />
           ) : (
@@ -140,33 +145,48 @@ export function ToolCard({ messageId, toolCall, onApprove, onReject }: ToolCardP
         </div>
 
         {canAct && (
-          <div className="flex gap-2">
-            {isEditing ? (
-              <button
-                type="button"
-                onClick={cancelEditing}
-                className="flex-1 py-2 text-xs font-bold border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-bg)] transition-colors">
-                Cancel Edit
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={() => onReject(toolCall.id)}
-                className="flex-1 py-2 text-xs font-bold border border-red-500/30 text-red-500 rounded-xl hover:bg-red-500/5 transition-colors flex items-center justify-center gap-2">
-                <X size={14} /> REJECT
-              </button>
-            )}
+          <>
+            {argsError ? (
+              <p className="text-xs text-[var(--color-error)]" role="alert">
+                {argsError}
+              </p>
+            ) : null}
+            <div className="flex gap-2">
+              {isEditing ? (
+                <button
+                  type="button"
+                  onClick={cancelEditing}
+                  className="flex-1 py-2 text-xs font-bold border border-[var(--color-border)] rounded-xl hover:bg-[var(--color-bg)] transition-colors">
+                  Cancel Edit
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onReject(toolCall.id)}
+                  className="flex-1 py-2 text-xs font-bold border border-red-500/30 text-red-500 rounded-xl hover:bg-red-500/5 transition-colors flex items-center justify-center gap-2">
+                  <X size={14} /> REJECT
+                </button>
+              )}
 
-            <button
-              type="button"
-              onClick={() => {
-                setIsEditing(false);
-                onApprove(toolCall.id, args);
-              }}
-              className="flex-1 py-2 bg-[var(--color-accent)] text-white rounded-xl shadow-lg shadow-[var(--color-accent)]/20 hover:shadow-[var(--color-accent)]/30 transition-all font-bold text-xs flex items-center justify-center gap-2">
-              <Play size={14} /> {isEditing ? "SAVE & EXECUTE" : "APPROVE"}
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (isEditing) {
+                    const parsed = parseToolArguments(args);
+                    if (!parsed.ok) {
+                      setArgsError(parsed.message);
+                      return;
+                    }
+                  }
+                  setArgsError(null);
+                  setIsEditing(false);
+                  onApprove(toolCall.id, args);
+                }}
+                className="flex-1 py-2 bg-[var(--color-accent)] text-white rounded-xl shadow-lg shadow-[var(--color-accent)]/20 hover:shadow-[var(--color-accent)]/30 transition-all font-bold text-xs flex items-center justify-center gap-2">
+                <Play size={14} /> {isEditing ? "SAVE & EXECUTE" : "APPROVE"}
+              </button>
+            </div>
+          </>
         )}
 
         {isExecuted && (

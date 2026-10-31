@@ -4,6 +4,7 @@
  */
 
 import { Loader2 } from "lucide-react";
+import { useState } from "react";
 import { useAppStore } from "../store";
 
 /**
@@ -16,6 +17,8 @@ export function ModelLoadOverlay() {
   const loadProgress = useAppStore((s) => s.loadProgress);
   const loadProgressPhase = useAppStore((s) => s.loadProgressPhase);
   const loadProgressDetail = useAppStore((s) => s.loadProgressDetail);
+  const unloadModel = useAppStore((s) => s.unloadModel);
+  const [cancelling, setCancelling] = useState(false);
 
   if (serverStatus !== "loading") {
     return null;
@@ -69,6 +72,19 @@ export function ModelLoadOverlay() {
               <span className="font-mono truncate">
                 {loadProgressDetail || "Starting model load sequence…"}
               </span>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                data-testid="cancel-model-load"
+                disabled={cancelling}
+                onClick={() => {
+                  setCancelling(true);
+                  void unloadModel().finally(() => setCancelling(false));
+                }}
+                className="rounded-xl border border-white/20 px-3 py-1.5 text-sm text-white hover:bg-white/10 disabled:opacity-50">
+                {cancelling ? "Cancelling…" : "Cancel load"}
+              </button>
             </div>
           </div>
         </div>

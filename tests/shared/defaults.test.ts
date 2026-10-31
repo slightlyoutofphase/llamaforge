@@ -9,6 +9,7 @@ import {
   createDefaultInferenceSampling,
   createDefaultLoadConfig,
   DEFAULT_APP_SETTINGS,
+  seededLoadContextSize,
   isDraftSpecType,
   isSpecializedDraftSpecType,
   resolveSpecDraftModelPath,
@@ -21,6 +22,16 @@ describe("shared defaults", () => {
 
   it("disables sending extracted video audio by default", () => {
     expect(DEFAULT_APP_SETTINGS.includeVideoAudio).toBe(false);
+  });
+
+  it("caps auto-created load presets below a model's native context", () => {
+    expect(seededLoadContextSize(131072)).toBe(8192);
+    expect(seededLoadContextSize(1_000_000)).toBe(8192);
+    expect(seededLoadContextSize(2048)).toBe(2048);
+    expect(seededLoadContextSize(8192)).toBe(8192);
+    expect(seededLoadContextSize(undefined)).toBe(4096);
+    expect(seededLoadContextSize(0)).toBe(4096);
+    expect(seededLoadContextSize(Number.NaN)).toBe(4096);
   });
 
   it("builds a complete load config matching the load-preset editor", () => {

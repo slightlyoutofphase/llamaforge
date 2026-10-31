@@ -4,7 +4,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { __setAutonameStartDelayMs, triggerAutoname } from "../../src/server/autoname";
+import {
+  __setAutonameStartDelayMs,
+  cleanAutonameTitle,
+  triggerAutoname,
+} from "../../src/server/autoname";
 import { getActiveGenerations } from "../../src/server/generationRegistry";
 import * as llamaServer from "../../src/server/llamaServer";
 import { addMessage, createChat, getChat } from "../../src/server/persistence/chatRepo";
@@ -21,6 +25,12 @@ describe("autoname", () => {
   afterEach(() => {
     __setAutonameStartDelayMs(2000);
     resetDb();
+  });
+
+  it("strips a title label without requiring a second space", () => {
+    expect(cleanAutonameTitle("Title: Recipe notes")).toBe("Recipe notes");
+    expect(cleanAutonameTitle("Summary of cakes")).toBe("cakes");
+    expect(cleanAutonameTitle("Python array sorting")).toBe("Python array sorting");
   });
 
   it("ignores invalid or short chats", async () => {

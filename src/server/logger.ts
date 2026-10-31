@@ -3,6 +3,7 @@
  * Centralized backend logging helpers with WebSocket broadcasting and runtime log-level filtering.
  */
 
+import { formatLogArgument } from "../shared/logFormat";
 import type { AppSettings } from "../shared/types";
 import { getActiveGenerationChatIds } from "./generationRegistry";
 import { broadcastLog } from "./wsHub";
@@ -74,7 +75,7 @@ export function shouldEmitLog(level: EmittedLogLevel): boolean {
  */
 function formatArgs(args: unknown[]): string {
   if (args.length === 0) return "";
-  return ` ${args.map((arg) => (typeof arg === "object" ? JSON.stringify(arg) : String(arg))).join(" ")}`;
+  return ` ${args.map((arg) => formatLogArgument(arg)).join(" ")}`;
 }
 
 /**

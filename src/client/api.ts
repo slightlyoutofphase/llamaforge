@@ -11,7 +11,7 @@ import type {
   LoadPreset,
   SystemPromptPreset,
 } from "../shared/types";
-import { request } from "./http";
+import { request, responseErrorMessage } from "./http";
 
 /**
  * Fetches all available model load presets from the backend.
@@ -217,7 +217,7 @@ export async function updateChat(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
   });
-  if (!res.ok) throw new Error("Failed to update chat");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to update chat"));
 }
 
 /**
@@ -293,7 +293,7 @@ export async function branchChat(id: string, messageId: string): Promise<{ id: s
  */
 export async function regenerateChat(id: string): Promise<{ messageId: string }> {
   const res = await request(`/api/chats/${id}/regenerate`, { method: "POST" });
-  if (!res.ok) throw new Error("Failed to regenerate chat");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to regenerate chat"));
   return res.json();
 }
 
@@ -305,7 +305,7 @@ export async function regenerateChat(id: string): Promise<{ messageId: string }>
  */
 export async function continueChat(id: string): Promise<{ messageId: string }> {
   const res = await request(`/api/chats/${id}/continue`, { method: "POST" });
-  if (!res.ok) throw new Error("Failed to continue chat");
+  if (!res.ok) throw new Error(await responseErrorMessage(res, "Failed to continue chat"));
   return res.json();
 }
 

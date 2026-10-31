@@ -51,6 +51,20 @@ function ggufFlagEnabled(value: unknown): boolean {
 }
 
 /**
+ * Reads a GGUF boolean when the key is present.
+ *
+ * An explicit `false` must stay false. Callers use `undefined` to mean the key
+ * was absent and a filename or architecture fallback is allowed.
+ *
+ * @param value - Raw metadata value for the flag.
+ * @returns The flag, or `undefined` when the key is missing.
+ */
+function readOptionalGgufFlag(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  return ggufFlagEnabled(value);
+}
+
+/**
  * Parses a GGUF file and extracts display metadata.
  *
  * @param fileAbsolutePath - The absolute path to the local GGUF file.
@@ -71,15 +85,12 @@ export async function parseGgufMetadata(fileAbsolutePath: string): Promise<GgufD
   const blockCount = metadata?.[`${arch}.block_count`];
   const ffLen = metadata?.[`${arch}.feed_forward_length`];
 
+  const explicitVision = readOptionalGgufFlag(metadata?.["clip.has_vision_encoder"]);
+  const explicitAudio = readOptionalGgufFlag(metadata?.["clip.has_audio_encoder"]);
+  const projectorType = String(metadata?.["clip.projector_type"] ?? "").toLowerCase();
   const hasVision =
-    ggufFlagEnabled(metadata?.["clip.has_vision_encoder"]) ||
-    arch === "clip" ||
-    metadata?.["clip.projector_type"] !== undefined;
-  const hasAudio =
-    ggufFlagEnabled(metadata?.["clip.has_audio_encoder"]) ||
-    String(metadata?.["clip.projector_type"] ?? "")
-      .toLowerCase()
-      .includes("audio");
+    explicitVision ?? (arch === "clip" || metadata?.["clip.projector_type"] !== undefined);
+  const hasAudio = explicitAudio ?? projectorType.includes("audio");
 
   const chatTemplate =
     typeof metadata?.["tokenizer.chat_template"] === "string"

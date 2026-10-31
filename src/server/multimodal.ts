@@ -119,6 +119,146 @@ function rememberAttachmentText(
 }
 
 /**
+ * Reads the major brand and compatible brands from an ISO BMFF `ftyp` box.
+ *
+ * @param bytes - File prefix that begins with a box size and `ftyp`.
+ * @returns Brand strings, including the trailing space on brands such as `M4A `.
+ */
+function isoBmffBrands(bytes: Uint8Array): string[] {
+  if (bytes.length < 12) return [];
+  if (bytes[4] !== 0x66 || bytes[5] !== 0x74 || bytes[6] !== 0x79 || bytes[7] !== 0x70) {
+    return [];
+  }
+  const brands = [
+    String.fromCharCode(bytes[8] ?? 0, bytes[9] ?? 0, bytes[10] ?? 0, bytes[11] ?? 0),
+  ];
+  const declaredSize =
+    ((bytes[0] ?? 0) << 24) | ((bytes[1] ?? 0) << 16) | ((bytes[2] ?? 0) << 8) | (bytes[3] ?? 0);
+  const boxEnd = declaredSize >= 16 ? Math.min(bytes.length, declaredSize) : bytes.length;
+  for (let offset = 16; offset + 4 <= boxEnd; offset += 4) {
+    brands.push(
+      String.fromCharCode(
+        bytes[offset] ?? 0,
+        bytes[offset + 1] ?? 0,
+        bytes[offset + 2] ?? 0,
+        bytes[offset + 3] ?? 0,
+      ),
+    );
+  }
+  return brands;
+}
+
+/**
+ * Maps an ISO BMFF `ftyp` brand list to an image, audio, or video MIME type.
+ *
+ * @param bytes - File prefix containing the `ftyp` box.
+ * @returns A specific MIME type, or `undefined` when the prefix is not `ftyp`.
+ */
+function mimeFromFtyp(bytes: Uint8Array): string | undefined {
+  const brands = isoBmffBrands(bytes).map((brand) => brand.trim().toLowerCase());
+  if (brands.length === 0) return undefined;
+  if (brands.some((brand) => brand === "avif" || brand === "avis")) return "image/avif";
+  if (
+    brands.some((brand) => ["heic", "heix", "hevc", "hevx", "heif", "mif1", "msf1"].includes(brand))
+  ) {
+    return "image/heic";
+  }
+  if (brands.some((brand) => brand === "m4a" || brand === "m4b" || brand === "m4p")) {
+    return "audio/mp4";
+  }
+  return "video/mp4";
+}
+
+/**
+ * Reports whether a buffer is text that can be embedded in a prompt.
+ *
+ * NUL bytes and invalid UTF-8 are treated as binary so zip and office files
+ * are not decoded into replacement characters.
+ *
+ * @param bytes - Full file contents.
+ * @returns `true` when the buffer is empty or valid UTF-8 without NUL bytes.
+ */
+/**
+ * Reads a stored attachment as bytes, including from test doubles that only
+ * implement `arrayBuffer` or `text`.
+ *
+ * @param filePath - Absolute path of the stored file.
+ * @returns The file contents.
+ */
+async function readStoredFileBytes(filePath: string): Promise<Uint8Array> {
+  const file = Bun.file(filePath) as Blob & {
+    bytes?: () => Promise<Uint8Array>;
+    arrayBuffer: () => Promise<ArrayBuffer>;
+    text: () => Promise<string>;
+  };
+  if (typeof file.bytes === "function") return file.bytes();
+  try {
+    return new Uint8Array(await file.arrayBuffer());
+  } catch {
+    return new TextEncoder().encode(await file.text());
+  }
+}
+
+function isUtf8Text(bytes: Uint8Array): boolean {
+  if (bytes.includes(0)) return false;
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+interface PdfTextDocument {
+  numPages: number;
+  getPage: (pageNumber: number) => Promise<{
+    getTextContent: () => Promise<{ items: readonly { str?: string }[] }>;
+  }>;
+  destroy?: (() => void | Promise<void>) | undefined;
+}
+
+/**
+ * Extracts text from a PDF and always releases the pdf.js document.
+ *
+ * @param data - PDF bytes.
+ * @returns Concatenated page text.
+ */
+async function extractPdfText(data: Uint8Array): Promise<string> {
+  const pdfjs = await import("pdfjs-dist");
+  const doc = (await pdfjs.getDocument({ data }).promise) as PdfTextDocument;
+  try {
+    let fullText = "";
+    for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
+      const page = await doc.getPage(pageNumber);
+      const content = await page.getTextContent();
+      fullText += `${content.items
+        .map((item) => (typeof item.str === "string" ? item.str : ""))
+        .join(" ")}\n`;
+    }
+    return fullText;
+  } finally {
+    await releasePdfDocument(doc);
+  }
+}
+
+/**
+ * Releases a pdf.js document after text extraction.
+ *
+ * @param doc - Document returned by `getDocument`, which may not expose `destroy` in tests.
+ * @returns A promise that resolves once cleanup finishes or is skipped.
+ */
+async function releasePdfDocument(doc: {
+  destroy?: (() => void | Promise<void>) | undefined;
+}): Promise<void> {
+  if (typeof doc.destroy !== "function") return;
+  try {
+    await doc.destroy();
+  } catch (err: unknown) {
+    logWarn("PDF document cleanup failed", err);
+  }
+}
+
+/**
  * Infers a MIME type from magic bytes, falling back to the client-supplied type.
  *
  * @param bytes - File prefix used for signature detection.
@@ -155,15 +295,8 @@ function detectMimeFromMagic(bytes: Uint8Array, fallback: string): string {
       if (brand === "WEBP") return "image/webp";
       if (brand === "WAVE") return "audio/wav";
     }
-    if (
-      bytes.length >= 8 &&
-      bytes[4] === 0x66 &&
-      bytes[5] === 0x74 &&
-      bytes[6] === 0x79 &&
-      bytes[7] === 0x70
-    ) {
-      return "video/mp4";
-    }
+    const ftypMime = mimeFromFtyp(bytes);
+    if (ftypMime) return ftypMime;
     if (bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
       return "video/webm";
     }
@@ -281,6 +414,7 @@ function assignExtractedText(attachment: ProcessedAttachment, extractedText: str
   attachment.extractedText = clamped.text;
   attachment.extractedTextOriginalLength = clamped.originalLength;
   attachment.extractedTextWasTruncated = clamped.truncated;
+  attachment.textTruncated = clamped.truncated;
 }
 
 /**
@@ -410,17 +544,7 @@ export async function processUpload(
       );
     } else {
       try {
-        const pdfjs = await import("pdfjs-dist");
-        const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise;
-        let fullText = "";
-        for (let i = 1; i <= doc.numPages; i++) {
-          const page = await doc.getPage(i);
-          const content = await page.getTextContent();
-          fullText += `${content.items
-            .map((item) => ("str" in item && typeof item.str === "string" ? item.str : ""))
-            .join(" ")}\n`;
-        }
-        assignExtractedText(attachment, fullText);
+        assignExtractedText(attachment, await extractPdfText(new Uint8Array(buffer)));
       } catch (e) {
         logWarn("PDF extraction failed", e);
         assignExtractedText(
@@ -434,8 +558,14 @@ export async function processUpload(
     !mimeType.startsWith("audio/") &&
     !mimeType.startsWith("video/")
   ) {
-    // text, markdown, csv, json, xml, code...
-    assignExtractedText(attachment, new TextDecoder("utf-8").decode(buffer));
+    if (isUtf8Text(bytes)) {
+      assignExtractedText(attachment, new TextDecoder("utf-8").decode(buffer));
+    } else {
+      logWarn(`[multimodal] Skipping text extraction for non-UTF-8 file: ${fileName}`);
+      if (!mimeType || mimeType === "application/octet-stream" || mimeType.startsWith("text/")) {
+        attachment.mimeType = "application/octet-stream";
+      }
+    }
   }
 
   // NOTE: We no longer store base64Data in the attachment object permanently to save RAM.
@@ -443,7 +573,7 @@ export async function processUpload(
 
   // Save to DB
   const stmt = getDb().prepare(
-    "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at, text_truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   );
   stmt.run(
     attachment.id,
@@ -453,6 +583,7 @@ export async function processUpload(
     attachment.fileName,
     attachment.virBudget || null,
     attachment.createdAt,
+    attachment.textTruncated ? 1 : 0,
   );
 
   return attachment;
@@ -682,19 +813,8 @@ export async function buildContentParts(
         // stat failed — let the downstream read attempt fail
       }
       try {
-        const pdfjs = await import("pdfjs-dist");
         const buffer = await Bun.file(absPath).arrayBuffer();
-        const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer) }).promise;
-        let fullText = "";
-        for (let i = 1; i <= doc.numPages; i++) {
-          const page = await doc.getPage(i);
-          const content = await page.getTextContent();
-          fullText += `${content.items
-            .map((item) => ("str" in item && typeof item.str === "string" ? item.str : ""))
-            .join(" ")}\n`;
-        }
-        const clamped = clampExtractedText(fullText);
-        // S8 fix: store in cache with LRU eviction
+        const clamped = clampExtractedText(await extractPdfText(new Uint8Array(buffer)));
         rememberAttachmentText(absPath, clamped);
         return clamped;
       } catch (e) {
@@ -713,7 +833,9 @@ export async function buildContentParts(
       const cached = _attachmentTextCache.get(absPath);
       if (cached !== undefined) return cached;
       try {
-        const extracted = clampExtractedText(await Bun.file(absPath).text());
+        const bytes = await readStoredFileBytes(absPath);
+        if (!isUtf8Text(bytes)) return undefined;
+        const extracted = clampExtractedText(new TextDecoder("utf-8").decode(bytes));
         return rememberAttachmentText(absPath, extracted);
       } catch (e) {
         logWarn(`Failed reading attachment file: ${attachment.filePath}`, e);

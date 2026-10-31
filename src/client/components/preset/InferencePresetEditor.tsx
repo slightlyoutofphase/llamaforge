@@ -24,8 +24,19 @@ import {
   useInferencePresets,
   useUpdateInferencePreset,
 } from "../../queries";
+import {
+  confirmDiscardUnsaved,
+  formatStopStrings,
+  NumberDraftInput,
+  ParsedTextDraftInput,
+  parseSequenceBreakers,
+  parseStopStrings,
+  PresetSaveStatus,
+  presetDraftIsDirty,
+} from "../DraftInputs";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
+import { useResolvedTheme } from "../../useResolvedTheme";
 
 type CatalogTool = ToolDefinition & {
   source?: AvailableTool["source"];
@@ -62,6 +73,7 @@ function catalogTools(
  * @returns React functional component.
  */
 export function InferencePresetEditor() {
+  const codeMirrorTheme = useResolvedTheme();
   const { setRightPanelView, activePresetId } = useUiStore();
   const { data: presets } = useInferencePresets();
   const { data: toolsCatalog, isPending: toolsPending, isError: toolsError } = useAvailableTools();
@@ -85,6 +97,9 @@ export function InferencePresetEditor() {
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const [localState, setLocalState] = useState<Partial<InferencePreset> | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState(false);
+  const [fieldValid, setFieldValid] = useState(true);
 
   useEffect(() => {
     if (!activePreset) return;
@@ -153,13 +168,48 @@ export function InferencePresetEditor() {
    */
   const handleSave = () => {
     if (!localState.id) return;
+    if (!fieldValid) {
+      setSaveError(true);
+      setSaveMessage("Fix the highlighted field before saving.");
+      return;
+    }
     const name = allocateUniqueName(
       localState.name ?? "",
       (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
     );
     const next = { ...localState, name };
     setLocalState(next);
-    updateMut.mutate({ id: localState.id, updates: next });
+    updateMut.mutate(
+      { id: localState.id, updates: next },
+      {
+        onSuccess: () => {
+          setSaveError(false);
+          setSaveMessage("Saved.");
+        },
+        onError: (error: unknown) => {
+          setSaveError(true);
+          setSaveMessage(error instanceof Error ? error.message : "Save failed.");
+        },
+      },
+    );
+  };
+
+  /**
+   * Leaves the current preset after confirming when the draft has unsaved edits.
+   *
+   * @param nextId - Preset id to open, or `null` to close the editor.
+   * @returns No return value.
+   */
+  const requestPresetChange = (nextId: string | null) => {
+    if (!confirmDiscardUnsaved(presetDraftIsDirty(localState, activePreset) || !fieldValid)) {
+      return;
+    }
+    setSaveMessage(null);
+    if (nextId === null) {
+      setRightPanelView("settings");
+      return;
+    }
+    setRightPanelView("inferencePreset", nextId);
   };
 
   /**
@@ -225,7 +275,17 @@ export function InferencePresetEditor() {
    */
   const handleDelete = () => {
     if (!localState.id || localState.isDefault) return;
-    deleteMut.mutate(localState.id);
+    if (!window.confirm(`Delete preset "${localState.name || "this preset"}"?`)) return;
+    deleteMut.mutate(localState.id, {
+      onSuccess: () => {
+        setSaveError(false);
+        setSaveMessage("Deleted.");
+      },
+      onError: (error: unknown) => {
+        setSaveError(true);
+        setSaveMessage(error instanceof Error ? error.message : "Delete failed.");
+      },
+    });
     setRightPanelView("inferencePreset", presets?.find((p) => p.id !== localState.id)?.id);
   };
 
@@ -240,7 +300,7 @@ export function InferencePresetEditor() {
             <select
               aria-label="Inference preset"
               value={activePreset?.id || ""}
-              onChange={(e) => setRightPanelView("inferencePreset", e.target.value)}
+              onChange={(e) => requestPresetChange(e.target.value)}
               className="text-xs bg-transparent border-none text-[var(--color-text-muted)] outline-none focus:text-[var(--color-text-primary)] w-full">
               {listedPresets.map((p) => (
                 <option key={p.id} value={p.id} className="bg-[var(--color-surface)]">
@@ -275,7 +335,7 @@ export function InferencePresetEditor() {
             )}
             <button
               type="button"
-              onClick={() => setRightPanelView("settings")}
+              onClick={() => requestPresetChange(null)}
               className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
               <X size={18} />
             </button>
@@ -553,12 +613,12 @@ export function InferencePresetEditor() {
                 <label htmlFor="dryAllowedLength" className="text-sm font-medium">
                   Allowed Len
                 </label>
-                <input
+                <NumberDraftInput
                   id="dryAllowedLength"
-                  type="number"
-                  step="1"
+                  integer
+                  min={0}
                   value={localState.dryAllowedLength ?? 2}
-                  onChange={(e) => updateField("dryAllowedLength", parseInt(e.target.value, 10))}
+                  onCommit={(value) => updateField("dryAllowedLength", value ?? 2)}
                   className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs"
                 />
               </div>
@@ -568,13 +628,12 @@ export function InferencePresetEditor() {
               <label htmlFor="dryPenaltyLastN" className="text-sm font-medium">
                 Penalty Last N
               </label>
-              <input
+              <NumberDraftInput
                 id="dryPenaltyLastN"
-                type="number"
-                step="1"
-                min="0"
+                integer
+                min={0}
                 value={localState.dryPenaltyLastN ?? 64}
-                onChange={(e) => updateField("dryPenaltyLastN", parseInt(e.target.value, 10))}
+                onCommit={(value) => updateField("dryPenaltyLastN", value ?? 64)}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs"
               />
             </div>
@@ -583,20 +642,14 @@ export function InferencePresetEditor() {
               <label htmlFor="drySequenceBreakers" className="text-sm font-medium">
                 Sequence Breakers (JSON array)
               </label>
-              <input
+              <ParsedTextDraftInput
                 id="drySequenceBreakers"
-                type="text"
-                value={JSON.stringify(localState.drySequenceBreakers ?? ["\n", ":", '"', "*"])}
-                onChange={(e) => {
-                  try {
-                    const parsed = JSON.parse(e.target.value);
-                    if (Array.isArray(parsed)) {
-                      updateField("drySequenceBreakers", parsed);
-                    }
-                  } catch {
-                    // Ignore parsing error while typing
-                  }
-                }}
+                committedText={JSON.stringify(
+                  localState.drySequenceBreakers ?? ["\n", ":", '"', "*"],
+                )}
+                parse={parseSequenceBreakers}
+                onCommit={(value) => updateField("drySequenceBreakers", value)}
+                onValidityChange={setFieldValid}
                 className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded text-xs font-mono"
               />
             </div>
@@ -733,12 +786,12 @@ export function InferencePresetEditor() {
             <label htmlFor="maxTokensInput" className="text-sm font-medium">
               Max Tokens
             </label>
-            <input
+            <NumberDraftInput
               id="maxTokensInput"
-              type="number"
-              min="-1"
+              integer
+              min={-1}
               value={localState.maxTokens ?? -1}
-              onChange={(e) => updateField("maxTokens", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateField("maxTokens", value ?? -1)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md outline-none focus:border-[var(--color-accent)]"
             />
           </div>
@@ -747,11 +800,11 @@ export function InferencePresetEditor() {
             <label htmlFor="seedInput" className="text-sm font-medium">
               Seed (-1 = random)
             </label>
-            <input
+            <NumberDraftInput
               id="seedInput"
-              type="number"
+              integer
               value={localState.seed ?? -1}
-              onChange={(e) => updateField("seed", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateField("seed", value ?? -1)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md outline-none focus:border-[var(--color-accent)]"
             />
           </div>
@@ -760,21 +813,11 @@ export function InferencePresetEditor() {
             <label htmlFor="stopStringsInput" className="text-sm font-medium">
               Stop Strings (comma-separated)
             </label>
-            <input
+            <ParsedTextDraftInput
               id="stopStringsInput"
-              type="text"
-              value={(localState.stopStrings || []).join(", ")}
-              onChange={(e) =>
-                updateField(
-                  "stopStrings",
-                  e.target.value
-                    ? e.target.value
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean)
-                    : [],
-                )
-              }
+              committedText={formatStopStrings(localState.stopStrings)}
+              parse={(raw) => ({ ok: true, value: parseStopStrings(raw) })}
+              onCommit={(value) => updateField("stopStrings", value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] px-3 py-1.5 rounded-md outline-none focus:border-[var(--color-accent)]"
             />
           </div>
@@ -845,7 +888,7 @@ export function InferencePresetEditor() {
               <CodeMirror
                 value={schemaDraft}
                 extensions={[json()]}
-                theme="dark"
+                theme={codeMirrorTheme}
                 onChange={(val) => setSchemaDraft(val)}
                 className="text-xs h-40"
               />
@@ -960,7 +1003,8 @@ export function InferencePresetEditor() {
         </section>
       </div>
 
-      <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] flex space-x-2">
+      <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] flex flex-col gap-2">
+        <PresetSaveStatus message={saveMessage} error={saveError} />
         <button
           type="button"
           onClick={handleSave}

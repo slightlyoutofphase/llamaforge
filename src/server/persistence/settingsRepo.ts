@@ -58,6 +58,23 @@ function normalizePositiveNumber(value: unknown, fallback: number): number {
   return value;
 }
 
+/**
+ * Normalizes a numeric setting that may be zero.
+ *
+ * Zero is a real value for the generation inactivity timeout, where it means
+ * the timer is disabled. Negative, non-finite, and non-numeric values fall back.
+ *
+ * @param value - Raw numeric candidate.
+ * @param fallback - Fallback value used when the candidate is invalid.
+ * @returns A finite number greater than or equal to zero.
+ */
+function normalizeNonNegativeNumber(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return fallback;
+  }
+  return value;
+}
+
 const HEX_ACCENT_COLOR = /^#[0-9A-Fa-f]{6}$/;
 
 /**
@@ -104,7 +121,7 @@ function normalizeSettings(raw: Partial<AppSettings>): AppSettings {
     ),
     llamaPortRangeMin,
     llamaPortRangeMax,
-    requestTimeoutSeconds: normalizePositiveNumber(
+    requestTimeoutSeconds: normalizeNonNegativeNumber(
       raw.requestTimeoutSeconds,
       DEFAULT_SETTINGS.requestTimeoutSeconds,
     ),

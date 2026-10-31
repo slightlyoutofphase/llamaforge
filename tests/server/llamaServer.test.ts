@@ -56,6 +56,8 @@ describe("llamaServer", () => {
 
     expect(args).toContain("--n-gpu-layers");
     expect(args[args.indexOf("--n-gpu-layers") + 1]).toBe("33");
+    const allLayers = buildArgs({ ...config, gpuLayers: -1 }, 12345);
+    expect(allLayers[allLayers.indexOf("--n-gpu-layers") + 1]).toBe("all");
 
     expect(args).toContain("--load-mode");
     expect(args[args.indexOf("--load-mode") + 1]).toBe("mmap+mlock");

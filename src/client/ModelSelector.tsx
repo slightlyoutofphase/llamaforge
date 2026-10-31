@@ -29,7 +29,6 @@ export function ModelSelector() {
   const unloadModel = useAppStore((s) => s.unloadModel);
   const serverStatus = useAppStore((s) => s.serverStatus);
   const loadedModel = useAppStore((s) => s.loadedModel);
-  const messages = useAppStore((s) => s.messages);
   const isGenerating = useAppStore((s) => s.isGenerating);
   const { data: loadPresets } = useLoadPresets();
   const { data: settings } = useSettings();
@@ -108,6 +107,7 @@ export function ModelSelector() {
     const hasVision = !!model.metadata?.hasVisionEncoder;
     const hasAudio = !!model.metadata?.hasAudioEncoder;
 
+    const messages = useAppStore.getState().messages;
     const visionMsgs = messages.filter((m) =>
       m.attachments?.some(
         (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("video/"),

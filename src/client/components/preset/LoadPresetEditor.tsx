@@ -44,8 +44,18 @@ import {
   useLoadPresets,
   useUpdateLoadPreset,
 } from "../../queries";
+import {
+  confirmDiscardUnsaved,
+  formatTensorSplit,
+  NumberDraftInput,
+  ParsedTextDraftInput,
+  parseTensorSplit,
+  PresetSaveStatus,
+  presetDraftIsDirty,
+} from "../DraftInputs";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
+import { useResolvedTheme } from "../../useResolvedTheme";
 import { HardwareOptimizationModal } from "./HardwareOptimizationModal";
 
 function detectThinkingTagOverride(architecture?: string) {
@@ -247,6 +257,7 @@ function Accordion({
  * @returns React functional component.
  */
 export function LoadPresetEditor() {
+  const codeMirrorTheme = useResolvedTheme();
   const { setRightPanelView, activePresetId } = useUiStore();
   const models = useAppStore((s) => s.models);
   const loadedModel = useAppStore((s) => s.loadedModel);
@@ -268,6 +279,9 @@ export function LoadPresetEditor() {
 
   const [localState, setLocalState] = useState<Partial<LoadPreset> | null>(null);
   const [showOptimization, setShowOptimization] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState(false);
+  const [fieldValid, setFieldValid] = useState(true);
 
   useEffect(() => {
     if (!activePreset) return;
@@ -373,6 +387,11 @@ export function LoadPresetEditor() {
    */
   const handleSave = () => {
     if (!localState.id) return;
+    if (!fieldValid) {
+      setSaveError(true);
+      setSaveMessage("Fix the highlighted field before saving.");
+      return;
+    }
     const name = allocateUniqueName(
       localState.name ?? "",
       (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
@@ -382,7 +401,37 @@ export function LoadPresetEditor() {
     const preserveThinking = templateCapabilities?.hasPreserveThinking
       ? (next.preserveThinking ?? templateCapabilities.preserveThinkingDefault ?? false)
       : false;
-    updateMut.mutate({ id: localState.id, updates: { ...next, preserveThinking } });
+    updateMut.mutate(
+      { id: localState.id, updates: { ...next, preserveThinking } },
+      {
+        onSuccess: () => {
+          setSaveError(false);
+          setSaveMessage("Saved.");
+        },
+        onError: (error: unknown) => {
+          setSaveError(true);
+          setSaveMessage(error instanceof Error ? error.message : "Save failed.");
+        },
+      },
+    );
+  };
+
+  /**
+   * Leaves the current load preset after confirming when the draft is dirty.
+   *
+   * @param nextId - Preset id to open, or `null` to close the editor.
+   * @returns No return value.
+   */
+  const requestPresetChange = (nextId: string | null) => {
+    if (!confirmDiscardUnsaved(presetDraftIsDirty(localState, activePreset) || !fieldValid)) {
+      return;
+    }
+    setSaveMessage(null);
+    if (nextId === null) {
+      setRightPanelView("settings");
+      return;
+    }
+    setRightPanelView("loadPreset", nextId);
   };
 
   /**
@@ -451,7 +500,17 @@ export function LoadPresetEditor() {
    */
   const handleDelete = () => {
     if (!localState.id || localState.isReadonly) return;
-    deleteMut.mutate(localState.id);
+    if (!window.confirm(`Delete preset "${localState.name || "this preset"}"?`)) return;
+    deleteMut.mutate(localState.id, {
+      onSuccess: () => {
+        setSaveError(false);
+        setSaveMessage("Deleted.");
+      },
+      onError: (error: unknown) => {
+        setSaveError(true);
+        setSaveMessage(error instanceof Error ? error.message : "Delete failed.");
+      },
+    });
     setRightPanelView("loadPreset", presets?.find((p) => p.id !== localState.id)?.id);
   };
 
@@ -469,7 +528,7 @@ export function LoadPresetEditor() {
             <select
               aria-label="Load preset"
               value={activePreset?.id || ""}
-              onChange={(e) => setRightPanelView("loadPreset", e.target.value)}
+              onChange={(e) => requestPresetChange(e.target.value)}
               className="text-xs bg-transparent border-none text-[var(--color-text-muted)] outline-none focus:text-[var(--color-text-primary)] w-full">
               {listedPresets.map((p) => (
                 <option key={p.id} value={p.id} className="bg-[var(--color-surface)]">
@@ -504,7 +563,7 @@ export function LoadPresetEditor() {
             )}
             <button
               type="button"
-              onClick={() => setRightPanelView("settings")}
+              onClick={() => requestPresetChange(null)}
               className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
               <X size={18} />
             </button>
@@ -607,9 +666,9 @@ export function LoadPresetEditor() {
         <Accordion title="Core Limits" defaultOpen>
           <div className="space-y-1">
             <label htmlFor="gpuLayers" className="text-xs font-medium flex justify-between">
-              <span>GPU Layers (-1 = all)</span>
+              <span>GPU Layers</span>
               <span className="text-[var(--color-text-muted)] font-mono">
-                {config.gpuLayers ?? -1}
+                {(config.gpuLayers ?? -1) < 0 ? "all" : config.gpuLayers}
               </span>
             </label>
             <input
@@ -628,13 +687,12 @@ export function LoadPresetEditor() {
             <label htmlFor="ctxSize" className="text-xs font-medium flex justify-between">
               <span>Context Size (ctx-size)</span>
             </label>
-            <input
+            <NumberDraftInput
               id="ctxSize"
-              type="number"
-              min="512"
-              step="512"
+              integer
+              min={512}
               value={config.contextSize ?? 4096}
-              onChange={(e) => updateConfigField("contextSize", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateConfigField("contextSize", value ?? 4096)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
             />
@@ -702,18 +760,18 @@ export function LoadPresetEditor() {
             <label htmlFor="imageMinTokens" className="text-xs font-medium flex justify-between">
               <span>VIR min tokens (--image-min-tokens)</span>
             </label>
-            <input
+            <NumberDraftInput
               id="imageMinTokens"
-              type="number"
+              integer
               min={1}
               max={config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS}
-              step="1"
               value={config.imageMinTokens ?? DEFAULT_IMAGE_MIN_TOKENS}
-              onChange={(e) => {
-                const parsed = parseInt(e.target.value, 10);
-                if (!Number.isFinite(parsed)) return;
+              onCommit={(value) => {
                 const maxBudget = config.imageMaxTokens ?? DEFAULT_IMAGE_MAX_TOKENS;
-                updateConfigField("imageMinTokens", Math.max(1, Math.min(parsed, maxBudget)));
+                updateConfigField(
+                  "imageMinTokens",
+                  Math.max(1, Math.min(value ?? DEFAULT_IMAGE_MIN_TOKENS, maxBudget)),
+                );
               }}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
@@ -723,18 +781,14 @@ export function LoadPresetEditor() {
             <label htmlFor="videoFps" className="text-xs font-medium flex justify-between">
               <span>Video FPS (--video-fps)</span>
             </label>
-            <input
+            <NumberDraftInput
               id="videoFps"
-              type="number"
               min={MIN_VIDEO_FPS}
               max={MAX_VIDEO_FPS}
-              step="0.1"
               value={config.videoFps ?? DEFAULT_VIDEO_FPS}
-              onChange={(e) => {
-                const parsed = Number.parseFloat(e.target.value);
-                if (!Number.isFinite(parsed)) return;
-                updateConfigField("videoFps", clampVideoFps(parsed));
-              }}
+              onCommit={(value) =>
+                updateConfigField("videoFps", clampVideoFps(value ?? DEFAULT_VIDEO_FPS))
+              }
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
             />
@@ -748,13 +802,12 @@ export function LoadPresetEditor() {
             <label htmlFor="threads" className="text-xs font-medium flex justify-between">
               <span>Threads (-1 = auto)</span>
             </label>
-            <input
+            <NumberDraftInput
               id="threads"
-              type="number"
-              min="-1"
-              step="1"
+              integer
+              min={-1}
               value={config.threads ?? -1}
-              onChange={(e) => updateConfigField("threads", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateConfigField("threads", value ?? -1)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
             />
@@ -763,13 +816,12 @@ export function LoadPresetEditor() {
             <label htmlFor="threadsBatch" className="text-xs font-medium flex justify-between">
               <span>Threads Batch (-1 = auto)</span>
             </label>
-            <input
+            <NumberDraftInput
               id="threadsBatch"
-              type="number"
-              min="-1"
-              step="1"
+              integer
+              min={-1}
               value={config.threadsBatch ?? config.threads ?? -1}
-              onChange={(e) => updateConfigField("threadsBatch", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateConfigField("threadsBatch", value ?? -1)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-2 py-1 outline-none font-mono text-sm"
             />
@@ -781,22 +833,24 @@ export function LoadPresetEditor() {
             <label htmlFor="batchSize" className="font-medium flex justify-between">
               <span>Batch Size</span>
             </label>
-            <input
+            <NumberDraftInput
               id="batchSize"
-              type="number"
+              integer
+              min={1}
               value={config.batchSize ?? 2048}
-              onChange={(e) => updateConfigField("batchSize", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateConfigField("batchSize", value ?? 2048)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
             <label htmlFor="microBatchSize" className="font-medium flex justify-between mt-2">
               <span>Micro Batch Size</span>
             </label>
-            <input
+            <NumberDraftInput
               id="microBatchSize"
-              type="number"
+              integer
+              min={1}
               value={config.microBatchSize ?? 512}
-              onChange={(e) => updateConfigField("microBatchSize", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateConfigField("microBatchSize", value ?? 512)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
@@ -885,11 +939,12 @@ export function LoadPresetEditor() {
             <label htmlFor="cacheReuse" className="block font-medium mt-2">
               Cache Reuse (0 = default)
             </label>
-            <input
+            <NumberDraftInput
               id="cacheReuse"
-              type="number"
+              integer
+              min={0}
               value={config.cacheReuse ?? 0}
-              onChange={(e) => updateConfigField("cacheReuse", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateConfigField("cacheReuse", value ?? 0)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
@@ -897,13 +952,12 @@ export function LoadPresetEditor() {
             <label htmlFor="contextCheckpoints" className="block font-medium mt-2">
               Context Checkpoints
             </label>
-            <input
+            <NumberDraftInput
               id="contextCheckpoints"
-              type="number"
+              integer
+              min={0}
               value={config.contextCheckpoints ?? 32}
-              onChange={(e) =>
-                updateConfigField("contextCheckpoints", parseInt(e.target.value, 10))
-              }
+              onCommit={(value) => updateConfigField("contextCheckpoints", value ?? 32)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
@@ -981,23 +1035,22 @@ export function LoadPresetEditor() {
             <label htmlFor="ropeFreqBase" className="block font-medium mt-2">
               RoPE Freq Base
             </label>
-            <input
+            <NumberDraftInput
               id="ropeFreqBase"
-              type="number"
+              min={0}
               value={config.ropeFreqBase || 0}
-              onChange={(e) => updateConfigField("ropeFreqBase", parseFloat(e.target.value))}
+              onCommit={(value) => updateConfigField("ropeFreqBase", value ?? 0)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
             />
             <label htmlFor="ropeFreqScale" className="block font-medium mt-2">
               RoPE Freq Scale
             </label>
-            <input
+            <NumberDraftInput
               id="ropeFreqScale"
-              type="number"
-              step="0.1"
+              min={0}
               value={config.ropeFreqScale ?? 0}
-              onChange={(e) => updateConfigField("ropeFreqScale", parseFloat(e.target.value))}
+              onCommit={(value) => updateConfigField("ropeFreqScale", value ?? 0)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
             />
@@ -1227,16 +1280,13 @@ export function LoadPresetEditor() {
             <label htmlFor="mainGpu" className="block font-medium mt-2">
               Main GPU
             </label>
-            <input
+            <NumberDraftInput
               id="mainGpu"
-              type="number"
-              value={config.mainGpu ?? ""}
-              onChange={(e) =>
-                updateConfigField(
-                  "mainGpu",
-                  e.target.value ? parseInt(e.target.value, 10) : undefined,
-                )
-              }
+              integer
+              min={0}
+              allowEmpty
+              value={config.mainGpu}
+              onCommit={(value) => updateConfigField("mainGpu", value)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
               placeholder="Default"
@@ -1244,18 +1294,12 @@ export function LoadPresetEditor() {
             <label htmlFor="tensorSplit" className="block font-medium mt-2">
               Tensor Split (comma-separated)
             </label>
-            <input
+            <ParsedTextDraftInput
               id="tensorSplit"
-              type="text"
-              value={config.tensorSplit?.join(",") ?? ""}
-              onChange={(e) =>
-                updateConfigField(
-                  "tensorSplit",
-                  e.target.value
-                    ? e.target.value.split(",").map((n) => parseFloat(n.trim()))
-                    : undefined,
-                )
-              }
+              committedText={formatTensorSplit(config.tensorSplit)}
+              parse={parseTensorSplit}
+              onCommit={(value) => updateConfigField("tensorSplit", value)}
+              onValidityChange={setFieldValid}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] p-1 rounded"
               placeholder="e.g. 3,2"
@@ -1263,22 +1307,23 @@ export function LoadPresetEditor() {
             <label htmlFor="logLevel" className="block font-medium mt-2">
               Log Level
             </label>
-            <input
+            <NumberDraftInput
               id="logLevel"
-              type="number"
+              integer
+              min={0}
               value={config.logLevel ?? 3}
-              onChange={(e) => updateConfigField("logLevel", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateConfigField("logLevel", value ?? 3)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
             <label htmlFor="seedOverride" className="block font-medium mt-2">
               Seed Override (-1 = random)
             </label>
-            <input
+            <NumberDraftInput
               id="seedOverride"
-              type="number"
+              integer
               value={config.seedOverride ?? -1}
-              onChange={(e) => updateConfigField("seedOverride", parseInt(e.target.value, 10))}
+              onCommit={(value) => updateConfigField("seedOverride", value ?? -1)}
               disabled={isReadonly}
               className="w-full bg-[var(--color-bg)] px-2 py-1 border border-[var(--color-border)] rounded"
             />
@@ -1300,7 +1345,7 @@ export function LoadPresetEditor() {
             <CodeMirror
               value={displayTemplate}
               extensions={[markdown()]}
-              theme="dark"
+              theme={codeMirrorTheme}
               readOnly={!!isReadonly}
               onChange={(val) => updatePresetField("chatTemplateOverride", val)}
               className="text-xs"
@@ -1444,7 +1489,8 @@ export function LoadPresetEditor() {
         </Accordion>
       </div>
 
-      <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] flex space-x-2">
+      <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] flex flex-col gap-2">
+        <PresetSaveStatus message={saveMessage} error={saveError} />
         <button
           type="button"
           onClick={handleSave}

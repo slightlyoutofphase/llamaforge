@@ -6,7 +6,7 @@
 
 import { createDefaultInferenceSampling } from "../shared/defaults";
 import { isExtractedVideoAudioAttachment } from "../shared/extractedAudio";
-import { buildMessageMetrics } from "../shared/generationMetrics";
+import { buildMessageMetrics, contextOccupancyTokens } from "../shared/generationMetrics";
 import { resolveInferencePreset } from "../shared/inferencePresetResolve";
 import { parseToolCallsJson, toApiToolCalls } from "../shared/toolCalls";
 import { toStoredToolDefinition } from "../shared/toolModule";
@@ -41,11 +41,11 @@ import {
 import { ContextOverflowError, getTokens, truncateMessages } from "./overflow";
 import { addMessage, getChat, getMetadataForPath, updateChat } from "./persistence/chatRepo";
 import { getDb } from "./persistence/db";
-import { getInferencePresets, getLoadPresets, getSystemPresets } from "./persistence/presetRepo";
+import { getInferencePresets, getSystemPresets } from "./persistence/presetRepo";
 import { loadSettings } from "./persistence/settingsRepo";
 import { updatePromptCacheStats } from "./promptCache";
 import { listAvailableTools } from "./toolRegistry";
-import { cancelPendingApprovals } from "./tools";
+import { cancelPendingApprovals, executeTool, waitForToolApproval } from "./tools";
 import { broadcast } from "./wsHub";
 
 export { getActiveGenerationChatIds } from "./generationRegistry";
@@ -180,7 +180,7 @@ type ChatCompletionRequestBody = {
   tools?: { type: "function"; function: unknown }[];
   response_format?: {
     type: "json_schema";
-    json_schema: Record<string, unknown>;
+    schema: Record<string, unknown>;
   };
   chat_template_kwargs?: {
     enable_thinking: boolean;
@@ -360,6 +360,96 @@ function getToolApprovalFailureMessage(reason?: string): string {
 }
 
 /**
+ * Builds the tool-role payload stored when a call does not run.
+ *
+ * Every assistant `tool_calls` entry needs a matching tool message. A rejection,
+ * cancellation, or timeout still records one so the next request can replay the turn.
+ *
+ * @param reason - Why the call did not execute.
+ * @returns JSON string suitable for a tool message body.
+ */
+function toolDecisionErrorContent(reason?: string): string {
+  switch (reason) {
+    case "timeout":
+      return JSON.stringify({ error: "tool approval timed out" });
+    case "cancelled":
+      return JSON.stringify({ error: "cancelled" });
+    case "disconnected":
+      return JSON.stringify({ error: "disconnected" });
+    case "unloaded":
+      return JSON.stringify({ error: "model unloaded" });
+    default:
+      return JSON.stringify({ error: "rejected by user" });
+  }
+}
+
+/**
+ * Persists a tool result and broadcasts it to the open chat.
+ *
+ * @param chatId - Chat that owns the tool call.
+ * @param toolCallId - Identifier matching the assistant `tool_calls` entry.
+ * @param content - Tool output, or a JSON error when the call did not run.
+ * @returns No return value.
+ */
+async function recordToolResultMessage(
+  chatId: string,
+  toolCallId: string,
+  content: string,
+): Promise<void> {
+  const toolMsg: ChatMessage = {
+    id: Bun.randomUUIDv7(),
+    chatId,
+    role: "tool",
+    content,
+    rawContent: content,
+    position: 0,
+    createdAt: Date.now(),
+    toolCallId,
+  };
+  await addMessage(toolMsg);
+  broadcast({ type: "message", chatId, message: toolMsg });
+}
+
+/**
+ * Runs a tool, but stops waiting if the generation is aborted.
+ *
+ * The tool function itself cannot be cancelled. When the abort wins the race,
+ * the result is ignored and the caller records a cancelled tool message instead
+ * of starting another completion.
+ *
+ * @param name - Tool name to execute.
+ * @param args - JSON argument string.
+ * @param signal - Abort signal for the generation that requested the tool.
+ * @returns The tool's string result, or `null` when the generation was aborted.
+ */
+async function executeToolRespectingAbort(
+  name: string,
+  args: string,
+  signal: AbortSignal,
+): Promise<string | null> {
+  if (signal.aborted) return null;
+  const execution = executeTool(name, args);
+  const aborted = new Promise<null>((resolve) => {
+    if (signal.aborted) {
+      resolve(null);
+      return;
+    }
+    const onAbort = () => resolve(null);
+    signal.addEventListener("abort", onAbort, { once: true });
+    void execution.finally(() => signal.removeEventListener("abort", onAbort));
+  });
+  const outcome = await Promise.race([
+    execution.then((value) => ({ kind: "result" as const, value })),
+    aborted.then(() => ({ kind: "aborted" as const })),
+  ]);
+  if (outcome.kind === "aborted") {
+    void execution.catch(() => {});
+    return null;
+  }
+  return outcome.value;
+}
+
+/**
  * Reads `preserve_thinking` from the load preset that produced the running model.
  *
  * This is a per-request Jinja kwarg, so the saved load preset is consulted on
@@ -370,8 +460,8 @@ function getToolApprovalFailureMessage(reason?: string): string {
  */
 async function resolveLoadedPreserveThinking(presetId: string | undefined): Promise<boolean> {
   if (!presetId) return false;
-  const presets = await getLoadPresets();
-  return Boolean(presets.find((preset) => preset.id === presetId)?.preserveThinking);
+  const { getLoadPresetPreserveThinking } = await import("./persistence/presetRepo");
+  return getLoadPresetPreserveThinking(presetId);
 }
 
 /**
@@ -450,10 +540,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
   if (!isToolRecurse) {
     for (const [id, session] of activeGenerations.entries()) {
       if (session.chatId === chatId) {
-        session.controller.abort();
-        activeGenerations.delete(id);
+        abortSession(id, session, "cancelled");
       }
     }
+    // A pending tool approval can outlive the generation map entry. A new
+    // send must resolve it so the old turn cannot continue after the user moved on.
+    cancelPendingApprovals(chatId, "cancelled");
   }
 
   const server = getServerStatus();
@@ -640,7 +732,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     infPreset?.structuredOutput?.enabled && infPreset.structuredOutput.schema
       ? {
           type: "json_schema" as const,
-          json_schema: infPreset.structuredOutput.schema,
+          schema: infPreset.structuredOutput.schema,
         }
       : undefined;
   const enableThinking = infPreset?.thinkingEnabled ?? true;
@@ -984,7 +1076,11 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
 
     /**
-     * Rearms the inactivity timeout that protects long-running streaming generations.
+     * Arms the inactivity timeout after a chunk has arrived.
+     *
+     * The timer stays disarmed until the first SSE chunk. llama-server sends
+     * nothing while it evaluates the prompt, and that silence is not a stalled
+     * generation. `0` disables the timer entirely.
      *
      * @returns No return value.
      */
@@ -992,12 +1088,10 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       if (timeoutMs <= 0) return;
       if (inactivityTimer) clearTimeout(inactivityTimer);
       inactivityTimer = setTimeout(() => {
-        logWarn(`Generation timeout for generation ${generationId} (${timeoutMs}ms)`);
+        logWarn(`Generation inactivity timeout for generation ${generationId} (${timeoutMs}ms)`);
         abortGeneration(generationId, "timeout");
       }, timeoutMs);
     };
-
-    resetInactivityTimer();
 
     fetch(endpoint, {
       method: "POST",
@@ -1006,8 +1100,6 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       signal: abortController.signal,
     })
       .then(async (res) => {
-        // Keep the timeout armed between response headers and the first SSE chunk.
-        resetInactivityTimer();
         logDebug("Model server response received", { status: res.status });
         if (!res.ok) {
           const errorBody = await res.text().catch(() => "");
@@ -1065,6 +1157,81 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         let streamBuffer = "";
         let thinkingStartedAt: number | null = null;
         let thinkingEndedAt: number | null = null;
+        let reachedTerminalEvent = false;
+        let interruptedFinalized = false;
+
+        /**
+         * Saves whatever text has already arrived when llama-server drops the stream.
+         *
+         * A missing finish reason used to leave the UI in `generating` and discard
+         * the last unflushed tokens. This writes the partial reply, then tells the
+         * client the turn stopped with an error.
+         *
+         * @param message - Error text shown for the interrupted turn.
+         * @returns No return value.
+         */
+        const persistInterruptedGeneration = async (message: string): Promise<void> => {
+          if (reachedTerminalEvent || interruptedFinalized) return;
+          interruptedFinalized = true;
+          if (thinkingStartedAt !== null && thinkingEndedAt === null) {
+            thinkingEndedAt = Date.now();
+          }
+          const thinkingDurationMs =
+            thinkingStartedAt !== null
+              ? Math.max(0, (thinkingEndedAt ?? Date.now()) - thinkingStartedAt)
+              : undefined;
+          const metrics = buildMessageMetrics(EMPTY_TIMINGS, promptTokensCount, {
+            stopReason: "error",
+            ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+            ...(streamState.prevThinking
+              ? {
+                  thinkingSource: streamState.usedNativeReasoning
+                    ? ("native" as const)
+                    : ("tags" as const),
+                }
+              : {}),
+          });
+          try {
+            const db = await import("./persistence/db").then((m) => m.getDb());
+            db.prepare(
+              "UPDATE messages SET content = ?, raw_content = ?, thinking_content = ?, metrics_json = ? WHERE id = ?",
+            ).run(
+              streamState.prevContent,
+              streamState.fullRawContent,
+              streamState.prevThinking || null,
+              JSON.stringify(metrics),
+              assistantMessageId,
+            );
+          } catch (persistErr) {
+            logStreamProxyError("interrupt-flush", persistErr, {
+              chatId,
+              assistantMessageId,
+              generationId,
+            });
+          }
+          cleanupEmptyAssistantMessage();
+          broadcast({
+            type: "error",
+            chatId,
+            messageId: assistantMessageId,
+            generationId,
+            message,
+          });
+          broadcast({
+            type: "stop",
+            chatId,
+            messageId: assistantMessageId,
+            generationId,
+            stopReason: "error",
+            timings: EMPTY_TIMINGS,
+            promptTokens: promptTokensCount,
+            contextSize: ctxSize,
+            fullContent: streamState.prevContent,
+            fullRawContent: streamState.fullRawContent,
+            fullThinking: streamState.prevThinking,
+            ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+          });
+        };
 
         try {
           while (true) {
@@ -1194,7 +1361,6 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                   toolCalls,
                 });
 
-                const { waitForToolApproval, executeTool } = await import("./tools");
                 // C1 fix: The assistant row was already INSERTed at line ~407.
                 // Use UPDATE instead of a second INSERT to avoid PRIMARY KEY violation.
                 const dbToolUpdate = await import("./persistence/db").then((m) => m.getDb());
@@ -1220,12 +1386,67 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                   reason: "awaiting_user",
                 });
 
-                for (const tc of toolCalls) {
+                const toolTimings = parsed.timings || EMPTY_TIMINGS;
+                /**
+                 * Records a tool message for this call and every later call that will not run.
+                 *
+                 * @param fromIndex - First tool call that still needs a result row.
+                 * @param decisionReason - Why those calls are not being executed.
+                 * @returns No return value.
+                 */
+                const recordUnresolvedToolCalls = async (
+                  fromIndex: number,
+                  decisionReason: string | undefined,
+                ) => {
+                  for (let index = fromIndex; index < toolCalls.length; index++) {
+                    const pending = toolCalls[index];
+                    if (!pending) continue;
+                    await recordToolResultMessage(
+                      chatId,
+                      pending.id,
+                      toolDecisionErrorContent(decisionReason),
+                    );
+                  }
+                };
+                /**
+                 * Ends this generation without starting the tool follow-up.
+                 *
+                 * @param stopReason - Stop reason broadcast to the client.
+                 * @returns No return value.
+                 */
+                const finishToolLoop = (stopReason: "error" | "cancelled") => {
+                  reachedTerminalEvent = true;
+                  shouldStop = true;
+                  broadcast({
+                    type: "stop",
+                    chatId,
+                    messageId: assistantMessageId,
+                    generationId,
+                    stopReason,
+                    timings: toolTimings,
+                    fullContent: streamState.prevContent,
+                    fullRawContent: streamState.fullRawContent,
+                    fullThinking: streamState.prevThinking,
+                  });
+                };
+
+                for (let toolIndex = 0; toolIndex < toolCalls.length; toolIndex++) {
+                  const tc = toolCalls[toolIndex];
+                  if (!tc) continue;
+                  if (abortController.signal.aborted) {
+                    await recordUnresolvedToolCalls(toolIndex, "cancelled");
+                    finishToolLoop("cancelled");
+                    break;
+                  }
+
                   const { approved, editedArguments, reason } = await waitForToolApproval(
                     chatId,
                     tc.id,
                   );
-                  if (!approved) {
+                  if (!approved || abortController.signal.aborted) {
+                    const decisionReason = abortController.signal.aborted
+                      ? "cancelled"
+                      : (reason ?? "rejected");
                     broadcast({
                       type: "tool_approval_state",
                       chatId,
@@ -1234,31 +1455,23 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                       pending: false,
                       resumeGeneration: false,
                       toolCallId: tc.id,
-                      reason: reason ?? "rejected",
+                      reason: decisionReason,
                     });
-                    broadcast({
-                      type: "error",
-                      chatId,
-                      messageId: assistantMessageId,
-                      generationId,
-                      message: getToolApprovalFailureMessage(reason),
-                    });
-                    broadcast({
-                      type: "stop",
-                      chatId,
-                      messageId: assistantMessageId,
-                      generationId,
-                      stopReason: "error",
-                      timings: parsed.timings || ({} as import("../shared/types").LlamaTimings),
-                      fullContent: streamState.prevContent,
-                      fullRawContent: streamState.fullRawContent,
-                      fullThinking: streamState.prevThinking,
-                    });
-                    shouldStop = true;
+                    if (!abortController.signal.aborted) {
+                      broadcast({
+                        type: "error",
+                        chatId,
+                        messageId: assistantMessageId,
+                        generationId,
+                        message: getToolApprovalFailureMessage(reason),
+                      });
+                    }
+                    await recordUnresolvedToolCalls(toolIndex, decisionReason);
+                    finishToolLoop(abortController.signal.aborted ? "cancelled" : "error");
                     break;
                   }
 
-                  if (tc === toolCalls[toolCalls.length - 1]) {
+                  if (toolIndex === toolCalls.length - 1) {
                     broadcast({
                       type: "tool_approval_state",
                       chatId,
@@ -1271,27 +1484,25 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                     });
                   }
 
-                  const toolResult = await executeTool(
+                  const toolResult = await executeToolRespectingAbort(
                     tc.function.name,
                     editedArguments ?? tc.function.arguments,
+                    abortController.signal,
                   );
-                  const toolMsgId = Bun.randomUUIDv7();
-                  const toolMsg: ChatMessage = {
-                    id: toolMsgId,
-                    chatId,
-                    role: "tool",
-                    content: toolResult,
-                    rawContent: toolResult,
-                    position: 0,
-                    createdAt: Date.now(),
-                    toolCallId: tc.id,
-                  };
-                  await addMessage(toolMsg);
-                  broadcast({ type: "message", chatId, message: toolMsg });
+                  if (toolResult === null) {
+                    await recordUnresolvedToolCalls(toolIndex, "cancelled");
+                    finishToolLoop("cancelled");
+                    break;
+                  }
+                  await recordToolResultMessage(chatId, tc.id, toolResult);
+                }
+
+                if (!shouldStop && abortController.signal.aborted) {
+                  finishToolLoop("cancelled");
                 }
 
                 if (!shouldStop) {
-                  const timings = parsed.timings || ({} as import("../shared/types").LlamaTimings);
+                  const timings = toolTimings;
                   if (toolRecursionDepth >= MAX_TOOL_RECURSION_DEPTH) {
                     const recursionMessage = `Tool recursion limit (${MAX_TOOL_RECURSION_DEPTH}) reached for chat ${chatId}.`;
                     logWarn(recursionMessage);
@@ -1365,8 +1576,9 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                   infPreset?.contextOverflowPolicy === "StopAtLimit"
                 ) {
                   const ctxSize = server.config?.contextSize || 4096;
-                  if ((timings.predicted_n || 0) + (timings.prompt_n || 0) >= ctxSize - 16)
+                  if (contextOccupancyTokens(timings) >= ctxSize - 16) {
                     stopReason = "contextLengthReached";
+                  }
                 }
 
                 updatePromptCacheStats(chatId, timings);
@@ -1422,8 +1634,12 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                 break;
               }
             }
+            if (shouldStop) reachedTerminalEvent = true;
             if (shouldStop || done) break;
             resetInactivityTimer();
+          }
+          if (!reachedTerminalEvent) {
+            await persistInterruptedGeneration("The model stream ended before it finished.");
           }
         } catch (err: unknown) {
           const aborted =
@@ -1473,14 +1689,8 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
               assistantMessageId,
               generationId,
             });
-            cleanupEmptyAssistantMessage();
-            broadcast({
-              type: "error",
-              chatId,
-              messageId: assistantMessageId,
-              generationId,
-              message: String(err),
-            });
+            const message = err instanceof Error && err.message ? err.message : String(err);
+            await persistInterruptedGeneration(message);
           }
         } finally {
           if (inactivityTimer) clearTimeout(inactivityTimer);

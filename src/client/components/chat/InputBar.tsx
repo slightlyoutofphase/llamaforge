@@ -31,6 +31,26 @@ function createPreviewUrl(file: File): string | null {
 }
 
 /**
+ * Describes files the composer refused so the user can tell why nothing was attached.
+ *
+ * @param rejected - Dropzone rejection entries.
+ * @returns A short error message.
+ */
+function describeRejectedFiles(
+  rejected: readonly { file: File; errors: readonly { code: string }[] }[],
+): string {
+  const tooMany = rejected.some((entry) =>
+    entry.errors.some((error) => error.code === "too-many-files"),
+  );
+  if (tooMany) {
+    return `Only ${MAX_COMPOSER_FILES} attachments can be added.`;
+  }
+  const names = rejected.map((entry) => entry.file.name).filter(Boolean);
+  const listed = names.length > 0 ? names.join(", ") : "That file";
+  return `${listed} is not a supported attachment. Use an image, audio, video, PDF, or text file.`;
+}
+
+/**
  * Releases a previously allocated attachment preview URL.
  *
  * @param previewUrl - Object URL created for an attachment preview.
@@ -130,7 +150,15 @@ export function InputBar({
     }
   }, [inputContent]);
 
-  const composerLocked = !isActive || isGenerating || historyLocked;
+  const composerLocked = !isActive || historyLocked;
+  const wasGeneratingRef = useRef(isGenerating);
+
+  useEffect(() => {
+    if (wasGeneratingRef.current && !isGenerating && isActive && !historyLocked) {
+      textareaRef.current?.focus();
+    }
+    wasGeneratingRef.current = isGenerating;
+  }, [historyLocked, isActive, isGenerating]);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const oversized = acceptedFiles.filter((file) => file.size > MAX_COMPOSER_FILE_BYTES);
@@ -139,23 +167,33 @@ export function InputBar({
     }
     setFiles((prev) => {
       const remainingSlots = Math.max(0, MAX_COMPOSER_FILES - prev.length);
-      const accepted = acceptedFiles
-        .filter((file) => file.size <= MAX_COMPOSER_FILE_BYTES)
-        .slice(0, remainingSlots)
-        .map((file) => ({
-          id: crypto.randomUUID(),
-          file,
-          previewUrl: createPreviewUrl(file),
-        }));
+      const withinSize = acceptedFiles.filter((file) => file.size <= MAX_COMPOSER_FILE_BYTES);
+      if (withinSize.length > remainingSlots) {
+        useAppStore.getState().setError(`Only ${MAX_COMPOSER_FILES} attachments can be added.`);
+      }
+      const accepted = withinSize.slice(0, remainingSlots).map((file) => ({
+        id: crypto.randomUUID(),
+        file,
+        previewUrl: createPreviewUrl(file),
+      }));
       return [...prev, ...accepted];
     });
   }, []);
 
+  const onDropRejected = useCallback(
+    (rejections: readonly { file: File; errors: readonly { code: string }[] }[]) => {
+      useAppStore.getState().setError(describeRejectedFiles(rejections));
+    },
+    [],
+  );
+
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     onDrop,
+    onDropRejected,
     noClick: true,
     noKeyboard: true,
-    disabled: composerLocked,
+    disabled: composerLocked || isGenerating,
+    maxFiles: MAX_COMPOSER_FILES,
     accept: {
       "image/*": [],
       "audio/*": [],
@@ -197,9 +235,11 @@ export function InputBar({
    * @returns No return value.
    */
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.key === "Process") return;
     if (e.key === "Enter" && !e.shiftKey) {
+      if (isGenerating) return;
       e.preventDefault();
-      handleSend();
+      void handleSend();
     }
   };
 
@@ -225,7 +265,14 @@ export function InputBar({
             <div
               key={id}
               className="flex items-center gap-2 bg-[var(--color-bg)] border border-[var(--color-border)] px-2 py-1.5 rounded-lg text-sm group">
-              {previewUrl ? (
+              {previewUrl && file.type.startsWith("video/") ? (
+                <video
+                  src={previewUrl}
+                  aria-label={file.name}
+                  muted
+                  className="h-8 w-8 rounded object-cover"
+                />
+              ) : previewUrl ? (
                 <img src={previewUrl} alt={file.name} className="h-8 w-8 rounded object-cover" />
               ) : (
                 <Paperclip size={14} />
@@ -257,7 +304,7 @@ export function InputBar({
         <button
           type="button"
           onClick={open}
-          disabled={composerLocked}
+          disabled={composerLocked || isGenerating}
           className="p-2 text-[var(--color-text-muted)] hover:text-[var(--color-text-primary)] hover:bg-[var(--color-surface-elevated)] rounded-xl transition-all mr-2 shrink-0 mb-1 disabled:opacity-50 disabled:cursor-not-allowed"
           title="Attach files (Images, Audio, Video, PDF, Text)">
           <Plus size={20} />

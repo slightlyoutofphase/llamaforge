@@ -252,16 +252,31 @@ export interface LlamaTimings {
   predicted_per_token_ms: number;
   /** Time spent evaluating the prompt in milliseconds. */
   prompt_ms: number;
-  /** Number of prompt tokens evaluated. */
+  /**
+   * Prompt tokens processed for this request.
+   * On `/v1/chat/completions` this excludes tokens reused from cache (`cache_n`).
+   */
   prompt_n: number;
   /** Prompt throughput in tokens per second. */
   prompt_per_second: number;
   /** Average milliseconds per prompt token. */
   prompt_per_token_ms: number;
-  /** Number of tokens served from cache. */
-  tokens_cached: number;
-  /** Number of tokens evaluated by the model. */
-  tokens_evaluated: number;
+  /**
+   * Prompt tokens reused from the prompt cache.
+   * This is the `/v1/chat/completions` name. Context occupancy is
+   * `cache_n + prompt_n + predicted_n`.
+   */
+  cache_n?: number;
+  /**
+   * Legacy `/completion` count of prompt tokens reused from cache.
+   * Used only when `cache_n` is absent.
+   */
+  tokens_cached?: number;
+  /**
+   * Legacy `/completion` count of prompt tokens evaluated in total.
+   * Used only when `cache_n` is absent.
+   */
+  tokens_evaluated?: number;
   /** Optional number of speculative draft tokens proposed. */
   draft_n?: number;
   /** Optional number of speculative draft tokens accepted. */
@@ -840,6 +855,8 @@ export interface Attachment {
   virBudget?: number | undefined;
   /** Creation timestamp for the attachment record. */
   createdAt: number;
+  /** True when extracted attachment text was cut to the prompt budget. */
+  textTruncated?: boolean | undefined;
   /** Optional base64 payload used only during chat export/import. */
   base64Data?: string | undefined;
 }

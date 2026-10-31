@@ -352,11 +352,13 @@ async function extractVideoAudioTrack(inputPath: string, outputPath: string): Pr
 /**
  * Resolves an ffprobe executable next to ffmpeg or on PATH.
  *
+ * A missing executable is not cached, so installing ffprobe is picked up on the next video.
+ *
  * @param settings - Application settings used to locate ffmpeg.
  * @returns Absolute or PATH-resolved ffprobe command, or `null` when unavailable.
  */
 async function resolveFfprobePath(settings: AppSettings): Promise<string | null> {
-  if (cachedFfprobePath !== undefined) return cachedFfprobePath;
+  if (cachedFfprobePath) return cachedFfprobePath;
 
   const candidates: string[] = [];
   const ffmpeg = await resolveFfmpegPath(settings);
@@ -377,7 +379,6 @@ async function resolveFfprobePath(settings: AppSettings): Promise<string | null>
     }
   }
 
-  cachedFfprobePath = null;
   return null;
 }
 

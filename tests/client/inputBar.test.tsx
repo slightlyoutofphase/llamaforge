@@ -7,10 +7,19 @@ import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 let lastOnDrop: ((acceptedFiles: File[]) => void) | undefined;
+let lastOnDropRejected:
+  ((rejections: { file: File; errors: { code: string }[] }[]) => void) | undefined;
 
 mock.module("react-dropzone", () => ({
-  useDropzone: ({ onDrop }: { onDrop: (acceptedFiles: File[]) => void }) => {
+  useDropzone: ({
+    onDrop,
+    onDropRejected,
+  }: {
+    onDrop: (acceptedFiles: File[]) => void;
+    onDropRejected?: (rejections: { file: File; errors: { code: string }[] }[]) => void;
+  }) => {
     lastOnDrop = onDrop;
+    lastOnDropRejected = onDropRejected;
     return {
       getRootProps: () => ({}),
       getInputProps: () => ({}),
@@ -30,6 +39,7 @@ describe("InputBar Component", () => {
   beforeEach(() => {
     mock.restore();
     lastOnDrop = undefined;
+    lastOnDropRejected = undefined;
   });
 
   afterEach(() => {
@@ -269,5 +279,51 @@ describe("InputBar Component", () => {
       lastOnDrop?.([oversized]);
     });
     expect(useAppStore.getState().errorMessage).toBe("Attachments must be 10MB or smaller.");
+  });
+
+  it("does not send when Enter is pressed during IME composition", () => {
+    const onSend = mock();
+    render(<InputBar onSend={onSend} isGenerating={false} isActive={true} onStop={mock()} />);
+    const textarea = screen.getByPlaceholderText("Type your message...");
+    fireEvent.change(textarea, { target: { value: "日本語" } });
+    fireEvent.keyDown(textarea, { key: "Enter", isComposing: true });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("keeps the composer editable while a reply is generating", () => {
+    render(<InputBar onSend={mock()} isGenerating={true} isActive={true} onStop={mock()} />);
+    const textarea = screen.getByPlaceholderText("Type your message...") as HTMLTextAreaElement;
+    expect(textarea.disabled).toBe(false);
+    fireEvent.change(textarea, { target: { value: "next question" } });
+    expect(textarea.value).toBe("next question");
+  });
+
+  it("renders a video preview instead of an image for video attachments", () => {
+    const originalCreateObjectURL = URL.createObjectURL;
+    URL.createObjectURL = mock(() => "blob:clip.mp4") as typeof URL.createObjectURL;
+    try {
+      render(<InputBar onSend={mock()} isGenerating={false} isActive={true} onStop={mock()} />);
+      act(() => {
+        lastOnDrop?.([new File(["video"], "clip.mp4", { type: "video/mp4" })]);
+      });
+      expect(screen.getByLabelText("clip.mp4").tagName).toBe("VIDEO");
+      expect(screen.queryByRole("img", { name: "clip.mp4" })).toBeNull();
+    } finally {
+      URL.createObjectURL = originalCreateObjectURL;
+    }
+  });
+
+  it("reports files the composer will not accept", () => {
+    useAppStore.setState({ errorMessage: null });
+    render(<InputBar onSend={mock()} isGenerating={false} isActive={true} onStop={mock()} />);
+    act(() => {
+      lastOnDropRejected?.([
+        {
+          file: new File(["{}"], "notes.json", { type: "application/json" }),
+          errors: [{ code: "file-invalid-type" }],
+        },
+      ]);
+    });
+    expect(useAppStore.getState().errorMessage).toContain("notes.json");
   });
 });

@@ -44,11 +44,10 @@ describe("optimizer", () => {
       fileSizeBytes: 100 * 1024 * 1024 * 1024, // 100GB
       blockCount: 80,
     };
-    // 24GB VRAM. 500MB margin -> 23.5GB.
-    // bytesPerLayer = 100GB / (80 * 1.1) = 1.13GB.
-    // 23.5 / 1.13 ~ 20 layers.
+    // Layer weights are inflated by 1.1 and a 4096-token KV reserve is taken
+    // before layers are counted, so this offload stays well under a full fit.
     const config = optimizeLoadConfig(mockHardware, giantMeta);
-    expect(config.gpuLayers).toBeLessThan(80);
+    expect(config.gpuLayers).toBeLessThan(18);
     expect(config.gpuLayers).toBeGreaterThan(0);
   });
 

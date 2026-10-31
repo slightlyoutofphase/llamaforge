@@ -353,6 +353,9 @@ export const MessageBubble = React.memo(
                   key={att.id}
                   className="px-3 py-2 border border-[var(--color-border)] bg-[var(--color-surface-elevated)] fill-[var(--color-text-muted)] text-[var(--color-text-muted)] rounded-lg shadow-sm text-xs flex items-center gap-2">
                   <FileText size={14} /> {att.fileName}
+                  {att.textTruncated ? (
+                    <span data-testid="attachment-truncated"> (truncated)</span>
+                  ) : null}
                 </div>
               );
             })}
@@ -413,11 +416,17 @@ export const MessageBubble = React.memo(
               data-bubble-style={bubbleStyle}
               data-testid="message-bubble-shell"
               className={bubbleClassName}>
-              <div className="prose prose-invert max-w-none prose-p:leading-relaxed prose-pre:bg-[#11111b] prose-pre:border prose-pre:border-[var(--color-border)] prose-pre:rounded-xl">
-                <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
-                  {renderedContent + (isStreaming ? " \u2588" : "")}
-                </ReactMarkdown>
-              </div>
+              {message.role === "user" ? (
+                <div data-testid="user-message-text" className="whitespace-pre-wrap break-words">
+                  {renderedContent}
+                </div>
+              ) : (
+                <div className="prose max-w-none prose-p:leading-relaxed prose-pre:bg-[#11111b] prose-pre:border prose-pre:border-[var(--color-border)] prose-pre:rounded-xl">
+                  <ReactMarkdown remarkPlugins={REMARK_PLUGINS} rehypePlugins={REHYPE_PLUGINS}>
+                    {renderedContent + (isStreaming ? " \u2588" : "")}
+                  </ReactMarkdown>
+                </div>
+              )}
             </div>
             {message.role === "assistant" && metrics && !isStreaming && (
               <ResponseStatusBar metrics={metrics} />

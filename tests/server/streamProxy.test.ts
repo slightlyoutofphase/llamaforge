@@ -1170,6 +1170,79 @@ describe("streamProxy", () => {
     expect(assistantMsg?.metrics?.generationMs).toBe(200);
   });
 
+  it("finalizes a stream that closes without a finish reason", async () => {
+    const wsHubModule = await import("../../src/server/wsHub");
+    const broadcastSpy = spyOn(wsHubModule, "broadcast").mockImplementation(() => {});
+    const stream = buildSSEStream([chatDelta("partial answer")]);
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
+
+    try {
+      const chat = await createChat("Unfinished Stream");
+      const assistantMsgId = await proxyCompletion({
+        chatId: chat.id,
+        content: "hello",
+        attachments: [],
+      });
+      await waitForGenerationIdle();
+
+      const reloaded = await getChat(chat.id);
+      const assistant = reloaded?.messages?.find((message) => message.id === assistantMsgId);
+      expect(assistant?.content).toBe("partial answer");
+      expect(assistant?.metrics?.stopReason).toBe("error");
+      expect(
+        broadcastSpy.mock.calls.some((call) => {
+          const frame = call[0];
+          return (
+            frame.type === "error" && frame.message === "The model stream ended before it finished."
+          );
+        }),
+      ).toBe(true);
+      expect(
+        broadcastSpy.mock.calls.some((call) => {
+          const frame = call[0];
+          return frame.type === "stop" && frame.stopReason === "error";
+        }),
+      ).toBe(true);
+    } finally {
+      broadcastSpy.mockRestore();
+    }
+  });
+
+  it("persists chat-completions cache_n as prompt cache metrics", async () => {
+    const stream = buildSSEStream([
+      chatDelta("cached"),
+      {
+        choices: [{ delta: {}, finish_reason: "stop" }],
+        timings: {
+          predicted_ms: 100,
+          predicted_n: 4,
+          predicted_per_second: 40,
+          predicted_per_token_ms: 25,
+          prompt_ms: 20,
+          prompt_n: 1,
+          prompt_per_second: 50,
+          prompt_per_token_ms: 20,
+          cache_n: 236,
+        },
+      },
+    ]);
+    const fetchMock = llamaFetch(() => sseResponse(stream));
+    globalThis.fetch = asFetch(fetchMock);
+
+    const chat = await createChat("Cache N Metrics");
+    const assistantMsgId = await proxyCompletion({
+      chatId: chat.id,
+      content: "Hello there",
+      attachments: [],
+    });
+    await waitForGenerationIdle();
+    const reloaded = await getChat(chat.id);
+    const assistantMsg = reloaded?.messages?.find((message) => message.id === assistantMsgId);
+    expect(assistantMsg?.metrics?.cachedPromptTokens).toBe(236);
+    expect(assistantMsg?.metrics?.evaluatedPromptTokens).toBe(237);
+  });
+
   it("broadcasts the persisted user message so clients can reconcile optimistic ids", async () => {
     const stream = buildSSEStream([chatDelta("Reply!"), chatStop()]);
     const fetchMock = llamaFetch(() => sseResponse(stream));
@@ -1580,8 +1653,8 @@ describe("streamProxy", () => {
     mockPdfText = "PDF text";
   });
 
-  it("times out stalled streams before the first chunk and removes the empty assistant row", async () => {
-    await saveSettings({ requestTimeoutSeconds: 0.02 });
+  it("does not cancel a stream that is still waiting for the first token", async () => {
+    await saveSettings({ requestTimeoutSeconds: 0.05 });
 
     const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
       const signal = init?.signal;
@@ -1592,25 +1665,51 @@ describe("streamProxy", () => {
     });
     globalThis.fetch = asFetch(fetchMock);
 
-    const chat = await createChat("Timeout Test");
+    const chat = await createChat("Prompt Eval Silence");
     await proxyCompletion({ chatId: chat.id, content: "hello", attachments: [] });
+    await Bun.sleep(200);
+
+    expect(getActiveGenerations().size).toBe(1);
+    const during = await getChat(chat.id);
+    expect(during?.messages?.filter((message) => message.role === "assistant")).toHaveLength(1);
+
+    abortGeneration(chat.id, "cancelled");
+    await waitForGenerationIdle();
+  });
+
+  it("times out when tokens stop arriving after the stream has started", async () => {
+    await saveSettings({ requestTimeoutSeconds: 0.05 });
+
+    const fetchMock = llamaFetch(async (_input: RequestInfo, init?: RequestInit) => {
+      const signal = init?.signal;
+      if (!signal) {
+        throw new Error("streamProxy fetch is missing an AbortSignal");
+      }
+      return sseThenHangResponse(signal, chatDelta("partial"));
+    });
+    globalThis.fetch = asFetch(fetchMock);
+
+    const chat = await createChat("Inactivity Timeout");
+    const assistantMsgId = await proxyCompletion({
+      chatId: chat.id,
+      content: "hello",
+      attachments: [],
+    });
 
     await waitUntil(
       async () => {
         const reloaded = await getChat(chat.id);
-        return (
-          (reloaded?.messages?.filter((message) => message.role === "assistant").length ?? -1) ===
-            0 &&
-          (reloaded?.messages?.filter((message) => message.role === "user").length ?? 0) === 1
-        );
+        const assistant = reloaded?.messages?.find((message) => message.id === assistantMsgId);
+        return assistant?.content === "partial" && getActiveGenerations().size === 0;
       },
       2000,
-      "Timed out waiting for the stalled assistant row to be removed",
+      "Timed out waiting for the inactivity abort to finish the assistant row",
     );
 
     const reloaded = await getChat(chat.id);
-    expect(reloaded?.messages?.filter((message) => message.role === "assistant")).toHaveLength(0);
-    expect(reloaded?.messages?.filter((message) => message.role === "user")).toHaveLength(1);
+    const assistant = reloaded?.messages?.find((message) => message.id === assistantMsgId);
+    expect(assistant?.content).toBe("partial");
+    expect(assistant?.metrics?.stopReason).toBe("error");
   });
 
   it("handles max_tokens stop reason from chat completions format", async () => {
@@ -1799,9 +1898,87 @@ describe("streamProxy", () => {
     await waitForGenerationIdle();
 
     const reloaded = await getChat(chat.id);
-    expect(reloaded?.messages?.filter((message) => message.role === "tool")).toHaveLength(0);
+    const toolMessages = reloaded?.messages?.filter((message) => message.role === "tool") ?? [];
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]?.toolCallId).toBe("tc_reject");
+    expect(toolMessages[0]?.content).toBe(JSON.stringify({ error: "rejected by user" }));
     const assistantMsg = reloaded?.messages?.find((message) => message.role === "assistant");
     expect(assistantMsg?.toolCallsJson).toContain("tc_reject");
+  });
+
+  it("does not run the tool follow-up when generation is cancelled during approval", async () => {
+    let completionCalls = 0;
+    const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
+      const url = typeof input === "string" ? input : input.url;
+      if (url.endsWith("/tokenize")) {
+        return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 });
+      }
+      completionCalls += 1;
+      const stream = buildSSEStream([
+        {
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "tc_abort",
+                    function: { name: "calculate", arguments: '{"expression":"2+2"}' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        chatStop("tool_calls"),
+      ]);
+      return sseResponse(stream);
+    });
+    globalThis.fetch = asFetch(fetchMock);
+
+    const chat = await createChat("Tool Abort Test");
+    const inferencePresetId = "tool-abort-preset";
+    await createInferencePreset({
+      id: inferencePresetId,
+      name: "Tool Abort Preset",
+      isDefault: false,
+      ...createDefaultInferenceSampling(),
+      toolCallsEnabled: true,
+      tools: [
+        {
+          name: "calculate",
+          description: "Evaluate a mathematical expression.",
+          parameters: {
+            type: "object",
+            properties: { expression: { type: "string" } },
+            required: ["expression"],
+          },
+        },
+      ],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    await updateChat(chat.id, { inferencePresetId });
+
+    await proxyCompletion({
+      chatId: chat.id,
+      content: "cancel the tool",
+      attachments: [],
+    });
+    await waitUntil(async () => {
+      const pending = await getChat(chat.id);
+      return Boolean(
+        pending?.messages?.some((message) => message.toolCallsJson?.includes("tc_abort")),
+      );
+    });
+    abortGeneration(chat.id, "cancelled");
+    await waitForGenerationIdle();
+
+    expect(completionCalls).toBe(1);
+    const reloaded = await getChat(chat.id);
+    const toolMessages = reloaded?.messages?.filter((message) => message.role === "tool") ?? [];
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0]?.content).toBe(JSON.stringify({ error: "cancelled" }));
   });
 
   it("caps recursive tool-call re-entry depth", async () => {
@@ -2014,9 +2191,7 @@ describe("streamProxy", () => {
     expect(contentStrings).not.toContain("OLD OLD OLD");
     expect(contentStrings).toContain("latest question");
     expect(capturedBody.tools).toHaveLength(1);
-    expect(capturedBody.response_format?.json_schema?.properties?.result?.description).toContain(
-      "S",
-    );
+    expect(capturedBody.response_format?.schema?.properties?.result?.description).toContain("S");
     expect(tokenizeFetchCount).toBeLessThanOrEqual(2);
   });
 

@@ -3,6 +3,7 @@
  * Left sidebar component for managing chat history: searching, sorting, renaming, deleting, and exporting sessions.
  */
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Check,
@@ -16,10 +17,14 @@ import {
   X,
 } from "lucide-react";
 import type React from "react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { responseErrorMessage } from "../../http";
 import { logError } from "../../logger";
 import { useCreateChat, useDeleteChat, useInfiniteChats, useUpdateChat } from "../../queries";
 import { useAppStore } from "../../store";
+
+/** Delay before a sidebar search string becomes a new chat-list query. */
+const CHAT_SEARCH_DEBOUNCE_MS = 200;
 
 /**
  * Main sidebar component for chat navigation.
@@ -29,6 +34,7 @@ import { useAppStore } from "../../store";
  */
 export function ChatSidebar() {
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [sortBy, setSortBy] = useState<"date" | "name">("date");
@@ -36,10 +42,18 @@ export function ChatSidebar() {
   const createLockRef = useRef(false);
   const deleteLockRef = useRef(false);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { chatId } = useParams({ strict: false });
 
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      setDebouncedSearch(search);
+    }, CHAT_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [search]);
+
   const { data, isLoading, hasNextPage, fetchNextPage, isFetchingNextPage } =
-    useInfiniteChats(search);
+    useInfiniteChats(debouncedSearch);
   const chats = useMemo(() => data?.pages.flat() || [], [data]);
   const chatsById = useMemo(() => new Map(chats.map((chat) => [chat.id, chat])), [chats]);
 
@@ -98,7 +112,12 @@ export function ChatSidebar() {
   const handleSaveRename = async (id: string, e: React.SyntheticEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    await updateMut.mutateAsync({ id, updates: { name: editValue } });
+    const name = editValue.trim();
+    if (!name) {
+      addNotification("Chat name cannot be empty.", "error");
+      return;
+    }
+    await updateMut.mutateAsync({ id, updates: { name } });
     setEditingId(null);
   };
 
@@ -180,16 +199,18 @@ export function ChatSidebar() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ format: "json" }),
     });
-    if (res.ok) {
-      const content = await res.text();
-      const blob = new Blob([content], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `llama-chat-${id}.json`;
-      a.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    if (!res.ok) {
+      addNotification(await responseErrorMessage(res, "Failed to export chat."), "error");
+      return;
     }
+    const content = await res.text();
+    const blob = new Blob([content], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `llama-chat-${id}.json`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 
   /**
@@ -204,16 +225,18 @@ export function ChatSidebar() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ format: "json" }),
     });
-    if (res.ok) {
-      const content = await res.text();
-      const blob = new Blob([content], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `llama-chat-${currentChatId}.json`;
-      a.click();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    if (!res.ok) {
+      addNotification(await responseErrorMessage(res, "Failed to export chat."), "error");
+      return;
     }
+    const content = await res.text();
+    const blob = new Blob([content], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `llama-chat-${currentChatId}.json`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 
   const sortedChats = useMemo(() => {
@@ -228,8 +251,6 @@ export function ChatSidebar() {
       return b.id.localeCompare(a.id);
     });
   }, [chats, search, sortBy]);
-
-  if (isLoading) return <div className="w-64 border-r animate-pulse bg-[var(--color-bg)]" />;
 
   return (
     <div className="w-72 border-r border-[var(--color-border)] bg-[var(--color-bg)] flex flex-col h-full shrink-0 z-30">
@@ -274,17 +295,35 @@ export function ChatSidebar() {
               accept=".json"
               className="hidden"
               onChange={async (e) => {
-                const file = e.target.files?.[0];
+                const input = e.target;
+                const file = input.files?.[0];
+                input.value = "";
                 if (!file) return;
-                const content = await file.text();
-                const res = await fetch("/api/chats/import", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ content }),
-                });
-                if (res.ok) {
-                  const data = await res.json();
-                  navigate({ to: "/chat/$chatId", params: { chatId: data.id } });
+                try {
+                  const content = await file.text();
+                  const res = await fetch("/api/chats/import", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ content }),
+                  });
+                  if (!res.ok) {
+                    addNotification(
+                      await responseErrorMessage(res, "Failed to import chat."),
+                      "error",
+                    );
+                    return;
+                  }
+                  const data = (await res.json()) as { id?: string };
+                  await queryClient.invalidateQueries({ queryKey: ["chats"] });
+                  if (data.id) {
+                    navigate({ to: "/chat/$chatId", params: { chatId: data.id } });
+                  }
+                } catch (err: unknown) {
+                  logError("Failed to import chat", err);
+                  addNotification(
+                    err instanceof Error ? err.message : "Failed to import chat.",
+                    "error",
+                  );
                 }
               }}
             />
@@ -308,6 +347,9 @@ export function ChatSidebar() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar">
+        {isLoading && sortedChats.length === 0 ? (
+          <div className="h-full animate-pulse rounded-xl bg-[var(--color-surface)]" />
+        ) : null}
         {sortedChats.map((c) => {
           const isActive = chatId === c.id;
           const parentChat = c.parentId ? chatsById.get(c.parentId) : undefined;

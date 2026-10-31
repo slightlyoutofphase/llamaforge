@@ -239,6 +239,32 @@ describe("ChatSidebar Component", () => {
     expect(screen.getByText("Your transmission log is empty.")).toBeTruthy();
   });
 
+  it("keeps the search box mounted while the chat list is loading", () => {
+    mock.module("../../src/client/queries", () => ({
+      useInfiniteChats: () => ({
+        data: undefined,
+        isLoading: true,
+        fetchNextPage: mock(),
+        hasNextPage: false,
+        isFetchingNextPage: false,
+      }),
+      useCreateChat: () => ({ mutate: mock(), mutateAsync: mock(), isPending: false }),
+      useDeleteChat: () => ({ mutateAsync: mock(), isPending: false }),
+      useUpdateChat: () => ({ mutate: mock(), mutateAsync: mock() }),
+    }));
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ChatSidebar />
+      </QueryClientProvider>,
+    );
+
+    const search = screen.getByPlaceholderText("Search activity...");
+    search.focus();
+    fireEvent.change(search, { target: { value: "a" } });
+    expect(document.activeElement).toBe(screen.getByPlaceholderText("Search activity..."));
+  });
+
   it("filters chat history by search query", () => {
     mock.module("../../src/client/queries", () => ({
       useInfiniteChats: () => ({

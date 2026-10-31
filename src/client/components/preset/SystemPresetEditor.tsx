@@ -21,8 +21,10 @@ import {
   useUpdateChat,
   useUpdateSystemPreset,
 } from "../../queries";
+import { confirmDiscardUnsaved, PresetSaveStatus, presetDraftIsDirty } from "../DraftInputs";
 import { useAppStore } from "../../store";
 import { useUiStore } from "../../uiStore";
+import { useResolvedTheme } from "../../useResolvedTheme";
 
 /**
  * Component for managing and editing system prompt presets.
@@ -31,8 +33,9 @@ import { useUiStore } from "../../uiStore";
  * @returns React functional component.
  */
 export function SystemPresetEditor() {
+  const codeMirrorTheme = useResolvedTheme();
   const { setRightPanelView, activePresetId } = useUiStore();
-  const { currentChatId } = useAppStore();
+  const currentChatId = useAppStore((state) => state.currentChatId);
   const { data: presets } = useSystemPresets();
   const createMut = useCreateSystemPreset();
   const updateMut = useUpdateSystemPreset();
@@ -47,6 +50,8 @@ export function SystemPresetEditor() {
       : presets?.[0];
 
   const [localState, setLocalState] = useState<Partial<SystemPromptPreset> | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState(false);
 
   useEffect(() => {
     if (!activePreset) {
@@ -74,12 +79,26 @@ export function SystemPresetEditor() {
    */
   const handleApplyToChat = async () => {
     if (!currentChatId || !localState?.id) return;
-    await updateChatMut.mutateAsync({
-      id: currentChatId,
-      updates: { systemPresetId: localState.id },
-    });
-    useAppStore.getState().patchCurrentChatMetadata({ systemPresetId: localState.id });
-    setRightPanelView(null);
+    const name = allocateUniqueName(
+      localState.name ?? "",
+      (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
+    );
+    const next = { ...localState, name };
+    try {
+      await updateMut.mutateAsync({ id: localState.id, updates: next });
+      setLocalState(next);
+      await updateChatMut.mutateAsync({
+        id: currentChatId,
+        updates: { systemPresetId: localState.id },
+      });
+      useAppStore.getState().patchCurrentChatMetadata({ systemPresetId: localState.id });
+      setSaveError(false);
+      setSaveMessage("Saved and applied.");
+      setRightPanelView(null);
+    } catch (error: unknown) {
+      setSaveError(true);
+      setSaveMessage(error instanceof Error ? error.message : "Could not apply this preset.");
+    }
   };
 
   /**
@@ -89,13 +108,48 @@ export function SystemPresetEditor() {
    */
   const handleSave = () => {
     if (!localState?.id) return;
+    const trimmedName = localState.name?.trim() ?? "";
+    if (!trimmedName) {
+      setSaveError(true);
+      setSaveMessage("Preset name cannot be empty.");
+      return;
+    }
     const name = allocateUniqueName(
-      localState.name ?? "",
+      trimmedName,
       (presets ?? []).filter((preset) => preset.id !== localState.id).map((preset) => preset.name),
     );
     const next = { ...localState, name };
     setLocalState(next);
-    updateMut.mutate({ id: localState.id, updates: next });
+    updateMut.mutate(
+      { id: localState.id, updates: next },
+      {
+        onSuccess: () => {
+          setSaveError(false);
+          setSaveMessage("Saved.");
+        },
+        onError: (error: unknown) => {
+          setSaveError(true);
+          setSaveMessage(error instanceof Error ? error.message : "Save failed.");
+        },
+      },
+    );
+  };
+
+  /**
+   * Leaves the current system preset after confirming when the draft is dirty.
+   *
+   * @param nextId - Preset id to open. An empty string selects none.
+   * @param close - Close the editor instead of switching presets.
+   * @returns No return value.
+   */
+  const requestPresetChange = (nextId: string, close = false) => {
+    if (!confirmDiscardUnsaved(presetDraftIsDirty(localState, activePreset))) return;
+    setSaveMessage(null);
+    if (close) {
+      setRightPanelView("settings");
+      return;
+    }
+    setRightPanelView("systemPreset", nextId);
   };
 
   /**
@@ -154,7 +208,17 @@ export function SystemPresetEditor() {
    */
   const handleDelete = () => {
     if (!localState?.id) return;
-    deleteMut.mutate(localState.id);
+    if (!window.confirm(`Delete preset "${localState.name || "this preset"}"?`)) return;
+    deleteMut.mutate(localState.id, {
+      onSuccess: () => {
+        setSaveError(false);
+        setSaveMessage("Deleted.");
+      },
+      onError: (error: unknown) => {
+        setSaveError(true);
+        setSaveMessage(error instanceof Error ? error.message : "Delete failed.");
+      },
+    });
     setRightPanelView("systemPreset", presets?.find((p) => p.id !== localState.id)?.id ?? "");
   };
 
@@ -165,7 +229,7 @@ export function SystemPresetEditor() {
           <h2 className="font-semibold text-lg flex items-center gap-2 truncate">System Preset</h2>
           <select
             value={explicitNone ? "" : activePreset?.id || ""}
-            onChange={(e) => setRightPanelView("systemPreset", e.target.value)}
+            onChange={(e) => requestPresetChange(e.target.value)}
             className="text-xs bg-transparent border-none text-[var(--color-text-muted)] outline-none focus:text-[var(--color-text-primary)] w-full truncate">
             <option value="" className="bg-[var(--color-surface)]">
               None
@@ -201,7 +265,7 @@ export function SystemPresetEditor() {
           </button>
           <button
             type="button"
-            onClick={() => setRightPanelView("settings")}
+            onClick={() => requestPresetChange("", true)}
             className="p-1 hover:bg-[var(--color-surface-elevated)] rounded-md transition-colors">
             <X size={18} />
           </button>
@@ -239,7 +303,7 @@ export function SystemPresetEditor() {
                 id="systemPromptInput"
                 value={localState.content || ""}
                 extensions={[markdown()]}
-                theme="dark"
+                theme={codeMirrorTheme}
                 onChange={(val) => updateField("content", val)}
                 className="text-sm flex-1 h-full"
                 height="100%"
@@ -250,6 +314,7 @@ export function SystemPresetEditor() {
       )}
 
       <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] flex flex-col gap-2">
+        <PresetSaveStatus message={saveMessage} error={saveError} />
         {currentChatId && localState && (
           <button
             type="button"

@@ -3,10 +3,15 @@
  * Tests for hardware probing and system capability detection.
  */
 
-import { describe, expect, it } from "bun:test";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { __parseWindowsWmiVideoControllers, getHardwareInfo } from "../../src/server/hardwareProbe";
+import { initDb } from "../../src/server/persistence/db";
 
 describe("hardwareProbe", () => {
+  beforeAll(async () => {
+    await initDb();
+  });
+
   it("returns initialized hardware structure with valid numbers", async () => {
     const hw = await getHardwareInfo();
 
@@ -33,5 +38,19 @@ describe("hardwareProbe", () => {
     expect(gpus[0]?.backend).toBe("unknown");
     expect(gpus[0]?.vramBytes).toBe(17163091968);
     expect(gpus[1]?.backend).toBe("unknown");
+  });
+
+  it("prefers a 64-bit qwMemorySize over a 32-bit AdapterRAM ceiling", () => {
+    const gpus = __parseWindowsWmiVideoControllers(
+      JSON.stringify([
+        {
+          Name: "NVIDIA GeForce RTX 4090",
+          AdapterRAM: -1048576,
+          qwMemorySize: 25769803776,
+        },
+      ]),
+    );
+
+    expect(gpus[0]?.vramBytes).toBe(25769803776);
   });
 });

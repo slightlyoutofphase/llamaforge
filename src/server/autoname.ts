@@ -51,6 +51,26 @@ async function waitForIdleInferenceSlot(): Promise<boolean> {
  * @param raw - Raw model output.
  * @returns Visible title text with thinking spans stripped.
  */
+/**
+ * Strips a leading label from an autoname completion.
+ *
+ * `Title: Recipe notes` and `Summary of cakes` both lose only the label.
+ * The optional words `is`, `for`, and `of` do not require a second space when
+ * they are absent.
+ *
+ * @param raw - Title text after thinking tags have been removed.
+ * @returns The cleaned title, or `Untitled Chat` when nothing remains.
+ */
+export function cleanAutonameTitle(raw: string): string {
+  let title = raw.replace(
+    /^(?:title\s*:|the|an|a|chat|summary|about)\s+(?:(?:is|for|of)\s+)?/i,
+    "",
+  );
+  title = title.replace(/^["'\-\s]+|["'\-\s]+$/g, "");
+  if (title.length > 50) title = title.substring(0, 50);
+  return title || "Untitled Chat";
+}
+
 function stripThinkingFromTitle(raw: string): string {
   let text = raw;
   for (const config of [DEFAULT_THINKING_CONFIG, GEMMA4_THINKING_CONFIG]) {
@@ -143,13 +163,7 @@ Assistant: ${asstContent}`,
         (typeof firstChoice?.["text"] === "string" ? firstChoice["text"] : undefined) ??
         (typeof payload["content"] === "string" ? payload["content"] : "") ??
         "";
-      let title = stripThinkingFromTitle(String(rawTitle));
-
-      title = title.replace(/^(Title:|the|a|title|chat|summary|about)\s+(is|for|of)?\s+/gi, "");
-      title = title.replace(/^["'\-\s]+|["'\-\s]+$/g, "");
-
-      if (title.length > 50) title = title.substring(0, 50);
-      if (!title) title = "Untitled Chat";
+      const title = cleanAutonameTitle(stripThinkingFromTitle(String(rawTitle)));
 
       await updateChat(chatId, { name: title });
 

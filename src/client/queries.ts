@@ -3,7 +3,13 @@
  * TanStack Query hooks for asynchronous state management and backend API interaction.
  */
 
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import * as api from "./api";
 
 /**
@@ -47,6 +53,7 @@ export function useInfiniteChats(q?: string) {
     queryKey: queryKeys.chats(query),
     queryFn: ({ pageParam = 0 }) => api.fetchChats(query, 300, pageParam),
     initialPageParam: 0,
+    placeholderData: keepPreviousData,
     staleTime: 30000, // 30 seconds of stability
     getNextPageParam: (lastPage, allPages) => {
       if (lastPage.length === 0) return undefined;

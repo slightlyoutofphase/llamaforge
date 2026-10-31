@@ -64,16 +64,26 @@ export async function dispatchClientFrame(
   const frame = parsed as Record<string, unknown>;
   if (frame["type"] === "heartbeat") return;
   if (frame["type"] === "session_close") {
+    // The closing tab is still in the connection set. Another open tab must
+    // keep its generation; only the last tab stops inference.
+    if (getConnectionCount() > 1) return;
     const { abortAllGenerations } = await import("./streamProxy");
+    if (getConnectionCount() > 1) return;
     abortAllGenerations("disconnected");
+    const { cancelPendingApprovals } = await import("./tools");
+    if (getConnectionCount() > 1) return;
+    cancelPendingApprovals(undefined, "disconnected");
     return;
   }
   if (frame["type"] === "cancel") {
     const chatId = readString(frame, "chatId");
     if (!chatId) return;
-    const generationId = readString(frame, "generationId") ?? chatId;
+    const generationId = readString(frame, "generationId");
     const { abortGeneration } = await import("./streamProxy");
-    abortGeneration(generationId, "cancelled");
+    if (generationId) abortGeneration(generationId, "cancelled");
+    // The follow-up after a tool call uses a new generation id. Stop must
+    // reach that generation even when the client still has the previous id.
+    abortGeneration(chatId, "cancelled");
     return;
   }
   if (frame["type"] === "tool_approval") {

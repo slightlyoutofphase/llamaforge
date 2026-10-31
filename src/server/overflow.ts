@@ -58,8 +58,8 @@ function buildMessageKey(message: ChatMessage): string {
  * @returns A cache key representing the full message array.
  */
 function buildMessagesKey(messages: ChatMessage[], port?: number): string {
-  // M1 fix: include array length as an additional discriminator
-  return `n=${messages.length}|${messages.map((m) => buildMessageKey(m)).join("||")}|port:${port ?? 0}`;
+  const material = `${messages.length}|${messages.map((message) => buildMessageKey(message)).join("||")}|port:${port ?? 0}`;
+  return `msgs:${String(Bun.hash(material))}`;
 }
 
 /**
@@ -229,7 +229,6 @@ async function getPromptTokens(
   const total = contentTokens + estimateAttachmentMediaTokens(messages);
 
   tokenCountCache.set(serializedCacheKey, contentTokens);
-  tokenCountCache.set(buildMessagesKey(messages, port), total);
   if (tokenCountCache.size > 500) {
     const evictCount = Math.floor(tokenCountCache.size * 0.25);
     let removed = 0;

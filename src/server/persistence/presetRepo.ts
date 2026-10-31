@@ -3,7 +3,11 @@
  * Preset repository — CRUD operations for load, inference, and system presets.
  */
 
-import { createDefaultInferenceSampling, createDefaultLoadConfig } from "../../shared/defaults";
+import {
+  createDefaultInferenceSampling,
+  createDefaultLoadConfig,
+  seededLoadContextSize,
+} from "../../shared/defaults";
 import { applyImageTokenBatchFloor } from "../../shared/imageTokens";
 import {
   allocateUniqueName,
@@ -624,6 +628,33 @@ function safeParse<T>(json: string, fallback: T): T {
 }
 
 /**
+ * Reads whether the load preset that spawned the running model preserves thinking.
+ *
+ * Only that preset's stored payload is parsed. A send does not load every preset.
+ *
+ * @param id - Load preset id from the running model configuration.
+ * @returns `true` when the preset enables preserve-thinking.
+ */
+export function getLoadPresetPreserveThinking(id: string): boolean {
+  const row = getDb()
+    .query<{ config_json: string }, [string]>("SELECT config_json FROM load_presets WHERE id = ?")
+    .get(id);
+  if (!row) return false;
+  return Boolean(parseLoadPresetPayload(row.config_json).preserveThinking);
+}
+
+/**
+ * Lists stored preset names without parsing their configuration payloads.
+ *
+ * @param table - Preset table whose names are required for uniqueness.
+ * @returns Names currently stored in that table.
+ */
+function listPresetNames(table: "load_presets" | "inference_presets"): string[] {
+  const rows = getDb().query<{ name: string }, []>(`SELECT name FROM ${table}`).all();
+  return rows.map((row) => row.name);
+}
+
+/**
  * Retrieves all saved model load presets from the database.
  *
  * @returns A promise resolving to an array of {@link LoadPreset}.
@@ -752,10 +783,7 @@ export async function createLoadPreset(preset: LoadPreset): Promise<void> {
   if (!id) id = Bun.randomUUIDv7();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
-  name = allocateUniqueName(
-    name,
-    (await getLoadPresets()).map((preset) => preset.name),
-  );
+  name = allocateUniqueName(name, listPresetNames("load_presets"));
 
   const configJson = serializeLoadPresetPayload({
     config,
@@ -879,10 +907,7 @@ export async function createInferencePreset(preset: InferencePreset): Promise<vo
   if (!id) id = Bun.randomUUIDv7();
   if (!createdAt) createdAt = Date.now();
   if (!updatedAt) updatedAt = createdAt;
-  name = allocateUniqueName(
-    name,
-    (await getInferencePresets()).map((preset) => preset.name),
-  );
+  name = allocateUniqueName(name, listPresetNames("inference_presets"));
 
   if (config.structuredOutput) {
     config.structuredOutput = { ...config.structuredOutput, grammar: undefined };
@@ -1286,7 +1311,7 @@ export async function ensureModelDefaultPresets(
         config: {
           ...baseConfig,
           mmProjPath: m.mmProjPath,
-          contextSize: m.metadata.contextLength || 4096,
+          contextSize: seededLoadContextSize(m.metadata.contextLength),
           ...applyImageTokenBatchFloor(
             baseConfig.batchSize,
             baseConfig.microBatchSize,

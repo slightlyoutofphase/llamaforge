@@ -354,7 +354,8 @@ export function initDbSchema(db: Database): void {
       file_path   TEXT NOT NULL,
       file_name   TEXT NOT NULL,
       vir_budget  INTEGER,
-      created_at  INTEGER NOT NULL
+      created_at  INTEGER NOT NULL,
+      text_truncated INTEGER NOT NULL DEFAULT 0
     );
   `);
 
@@ -418,8 +419,15 @@ export function initDbSchema(db: Database): void {
 
   // Indexes for performance
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);");
+  db.run("CREATE INDEX IF NOT EXISTS idx_messages_chat_position ON messages(chat_id, position);");
   db.run("CREATE INDEX IF NOT EXISTS idx_messages_position ON messages(position);");
   db.run("CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);");
+  try {
+    db.run("ALTER TABLE attachments ADD COLUMN text_truncated INTEGER NOT NULL DEFAULT 0");
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.toLowerCase().includes("duplicate column")) throw err;
+  }
   db.run("CREATE INDEX IF NOT EXISTS idx_chats_created_at ON chats(created_at);");
   db.run("CREATE INDEX IF NOT EXISTS idx_chats_updated_at ON chats(updated_at);");
 }

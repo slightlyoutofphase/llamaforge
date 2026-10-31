@@ -357,7 +357,9 @@ async function statMmprojCompanion(
 /**
  * Copies vision/audio encoder flags from a companion mmproj into primary-model metadata.
  *
- * Primary GGUFs do not carry `clip.has_vision_encoder`; those keys live on the mmproj.
+ * Primary GGUFs usually do not carry `clip.has_vision_encoder`; those keys live on the mmproj.
+ * A missing companion leaves metadata unchanged. Callers that reused a cache row
+ * written for a deleted mmproj must clear the flags themselves.
  *
  * @param metadata - Metadata parsed from the primary GGUF (mutated in place).
  * @param mmProjPath - Absolute path to the matched mmproj, if any.
@@ -390,38 +392,163 @@ export interface ScanOptions {
 }
 
 /**
- * Recursively walks a directory to find GGUF and multimodal projection files.
+ * Mutable state shared by one model-directory walk.
+ */
+interface ScanWalkState {
+  count: number;
+  truncated: boolean;
+  seen: Set<string>;
+}
+
+/**
+ * Parsed llama.cpp split-GGUF filename (`name-00001-of-00003.gguf`).
+ */
+interface GgufShardName {
+  directory: string;
+  stem: string;
+  index: number;
+  count: number;
+  indexWidth: number;
+  countWidth: number;
+}
+
+/**
+ * Parses a split GGUF shard name.
+ *
+ * @param filePath - Absolute or relative GGUF path.
+ * @returns Shard identity, or `null` when the file is not a split shard.
+ */
+function parseGgufShardName(filePath: string): GgufShardName | null {
+  const match = /^(.*)-(\d+)-of-(\d+)\.gguf$/i.exec(path.basename(filePath));
+  if (!match?.[1] || !match[2] || !match[3]) return null;
+  const index = Number(match[2]);
+  const count = Number(match[3]);
+  if (
+    !Number.isInteger(index) ||
+    !Number.isInteger(count) ||
+    count < 2 ||
+    index < 1 ||
+    index > count
+  ) {
+    return null;
+  }
+  return {
+    directory: path.dirname(filePath),
+    stem: match[1],
+    index,
+    count,
+    indexWidth: match[2].length,
+    countWidth: match[3].length,
+  };
+}
+
+/**
+ * Sums every shard that belongs with a split GGUF, or returns the single file size.
+ *
+ * Only the first shard is catalogued. Its reported size includes the siblings
+ * llama-server reads when that shard is loaded.
+ *
+ * @param filePath - Absolute path of the catalogued GGUF.
+ * @param ownSize - `stat` size of `filePath`, used when the file is not a shard.
+ * @returns Combined size in bytes.
+ */
+async function summedGgufSize(filePath: string, ownSize: number): Promise<number> {
+  const shard = parseGgufShardName(filePath);
+  if (shard?.index !== 1) return ownSize;
+  let total = 0;
+  for (let index = 1; index <= shard.count; index++) {
+    const name = `${shard.stem}-${String(index).padStart(shard.indexWidth, "0")}-of-${String(shard.count).padStart(shard.countWidth, "0")}.gguf`;
+    try {
+      total += (await fs.stat(path.join(shard.directory, name))).size;
+    } catch (err: unknown) {
+      const code = getErrorCode(err);
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        const message = err instanceof Error ? err.message : String(err);
+        logWarn(`Unable to stat GGUF shard ${name}: ${message}`);
+      }
+    }
+  }
+  return total > 0 ? total : ownSize;
+}
+
+/**
+ * Logs once when a scan stops because the entry budget is exhausted.
+ *
+ * @param state - Mutable traversal state.
+ * @param options - Effective scan limits.
+ * @returns No return value.
+ */
+function noteScanTruncated(state: ScanWalkState, options: Required<ScanOptions>): void {
+  if (state.truncated || state.count < options.maxEntries) return;
+  state.truncated = true;
+  logWarn(
+    `Model scan stopped after ${options.maxEntries} entries. Raise MODEL_SCAN_MAX_ENTRIES to continue.`,
+  );
+}
+
+/**
+ * Recursively walks a directory to find GGUF files, including through directory symlinks.
+ *
+ * Non-GGUF names are ignored. Split shards other than the first are omitted later.
  *
  * @param dir - Directory to scan.
  * @param depth - Current recursion depth.
  * @param state - Mutable traversal state tracking how many entries have been inspected.
  * @param options - Effective scan limits controlling recursion depth and entry count.
- * @returns Absolute file paths for candidate GGUF and mmproj files.
+ * @returns Absolute file paths for candidate GGUF files.
  * @internal
  */
 async function walkDir(
   dir: string,
   depth = 0,
-  state = { count: 0 },
+  state: ScanWalkState = { count: 0, truncated: false, seen: new Set() },
   options: Required<ScanOptions>,
 ): Promise<string[]> {
-  if (depth > options.maxDepth || state.count >= options.maxEntries) return [];
+  if (depth > options.maxDepth || state.count >= options.maxEntries) {
+    noteScanTruncated(state, options);
+    return [];
+  }
+  let realDir = dir;
+  try {
+    realDir = await fs.realpath(dir);
+  } catch {
+    realDir = path.resolve(dir);
+  }
+  if (state.seen.has(realDir)) return [];
+  state.seen.add(realDir);
+
   const files: string[] = [];
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       state.count++;
-      if (state.count > options.maxEntries) break;
+      if (state.count > options.maxEntries) {
+        noteScanTruncated(state, options);
+        break;
+      }
       if (entry.name.startsWith(".")) continue;
       if (entry.isDirectory() && EXCLUDED_DIRS.has(entry.name)) continue;
       const res = path.resolve(dir, entry.name);
-      if (entry.isDirectory()) {
-        files.push(...(await walkDir(res, depth + 1, state, options)));
-      } else {
-        const lower = entry.name.toLowerCase();
-        if (lower.endsWith(".gguf") || lower.includes("mmproj")) {
+      if (entry.isSymbolicLink()) {
+        let linked: Awaited<ReturnType<typeof fs.stat>> | undefined;
+        try {
+          linked = await fs.stat(res);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          logWarn(`Skipping unreadable symlink ${res}: ${message}`);
+          continue;
+        }
+        if (linked.isDirectory()) {
+          files.push(...(await walkDir(res, depth + 1, state, options)));
+        } else if (linked.isFile() && entry.name.toLowerCase().endsWith(".gguf")) {
           files.push(res);
         }
+        continue;
+      }
+      if (entry.isDirectory()) {
+        files.push(...(await walkDir(res, depth + 1, state, options)));
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".gguf")) {
+        files.push(res);
       }
     }
   } catch (err: unknown) {
@@ -474,11 +601,20 @@ export async function scanModels(
       return [];
     }
 
-    const allGgufFiles = await walkDir(rootPath, 0, { count: 0 }, resolvedOptions);
-    const mmprojFiles = allGgufFiles.filter((f) =>
+    const allGgufFiles = await walkDir(
+      rootPath,
+      0,
+      { count: 0, truncated: false, seen: new Set() },
+      resolvedOptions,
+    );
+    const catalogFiles = allGgufFiles.filter((filePath) => {
+      const shard = parseGgufShardName(filePath);
+      return shard === null || shard.index === 1;
+    });
+    const mmprojFiles = catalogFiles.filter((f) =>
       path.basename(f).toUpperCase().includes("MMPROJ"),
     );
-    const primaryGgufs = allGgufFiles.filter(
+    const primaryGgufs = catalogFiles.filter(
       (f) => !path.basename(f).toUpperCase().includes("MMPROJ"),
     );
 
@@ -492,7 +628,7 @@ export async function scanModels(
         let metadata = await cachedGgufMetadata(filePath, stat.mtimeMs);
         if (!metadata) {
           metadata = await ggufReader.parseGgufMetadata(filePath);
-          metadata.fileSizeBytes = stat.size;
+          metadata.fileSizeBytes = await summedGgufSize(filePath, stat.size);
           applyDraftModelClassification(filePath, metadata);
           await setCachedGgufMetadata(filePath, stat.mtimeMs, metadata);
         } else if (applyDraftModelClassification(filePath, metadata)) {
@@ -542,8 +678,12 @@ export async function scanModels(
           metadata = await cachedGgufMetadata(primaryPath, stat.mtimeMs);
           if (!metadata) {
             metadata = await ggufReader.parseGgufMetadata(primaryPath);
-            metadata.fileSizeBytes = stat.size;
+            metadata.fileSizeBytes = await summedGgufSize(primaryPath, stat.size);
+          } else if (!mmProjPath) {
+            metadata.hasVisionEncoder = false;
+            metadata.hasAudioEncoder = false;
           }
+          metadata.fileSizeBytes = await summedGgufSize(primaryPath, stat.size);
           applyDraftModelClassification(primaryPath, metadata);
           await mergeMmprojEncoderFlags(metadata, mmProjPath);
           await setCachedGgufMetadata(primaryPath, stat.mtimeMs, metadata, {
@@ -598,8 +738,12 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
         metadata = await cachedGgufMetadata(entry.primaryPath, mtime);
         if (!metadata) {
           metadata = await ggufReader.parseGgufMetadata(entry.primaryPath);
-          metadata.fileSizeBytes = stat.size;
+          metadata.fileSizeBytes = await summedGgufSize(entry.primaryPath, stat.size);
+        } else if (!entry.mmProjPath) {
+          metadata.hasVisionEncoder = false;
+          metadata.hasAudioEncoder = false;
         }
+        metadata.fileSizeBytes = await summedGgufSize(entry.primaryPath, stat.size);
         applyDraftModelClassification(entry.primaryPath, metadata);
 
         await mergeMmprojEncoderFlags(metadata, entry.mmProjPath);
@@ -616,6 +760,17 @@ export async function populateMetadata(entry: ModelEntry): Promise<ModelEntry> {
         mmprojPath: companion?.path ?? "",
         mmprojMtime: companion?.mtime ?? 0,
       });
+    }
+
+    if (metadata) {
+      const summedSize = await summedGgufSize(entry.primaryPath, stat.size);
+      if (metadata.fileSizeBytes !== summedSize) {
+        metadata.fileSizeBytes = summedSize;
+        await setCachedGgufMetadata(entry.primaryPath, mtime, metadata, {
+          mmprojPath: companion?.path ?? "",
+          mmprojMtime: companion?.mtime ?? 0,
+        });
+      }
     }
 
     return metadata ? { ...entry, metadata } : entry;

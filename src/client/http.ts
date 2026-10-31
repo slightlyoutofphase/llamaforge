@@ -103,6 +103,25 @@ function normalizeFetchError(
 }
 
 /**
+ * Reads a route error message from a JSON `{ error }` body, then plain text.
+ *
+ * @param response - Failed HTTP response.
+ * @param fallback - Text used when the body has no usable message.
+ * @returns The server's error string, or the fallback.
+ */
+export async function responseErrorMessage(response: Response, fallback: string): Promise<string> {
+  const text = await response.text().catch(() => "");
+  if (!text.trim()) return fallback;
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.trim()) return parsed.error;
+  } catch {
+    // The body is not JSON. Use the raw text below.
+  }
+  return text.trim() || fallback;
+}
+
+/**
  * Sends an HTTP request to the backend using `fetch()` with timeout and abort support.
  *
  * @param url - Relative or absolute endpoint URL to request.

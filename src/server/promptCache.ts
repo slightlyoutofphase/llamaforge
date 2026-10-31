@@ -2,6 +2,7 @@
  * @packageDocumentation
  * Types and utilities for prompt cache tracking.
  */
+import { readPromptCacheCounts } from "../shared/generationMetrics";
 import type { LlamaTimings } from "../shared/types";
 
 /**
@@ -26,9 +27,10 @@ const stats = new Map<string, PromptCacheStats>();
  * @returns No return value.
  */
 export function updatePromptCacheStats(chatId: string, timings: LlamaTimings): void {
+  const counts = readPromptCacheCounts(timings);
   const existing = stats.get(chatId) ?? { totalEvaluated: 0, totalCached: 0 };
-  existing.totalEvaluated += timings.tokens_evaluated;
-  existing.totalCached += timings.tokens_cached;
+  existing.totalEvaluated += counts.evaluatedPromptTokens;
+  existing.totalCached += counts.cachedPromptTokens;
   // Delete + set to move to end of insertion order (most-recently-used)
   stats.delete(chatId);
   stats.set(chatId, existing);

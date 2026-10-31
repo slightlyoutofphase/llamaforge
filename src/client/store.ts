@@ -5,7 +5,7 @@
  */
 
 import { create } from "zustand";
-import { buildMessageMetrics } from "../shared/generationMetrics";
+import { buildMessageMetrics, readPromptCacheCounts } from "../shared/generationMetrics";
 import type {
   AppProcessUsage,
   ChatContextUsage,
@@ -16,6 +16,7 @@ import type {
   ModelEntry,
   ModelLoadConfig,
   WsFrame,
+  WsTokenFrame,
 } from "../shared/types";
 import { request } from "./http";
 import { logDebug, logError, logInfo, logWarn } from "./logger";
@@ -233,7 +234,129 @@ let activeChatLoadController: AbortController | null = null;
  * @returns A trimmed log buffer containing the new line.
  */
 function appendLogLine(logs: string[], line: string): string[] {
-  return [...logs.slice(-(MAX_LOG_LINES - 1)), line];
+  if (logs.length < MAX_LOG_LINES) return logs.concat(line);
+  const next = new Array<string>(MAX_LOG_LINES);
+  for (let index = 1; index < logs.length; index++) {
+    next[index - 1] = logs[index] ?? "";
+  }
+  next[MAX_LOG_LINES - 1] = line;
+  return next;
+}
+
+const queuedLiveTokenFrames: WsTokenFrame[] = [];
+let liveTokenFrameHandle: number | null = null;
+
+/**
+ * Applies one live token frame onto the chat state.
+ *
+ * @param state - Store state before this token.
+ * @param frame - Token frame to apply.
+ * @returns The next store state.
+ */
+function reduceLiveTokenFrame(state: AppState, frame: WsTokenFrame): AppState {
+  if (frame.chatId && frame.chatId !== state.currentChatId) {
+    bufferChatFrame(frame);
+    return {
+      ...state,
+      unreadChatIds:
+        state.currentChatId === frame.chatId
+          ? state.unreadChatIds
+          : [...new Set([...state.unreadChatIds, frame.chatId])],
+    };
+  }
+  if (state.isSyncingHistory) return state;
+  const messages = [...state.messages];
+  let targetIndex = messages.findIndex((message) => message.id === frame.messageId);
+  if (targetIndex < 0) {
+    if (!state.isGenerating || frame.chatId !== state.currentChatId) return state;
+    messages.push({
+      id: frame.messageId,
+      chatId: frame.chatId,
+      role: "assistant",
+      content: "",
+      rawContent: "",
+      position: messages.length,
+      createdAt: Date.now(),
+    });
+    targetIndex = messages.length - 1;
+  }
+  const thinkingDurationMs = frame.thinkingDurationMs ?? state.generationStats?.thinkingDurationMs;
+  const stats = {
+    tokensCached: frame.tokensCached ?? state.generationStats?.tokensCached ?? 0,
+    totalPredicted: (state.generationStats?.totalPredicted ?? 0) + 1,
+    tokensEvaluated: state.generationStats?.tokensEvaluated ?? 0,
+    promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
+    contextSize: frame.contextSize ?? state.generationStats?.contextSize ?? 0,
+    stopReason: state.generationStats?.stopReason,
+    ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
+  };
+  const nextMsg = { ...messages[targetIndex] } as ChatMessage;
+  nextMsg.content += frame.delta;
+  nextMsg.rawContent += frame.delta;
+  if (frame.thinkingDelta !== undefined) {
+    nextMsg.thinkingContent = (nextMsg.thinkingContent || "") + frame.thinkingDelta;
+  }
+  if (frame.thinkingDurationMs !== undefined) {
+    nextMsg.metrics = {
+      predictedTokens: nextMsg.metrics?.predictedTokens ?? 0,
+      tokensPerSecond: nextMsg.metrics?.tokensPerSecond ?? 0,
+      promptTokens: nextMsg.metrics?.promptTokens ?? 0,
+      promptTokensPerSecond: nextMsg.metrics?.promptTokensPerSecond ?? 0,
+      cachedPromptTokens: nextMsg.metrics?.cachedPromptTokens ?? 0,
+      evaluatedPromptTokens: nextMsg.metrics?.evaluatedPromptTokens ?? 0,
+      ...nextMsg.metrics,
+      thinkingDurationMs: frame.thinkingDurationMs,
+    };
+  }
+  messages[targetIndex] = nextMsg;
+  return {
+    ...state,
+    messages,
+    isGenerating: true,
+    isWaitingForToolApproval: false,
+    generationStats: stats,
+    currentGenerationId: frame.generationId ?? state.currentGenerationId,
+  };
+}
+
+/**
+ * Writes queued token frames in one store update.
+ *
+ * @returns No return value.
+ */
+function flushQueuedLiveTokenFrames(): void {
+  if (liveTokenFrameHandle !== null && typeof cancelAnimationFrame === "function") {
+    cancelAnimationFrame(liveTokenFrameHandle);
+  }
+  liveTokenFrameHandle = null;
+  const batch = queuedLiveTokenFrames.splice(0);
+  if (batch.length === 0) return;
+  useAppStore.setState((state) => batch.reduce(reduceLiveTokenFrame, state));
+}
+
+/**
+ * Queues a token frame so a burst of SSE events becomes one render.
+ *
+ * Tests apply the frame immediately because Happy DOM does not flush animation
+ * frames inside `act`.
+ *
+ * @param frame - Token frame from the model socket.
+ * @returns No return value.
+ */
+function enqueueLiveTokenFrame(frame: WsTokenFrame): void {
+  queuedLiveTokenFrames.push(frame);
+  if (liveTokenFrameHandle !== null) return;
+  const immediate =
+    typeof requestAnimationFrame !== "function" ||
+    Boolean((globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT);
+  if (immediate) {
+    flushQueuedLiveTokenFrames();
+    return;
+  }
+  liveTokenFrameHandle = requestAnimationFrame(() => {
+    liveTokenFrameHandle = null;
+    flushQueuedLiveTokenFrames();
+  });
 }
 
 /**
@@ -297,24 +420,58 @@ function bufferChatFrame(frame: WsFrame) {
  * @param messages - Current message list for that chat.
  * @returns Updated messages together with generation and tool-approval state derived from the buffered frames.
  */
+/**
+ * Joins buffered stream text onto a message that may already contain a prefix of it.
+ *
+ * The database flush and the replay buffer can cover the same tokens. Appending
+ * the buffer blindly duplicates that overlap.
+ *
+ * @param existing - Text already stored on the loaded message.
+ * @param addition - Buffered delta for that field.
+ * @returns The message text with only the unseen tail appended.
+ */
+function mergeBufferedText(existing: string, addition: string): string {
+  if (!addition) return existing;
+  if (!existing) return addition;
+  if (existing.endsWith(addition)) return existing;
+  if (addition.startsWith(existing)) return addition;
+  const max = Math.min(existing.length, addition.length);
+  for (let size = max; size > 0; size--) {
+    if (existing.endsWith(addition.slice(0, size))) {
+      return existing + addition.slice(size);
+    }
+  }
+  return existing + addition;
+}
+
 function applyPendingChatFrames(
   chatId: string,
   messages: ChatMessage[],
-): { messages: ChatMessage[]; stillGenerating: boolean; waitingForToolApproval: boolean } {
+): {
+  messages: ChatMessage[];
+  stillGenerating: boolean;
+  waitingForToolApproval: boolean;
+  addedMessages: number;
+} {
   const pending = pendingChatFrames.get(chatId);
-  if (!pending?.length) return { messages, stillGenerating: false, waitingForToolApproval: false };
+  if (!pending?.length) {
+    return { messages, stillGenerating: false, waitingForToolApproval: false, addedMessages: 0 };
+  }
 
   const nextMessages = [...messages];
+  let addedMessages = 0;
   // Q2 fix: track whether the buffered frames include a stop frame.
   // If no stop frame was received, the generation is still in-flight.
   let sawTokens = false;
   let sawStop = false;
+  let awaitingToolFollowUp = false;
   let waitingForToolApproval = false;
 
   for (const frame of pending) {
     if (frame.type === "message") {
       if (!nextMessages.some((m) => m.id === frame.message.id)) {
         nextMessages.push(frame.message);
+        addedMessages += 1;
       }
     }
     if (frame.type === "token") {
@@ -322,10 +479,13 @@ function applyPendingChatFrames(
       const idx = nextMessages.findIndex((m) => m.id === frame.messageId);
       if (idx >= 0) {
         const message = { ...nextMessages[idx] } as ChatMessage;
-        message.content += frame.delta;
-        message.rawContent += frame.delta;
+        message.content = mergeBufferedText(message.content, frame.delta);
+        message.rawContent = mergeBufferedText(message.rawContent || "", frame.delta);
         if (frame.thinkingDelta !== undefined) {
-          message.thinkingContent = (message.thinkingContent || "") + frame.thinkingDelta;
+          message.thinkingContent = mergeBufferedText(
+            message.thinkingContent || "",
+            frame.thinkingDelta,
+          );
         }
         if (frame.thinkingDurationMs !== undefined) {
           message.metrics = {
@@ -343,7 +503,12 @@ function applyPendingChatFrames(
       }
     }
     if (frame.type === "stop") {
-      sawStop = true;
+      if (frame.stopReason === "tool_calls") {
+        awaitingToolFollowUp = true;
+      } else {
+        sawStop = true;
+        awaitingToolFollowUp = false;
+      }
       const idx = nextMessages.findIndex((m) => m.id === frame.messageId);
       if (idx >= 0) {
         const message = { ...nextMessages[idx] } as ChatMessage;
@@ -365,6 +530,10 @@ function applyPendingChatFrames(
     if (frame.type === "tool_approval_state") {
       waitingForToolApproval = frame.pending;
     }
+    if (frame.type === "error") {
+      sawStop = true;
+      awaitingToolFollowUp = false;
+    }
     if (frame.type === "stop" || frame.type === "error") {
       waitingForToolApproval = false;
     }
@@ -373,8 +542,9 @@ function applyPendingChatFrames(
   pendingChatFrames.delete(chatId);
   return {
     messages: nextMessages,
-    stillGenerating: sawTokens && !sawStop,
+    stillGenerating: !sawStop && (sawTokens || awaitingToolFollowUp),
     waitingForToolApproval,
+    addedMessages,
   };
 }
 
@@ -387,6 +557,38 @@ function applyPendingChatFrames(
  */
 function isCurrentChatLoadRequest(requestId: number, chatId: string): boolean {
   return requestId === activeChatLoadRequestId && latestRequestedChatId === chatId;
+}
+
+/**
+ * Polls server status after a load request loses its HTTP response.
+ *
+ * Bun used to close a quiet load after 10 seconds. The server can still be
+ * loading, so a dropped response is not itself a failure. Five consecutive
+ * transport failures mean the app server is gone and polling should stop.
+ *
+ * @returns `true` when status becomes `running` before the deadline.
+ */
+async function waitForModelLoadAfterDroppedRequest(): Promise<boolean> {
+  const deadline = Date.now() + 3 * 60 * 1000;
+  let transportFailures = 0;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const res = await fetch("/api/server/status");
+      if (!res.ok) {
+        transportFailures += 1;
+      } else {
+        transportFailures = 0;
+        const body = (await res.json()) as { status?: string };
+        if (body.status === "running") return true;
+        if (body.status === "idle") return false;
+      }
+    } catch {
+      transportFailures += 1;
+    }
+    if (transportFailures >= 5) return false;
+  }
+  return false;
 }
 
 const CLIENT_HEARTBEAT_MS = 10_000;
@@ -658,6 +860,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       lastInboundAt = Date.now();
       if (frame.type === "heartbeat") return;
+      if (frame.type !== "token") flushQueuedLiveTokenFrames();
       if (shouldDropLiveFrame(frame)) return;
 
       try {
@@ -692,80 +895,19 @@ export const useAppStore = create<AppState>((set, get) => ({
             void get().fetchServerStatus();
           }
         } else if (frame.type === "load_progress") {
-          set({
-            loadProgress: frame.progress,
-            loadProgressPhase: frame.phase,
-            loadProgressDetail: frame.detail ?? null,
+          set((state) => {
+            const loadProgress = Math.max(state.loadProgress, frame.progress);
+            const advanced = frame.progress >= state.loadProgress;
+            return {
+              loadProgress,
+              loadProgressPhase: advanced ? frame.phase : state.loadProgressPhase,
+              loadProgressDetail: advanced ? (frame.detail ?? null) : state.loadProgressDetail,
+            };
           });
         } else if (frame.type === "log") {
           set((state) => ({ logs: appendLogLine(state.logs, `[${frame.level}] ${frame.body}`) }));
         } else if (frame.type === "token") {
-          set((state) => {
-            if (frame.chatId && frame.chatId !== state.currentChatId) {
-              bufferChatFrame(frame);
-              return {
-                ...state,
-                unreadChatIds:
-                  state.currentChatId === frame.chatId
-                    ? state.unreadChatIds
-                    : [...new Set([...state.unreadChatIds, frame.chatId])],
-              };
-            }
-            if (state.isSyncingHistory) return state;
-            const messages = [...state.messages];
-            let targetIndex = messages.findIndex((m) => m.id === frame.messageId);
-            if (targetIndex < 0) {
-              if (!state.isGenerating || frame.chatId !== state.currentChatId) return state;
-              messages.push({
-                id: frame.messageId,
-                chatId: frame.chatId,
-                role: "assistant",
-                content: "",
-                rawContent: "",
-                position: messages.length,
-                createdAt: Date.now(),
-              });
-              targetIndex = messages.length - 1;
-            }
-            const thinkingDurationMs =
-              frame.thinkingDurationMs ?? state.generationStats?.thinkingDurationMs;
-            const stats = {
-              tokensCached: frame.tokensCached ?? state.generationStats?.tokensCached ?? 0,
-              totalPredicted: (state.generationStats?.totalPredicted ?? 0) + 1,
-              tokensEvaluated: state.generationStats?.tokensEvaluated ?? 0,
-              promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
-              contextSize: frame.contextSize ?? state.generationStats?.contextSize ?? 0,
-              stopReason: state.generationStats?.stopReason,
-              ...(thinkingDurationMs !== undefined ? { thinkingDurationMs } : {}),
-            };
-
-            const nextMsg = { ...messages[targetIndex] } as ChatMessage;
-            nextMsg.content += frame.delta;
-            nextMsg.rawContent += frame.delta;
-            if (frame.thinkingDelta !== undefined) {
-              nextMsg.thinkingContent = (nextMsg.thinkingContent || "") + frame.thinkingDelta;
-            }
-            if (frame.thinkingDurationMs !== undefined) {
-              nextMsg.metrics = {
-                predictedTokens: nextMsg.metrics?.predictedTokens ?? 0,
-                tokensPerSecond: nextMsg.metrics?.tokensPerSecond ?? 0,
-                promptTokens: nextMsg.metrics?.promptTokens ?? 0,
-                promptTokensPerSecond: nextMsg.metrics?.promptTokensPerSecond ?? 0,
-                cachedPromptTokens: nextMsg.metrics?.cachedPromptTokens ?? 0,
-                evaluatedPromptTokens: nextMsg.metrics?.evaluatedPromptTokens ?? 0,
-                ...nextMsg.metrics,
-                thinkingDurationMs: frame.thinkingDurationMs,
-              };
-            }
-            messages[targetIndex] = nextMsg;
-            return {
-              messages,
-              isGenerating: true,
-              isWaitingForToolApproval: false,
-              generationStats: stats,
-              currentGenerationId: frame.generationId ?? state.currentGenerationId,
-            };
-          });
+          enqueueLiveTokenFrame(frame);
         } else if (frame.type === "stop") {
           set((state) => {
             if (frame.chatId && frame.chatId !== state.currentChatId) {
@@ -815,15 +957,19 @@ export const useAppStore = create<AppState>((set, get) => ({
                 createdAt: Date.now(),
               });
             }
+            const cacheCounts = readPromptCacheCounts(frame.timings);
+            const followUpAfterTools = frame.stopReason === "tool_calls";
             return {
-              isGenerating: false,
+              isGenerating: followUpAfterTools,
               isWaitingForToolApproval: false,
-              currentGenerationId: null,
+              currentGenerationId: followUpAfterTools
+                ? (frame.generationId ?? state.currentGenerationId)
+                : null,
               messages: nextMessages,
               generationStats: {
-                tokensCached: frame.timings.tokens_cached,
+                tokensCached: cacheCounts.cachedPromptTokens,
                 totalPredicted: frame.timings.predicted_n,
-                tokensEvaluated: frame.timings.tokens_evaluated,
+                tokensEvaluated: cacheCounts.evaluatedPromptTokens,
                 promptTokens: frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
                 contextSize: frame.contextSize ?? state.generationStats?.contextSize ?? 0,
                 tokensPerSecond: messageMetrics.tokensPerSecond,
@@ -902,10 +1048,20 @@ export const useAppStore = create<AppState>((set, get) => ({
               const reconciled = state.messages.filter(
                 (m) => !(m.id.startsWith("temp-") && m.role === frame.message.role),
               );
-              if (!reconciled.some((m) => m.id === frame.message.id)) {
+              const replacedOptimistic = state.messages.some(
+                (message) => message.id.startsWith("temp-") && message.role === frame.message.role,
+              );
+              const alreadyPresent = state.messages.some(
+                (message) => message.id === frame.message.id,
+              );
+              if (!alreadyPresent) {
                 reconciled.push(frame.message);
               }
-              return { messages: reconciled };
+              return {
+                messages: reconciled,
+                totalMessages:
+                  state.totalMessages + (!alreadyPresent && !replacedOptimistic ? 1 : 0),
+              };
             }
             bufferChatFrame(frame);
             return {
@@ -1040,6 +1196,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       isGenerating: true,
       isWaitingForToolApproval: false,
       generationStats: null,
+      totalMessages: s.totalMessages + 1,
     }));
 
     const requestTimeoutMs = 180000;
@@ -1234,14 +1391,16 @@ export const useAppStore = create<AppState>((set, get) => ({
         }
         // Q2 fix: destructure both messages and stillGenerating flag so that
         // switching back to a chat with an active generation restores the stop button.
-        const { messages, stillGenerating, waitingForToolApproval } = applyPendingChatFrames(
-          chatId,
-          chat.messages || [],
-        );
+        const { messages, stillGenerating, waitingForToolApproval, addedMessages } =
+          applyPendingChatFrames(chatId, chat.messages || []);
+        const serverTotal =
+          typeof chat.totalMessages === "number"
+            ? chat.totalMessages
+            : (chat.messages?.length ?? 0);
         set((state) => ({
           currentChatId: chatId,
           messages,
-          totalMessages: chat.totalMessages ?? messages.length,
+          totalMessages: serverTotal + addedMessages,
           isGenerating: stillGenerating,
           isWaitingForToolApproval: waitingForToolApproval,
           currentChatMetadata: {
@@ -1653,6 +1812,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         return true;
       }
     } catch (e: unknown) {
+      const recovered = await waitForModelLoadAfterDroppedRequest();
+      if (recovered) {
+        set({ errorMessage: null, errorActionLabel: null, errorAction: null });
+        releaseInboundGeneration();
+        await get().fetchServerStatus();
+        return true;
+      }
       set({
         serverStatus: "idle",
         loadProgress: 0,
@@ -1680,6 +1846,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           serverStatus: "idle",
           loadedConfig: null,
           loadedModel: null,
+          loadProgress: 0,
+          loadProgressPhase: null,
+          loadProgressDetail: null,
           errorMessage: null,
           isGenerating: false,
           isWaitingForToolApproval: false,

@@ -101,6 +101,86 @@ describe("multimodal", () => {
     expect(attachment.filePath.startsWith("attachments/chat-a/msg-a/")).toBe(true);
   });
 
+  function seedAttachmentMessage(messageId = "msg-a"): void {
+    const db = getDb(":memory:");
+    db.prepare(
+      "INSERT OR IGNORE INTO chats (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+    ).run("chat-a", "Chat A", 1, 1);
+    db.prepare(
+      "INSERT INTO messages (id, chat_id, role, content, raw_content, position, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(messageId, "chat-a", "user", "hello", "hello", 0, 1);
+  }
+
+  function ftypBytes(brand: string): ArrayBuffer {
+    const bytes = new Uint8Array(16);
+    bytes[3] = 16;
+    bytes.set([0x66, 0x74, 0x79, 0x70], 4);
+    const padded = brand.padEnd(4, " ").slice(0, 4);
+    for (let index = 0; index < 4; index++) bytes[8 + index] = padded.charCodeAt(index);
+    const copy = new ArrayBuffer(bytes.byteLength);
+    new Uint8Array(copy).set(bytes);
+    return copy;
+  }
+
+  it("classifies ftyp brands instead of treating every iso file as mp4", async () => {
+    seedAttachmentMessage("msg-avif");
+    const avif = await processUpload(
+      "chat-a",
+      "msg-avif",
+      "photo.avif",
+      "application/octet-stream",
+      ftypBytes("avif"),
+    );
+    expect(avif.mimeType).toBe("image/avif");
+
+    seedAttachmentMessage("msg-m4a");
+    const audio = await processUpload(
+      "chat-a",
+      "msg-m4a",
+      "song.m4a",
+      "application/octet-stream",
+      ftypBytes("M4A "),
+    );
+    expect(audio.mimeType).toBe("audio/mp4");
+
+    seedAttachmentMessage("msg-mp4");
+    const video = await processUpload(
+      "chat-a",
+      "msg-mp4",
+      "clip.mp4",
+      "application/octet-stream",
+      ftypBytes("mp42"),
+    );
+    expect(video.mimeType).toBe("video/mp4");
+  });
+
+  it("does not decode binary uploads as text", async () => {
+    seedAttachmentMessage("msg-zip");
+    const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0x01]);
+    const attachment = await processUpload(
+      "chat-a",
+      "msg-zip",
+      "archive.zip",
+      "text/plain",
+      zip.buffer,
+    );
+    expect(attachment.mimeType).toBe("application/octet-stream");
+    expect(attachment.extractedText).toBeUndefined();
+  });
+
+  it("marks extracted text that exceeds the attachment budget", async () => {
+    seedAttachmentMessage("msg-long");
+    const attachment = await processUpload(
+      "chat-a",
+      "msg-long",
+      "notes.txt",
+      "text/plain",
+      new TextEncoder().encode("A".repeat(13_000)).buffer,
+    );
+    expect(attachment.textTruncated).toBe(true);
+    expect(attachment.extractedText?.length).toBeLessThanOrEqual(12_000);
+  });
+
   it("appends extracted text to string output", async () => {
     const res = await buildContentParts("Main prompt", [
       {

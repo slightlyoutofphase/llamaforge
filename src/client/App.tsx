@@ -99,10 +99,23 @@ export default function App() {
     fetchModels().then(() => fetchServerStatus());
     void refreshProcessUsage();
     const usageTimer = window.setInterval(() => {
+      if (document.hidden) return;
       if (isGeneratingRef.current) return;
+      const status = useAppStore.getState().serverStatus;
+      if (status !== "running" && status !== "loading") return;
       void refreshProcessUsage();
-    }, 10_000);
-    return () => window.clearInterval(usageTimer);
+    }, 30_000);
+    const refreshWhenVisible = () => {
+      if (document.hidden) return;
+      const status = useAppStore.getState().serverStatus;
+      if (status !== "running" && status !== "loading") return;
+      void refreshProcessUsage();
+    };
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(usageTimer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, []);
   /* eslint-enable react-hooks/exhaustive-deps */
 
@@ -321,16 +334,16 @@ export default function App() {
             {notifications.map((notification) => {
               const base =
                 notification.type === "success"
-                  ? "border-[var(--color-success)] bg-[#0f412954]"
+                  ? "border-[var(--color-success)] bg-[var(--color-surface-elevated)]"
                   : notification.type === "info"
-                    ? "border-[#3b82f6] bg-[#eff6ff]"
-                    : "border-[#ef4444] bg-[#fef2f2]";
+                    ? "border-[var(--color-accent)] bg-[var(--color-surface-elevated)]"
+                    : "border-[var(--color-error)] bg-[var(--color-surface-elevated)]";
               const text =
                 notification.type === "success"
                   ? "text-[var(--color-success)]"
                   : notification.type === "info"
-                    ? "text-[#1d4ed8]"
-                    : "text-[#b91c1c]";
+                    ? "text-[var(--color-text-primary)]"
+                    : "text-[var(--color-error)]";
 
               return (
                 <div

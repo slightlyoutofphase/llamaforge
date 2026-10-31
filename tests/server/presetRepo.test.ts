@@ -325,10 +325,36 @@ describe("presetRepo", () => {
     expect(loadPreset?.config.batchSize).toBeGreaterThanOrEqual(
       loadPreset?.config.microBatchSize ?? 0,
     );
+    expect(loadPreset?.config.contextSize).toBe(8192);
 
     expect(inferencePreset).toBeDefined();
     expect(inferencePreset?.name).toBe("Gemma");
     expect(inferencePresets.filter((preset) => preset.isDefault).length).toBeLessThanOrEqual(1);
+  });
+
+  it("caps seeded context when the GGUF advertises a huge native window", async () => {
+    await ensureModelDefaultPresets([
+      {
+        publisher: "Publisher",
+        modelName: "LongContext",
+        primaryPath: "/models/long.gguf",
+        metadata: ggufDisplayMetadata({ contextLength: 131072, name: "Long Context" }),
+      },
+      {
+        publisher: "Publisher",
+        modelName: "ShortContext",
+        primaryPath: "/models/short.gguf",
+        metadata: ggufDisplayMetadata({ contextLength: 2048, name: "Short Context" }),
+      },
+    ]);
+
+    const loadPresets = await getLoadPresets();
+    expect(
+      loadPresets.find((preset) => preset.modelPath === "/models/long.gguf")?.config.contextSize,
+    ).toBe(8192);
+    expect(
+      loadPresets.find((preset) => preset.modelPath === "/models/short.gguf")?.config.contextSize,
+    ).toBe(2048);
   });
 
   it("uses relaxed minP/repeatPenalty defaults when all three core sampling params are present in GGUF", async () => {

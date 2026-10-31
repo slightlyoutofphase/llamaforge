@@ -1141,4 +1141,91 @@ describe("stores logic", () => {
     expect(useAppStore.getState().shouldReconnect).toBe(true);
     globalThis.WebSocket = originalWebSocket;
   });
+
+  it("keeps generation active after a tool-call stop until a real stop or error", () => {
+    const originalWebSocket = globalThis.WebSocket;
+
+    class MockWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 3;
+      static instance: MockWebSocket | null = null;
+      readyState = MockWebSocket.OPEN;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        MockWebSocket.instance = this;
+      }
+      send() {}
+      close() {
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+    const timings = {
+      predicted_ms: 10,
+      predicted_n: 1,
+      predicted_per_second: 1,
+      predicted_per_token_ms: 10,
+      prompt_ms: 10,
+      prompt_n: 1,
+      prompt_per_second: 1,
+      prompt_per_token_ms: 10,
+      cache_n: 0,
+    };
+
+    act(() => {
+      useAppStore.setState({
+        currentChatId: "chat-1",
+        messages: [
+          {
+            id: "a1",
+            chatId: "chat-1",
+            role: "assistant",
+            content: "",
+            rawContent: "",
+            position: 0,
+            createdAt: 1,
+          },
+        ],
+        isGenerating: true,
+        currentGenerationId: "gen-tool",
+      });
+      useAppStore.getState().connectWs();
+    });
+
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "stop",
+          chatId: "chat-1",
+          messageId: "a1",
+          generationId: "gen-tool",
+          stopReason: "tool_calls",
+          timings,
+        }),
+      });
+    });
+
+    expect(useAppStore.getState().isGenerating).toBe(true);
+    expect(useAppStore.getState().currentGenerationId).toBe("gen-tool");
+
+    act(() => {
+      MockWebSocket.instance?.onmessage?.({
+        data: JSON.stringify({
+          type: "error",
+          chatId: "chat-1",
+          messageId: "a1",
+          generationId: "gen-follow",
+          message: "follow-up failed",
+        }),
+      });
+    });
+
+    expect(useAppStore.getState().isGenerating).toBe(false);
+    globalThis.WebSocket = originalWebSocket;
+  });
 });

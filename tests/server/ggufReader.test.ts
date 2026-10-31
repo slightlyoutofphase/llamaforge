@@ -19,6 +19,24 @@ mock.module("@huggingface/gguf", () => {
           },
         };
       }
+      if (path === "audio-only-mmproj.gguf") {
+        return {
+          metadata: {
+            "general.architecture": "clip",
+            "clip.has_vision_encoder": false,
+            "clip.has_audio_encoder": true,
+            "clip.projector_type": "audio",
+          },
+        };
+      }
+      if (path === "clip-projector.gguf") {
+        return {
+          metadata: {
+            "general.architecture": "clip",
+            "clip.projector_type": "gemma4",
+          },
+        };
+      }
       if (path === "temp_new.gguf") {
         return {
           metadata: {
@@ -81,6 +99,18 @@ describe("ggufReader", () => {
     const meta = await parseGgufMetadata("mmproj-flags.gguf");
     expect(meta.hasVisionEncoder).toBe(true);
     expect(meta.hasAudioEncoder).toBe(true);
+  });
+
+  it("keeps an explicit clip.has_vision_encoder false even when the architecture is clip", async () => {
+    const meta = await parseGgufMetadata("audio-only-mmproj.gguf");
+    expect(meta.hasVisionEncoder).toBe(false);
+    expect(meta.hasAudioEncoder).toBe(true);
+  });
+
+  it("falls back to architecture and projector type only when encoder flags are absent", async () => {
+    const meta = await parseGgufMetadata("clip-projector.gguf");
+    expect(meta.hasVisionEncoder).toBe(true);
+    expect(meta.hasAudioEncoder).toBe(false);
   });
 
   it("throws on failure", async () => {

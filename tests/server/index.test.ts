@@ -153,8 +153,8 @@ describe("server index startup", () => {
       server.stop();
     } finally {
       logSpy.mockRestore();
-      loggerModule.setSilent(Bun.env.NODE_ENV === "test");
-      loggerModule.setConfiguredLogLevel("info");
+      loggerModule.setSilent(true);
+      loggerModule.setConfiguredLogLevel("off");
     }
   });
 

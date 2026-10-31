@@ -13,6 +13,7 @@ const mockSettings = {
   theme: "dark",
   autonameEnabled: true,
   fontSize: 16,
+  lastLoadConfig: { modelPath: "/models/loaded.gguf", contextSize: 8192 },
 };
 
 describe("SettingsPanel", () => {
@@ -81,9 +82,12 @@ describe("SettingsPanel", () => {
       expect.objectContaining({ llamaServerPath: "/new/path" }),
       expect.anything(),
     );
+    const payload = updateSettingsMutate.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload["lastLoadConfig"]).toBeUndefined();
+    expect(payload["modelsPath"]).toBeUndefined();
   });
 
-  it("refreshes the model list after saving a new models path", async () => {
+  it("saves a models path on blur instead of on each keystroke", async () => {
     const fetchModelsSpy = mock().mockResolvedValue(undefined);
     useAppStore.setState({ fetchModels: fetchModelsSpy });
 
@@ -97,8 +101,15 @@ describe("SettingsPanel", () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
     });
 
+    expect(updateSettingsMutate).not.toHaveBeenCalled();
+    expect(fetchModelsSpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.blur(modelsInput);
+    });
+
     expect(updateSettingsMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ modelsPath: "/new/models" }),
+      { modelsPath: "/new/models" },
       expect.anything(),
     );
     expect(fetchModelsSpy).toHaveBeenCalled();

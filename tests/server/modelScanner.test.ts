@@ -8,7 +8,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import * as ggufReaderModule from "../../src/server/ggufReader";
-import { scanModels } from "../../src/server/modelScanner";
+import { populateMetadata, scanModels } from "../../src/server/modelScanner";
 import { initDb } from "../../src/server/persistence/db";
 import { setCachedGgufMetadata } from "../../src/server/persistence/chatRepo";
 
@@ -394,5 +394,84 @@ describe("modelScanner", () => {
     expect(entries[0]?.draftSpecType).toBe("draft-simple");
 
     parseSpy.mockImplementation(originalImpl);
+  });
+
+  it("catalogues only the first split shard and sums sibling sizes", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "llamaforge-shards-"));
+    const dir = path.join(root, "Publisher", "Split");
+    await fs.mkdir(dir, { recursive: true });
+    await Bun.write(path.join(dir, "model-00001-of-00003.gguf"), "aaaa");
+    await Bun.write(path.join(dir, "model-00002-of-00003.gguf"), "bbbb");
+    await Bun.write(path.join(dir, "model-00003-of-00003.gguf"), "cc");
+
+    const entries = await scanModels(root);
+    expect(entries).toHaveLength(1);
+    const first = entries[0];
+    if (!first) throw new Error("Expected the first split shard to be catalogued");
+    expect(path.basename(first.primaryPath)).toBe("model-00001-of-00003.gguf");
+    const populated = await populateMetadata(first);
+    expect(populated.metadata?.fileSizeBytes).toBe(10);
+
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("clears cached vision and audio flags after the mmproj companion is removed", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "llamaforge-mmproj-"));
+    const modelPath = path.join(root, "model.gguf");
+    await Bun.write(modelPath, "mock");
+    const stat = await fs.stat(modelPath);
+    await setCachedGgufMetadata(
+      modelPath,
+      stat.mtimeMs,
+      {
+        ...baseMockMetadata,
+        architecture: "llama",
+        hasVisionEncoder: true,
+        hasAudioEncoder: true,
+      },
+      { mmprojPath: path.join(root, "gone-mmproj.gguf"), mmprojMtime: 5 },
+    );
+
+    const populated = await populateMetadata({
+      publisher: "Publisher",
+      modelName: "Model",
+      primaryPath: modelPath,
+    });
+    expect(populated.metadata?.hasVisionEncoder).toBe(false);
+    expect(populated.metadata?.hasAudioEncoder).toBe(false);
+
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("ignores non-gguf files whose names contain mmproj", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "llamaforge-mmproj-txt-"));
+    await Bun.write(path.join(root, "model.gguf"), "mock");
+    await Bun.write(path.join(root, "mmproj-notes.txt"), "not a model");
+
+    const entries = await scanModels(root);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.mmProjPath).toBeUndefined();
+
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("follows a symlinked model directory once", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "llamaforge-symlink-"));
+    const real = path.join(root, "real");
+    await fs.mkdir(real);
+    await Bun.write(path.join(real, "model.gguf"), "mock");
+    const link = path.join(root, "link");
+    try {
+      await fs.symlink(real, link, "dir");
+    } catch {
+      await fs.rm(root, { recursive: true, force: true });
+      return;
+    }
+
+    const entries = await scanModels(root);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.primaryPath.endsWith(`${path.sep}model.gguf`)).toBe(true);
+
+    await fs.rm(root, { recursive: true, force: true });
   });
 });

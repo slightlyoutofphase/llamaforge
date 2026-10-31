@@ -48,12 +48,23 @@ export function optimizeLoadConfig(
   const attentionHeadCount = Math.max(1, metadata.attentionHeadCount ?? 1);
   const attentionHeadCountKv = Math.max(1, metadata.attentionHeadCountKv ?? attentionHeadCount);
 
-  const availableVram = Math.max(0, totalVram - 512 * 1024 * 1024);
+  const runtimeReserveBytes = 512 * 1024 * 1024;
+  const layerSizeOverhead = 1.1;
+  const kvElementSize = 2;
+  const headDim = embeddingLength / attentionHeadCount;
+  const bytesPerCtxToken =
+    blockCount > 0 ? 2 * blockCount * attentionHeadCountKv * headDim * kvElementSize : 1;
+  const baselineContextTokens = Math.min(4096, contextLength);
+  const kvReserveBytes = blockCount > 0 ? baselineContextTokens * bytesPerCtxToken : 0;
+  const availableForWeights = Math.max(0, totalVram - runtimeReserveBytes - kvReserveBytes);
+  const bytesPerLayer =
+    blockCount > 0 && metadata.fileSizeBytes > 0
+      ? (metadata.fileSizeBytes / blockCount) * layerSizeOverhead
+      : 0;
   let gpuLayers = 0;
 
-  if (hasGpu && blockCount > 0 && metadata.fileSizeBytes > 0) {
-    const bytesPerLayer = metadata.fileSizeBytes / (blockCount * 1.1);
-    gpuLayers = Math.floor(availableVram / Math.max(1, bytesPerLayer));
+  if (hasGpu && bytesPerLayer > 0) {
+    gpuLayers = Math.floor(availableForWeights / bytesPerLayer);
     gpuLayers = Math.max(0, Math.min(gpuLayers, blockCount));
   }
 
@@ -64,19 +75,13 @@ export function optimizeLoadConfig(
 
   suggested.contextSize = 4096;
   if (blockCount > 0 && metadata.contextLength) {
-    const kvElementSize = 2;
-    const headDim = embeddingLength / attentionHeadCount;
-    const bytesPerCtxToken = 2 * blockCount * attentionHeadCountKv * headDim * kvElementSize;
-    const totalEstimatedBytesPerLayer = metadata.fileSizeBytes / blockCount;
-    const vramOccupiedByLayers = gpuLayers * totalEstimatedBytesPerLayer;
+    const weightBytes = gpuLayers * (metadata.fileSizeBytes / blockCount) * layerSizeOverhead;
     const ramHeadroom = Math.max(
       0,
       hardware.totalRamBytes - metadata.fileSizeBytes - 2 * 1024 * 1024 * 1024,
     );
     const headroom =
-      gpuLayers > 0
-        ? Math.max(0, totalVram - vramOccupiedByLayers - 512 * 1024 * 1024)
-        : ramHeadroom;
+      gpuLayers > 0 ? Math.max(0, totalVram - weightBytes - runtimeReserveBytes) : ramHeadroom;
     let suggestedCtx = Math.floor(headroom / Math.max(1, bytesPerCtxToken));
     suggestedCtx = Math.min(suggestedCtx, contextLength);
     if (suggestedCtx >= 32768) suggested.contextSize = 32768;

@@ -3,6 +3,7 @@
  * Client-side logging helpers that mirror messages to the in-app debug console.
  */
 
+import { formatLogArgument } from "../shared/logFormat";
 import { useAppStore } from "./store";
 
 let isSilent = false;
@@ -34,7 +35,7 @@ export function setSilent(silent: boolean) {
  */
 function formatArgs(args: unknown[]): string {
   if (args.length === 0) return "";
-  return ` ${args.map((a) => (typeof a === "object" ? JSON.stringify(a) : String(a))).join(" ")}`;
+  return ` ${args.map((arg) => formatLogArgument(arg)).join(" ")}`;
 }
 
 /**

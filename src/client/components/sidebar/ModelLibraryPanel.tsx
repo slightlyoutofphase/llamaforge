@@ -41,7 +41,6 @@ export function ModelLibraryPanel() {
   const serverStatus = useAppStore((s) => s.serverStatus);
   const isGenerating = useAppStore((s) => s.isGenerating);
   const isWaitingForToolApproval = useAppStore((s) => s.isWaitingForToolApproval);
-  const messages = useAppStore((s) => s.messages);
   const rescanModels = useAppStore((s) => s.rescanModels);
   const { setRightPanelView } = useUiStore();
   const { data: loadPresets } = useLoadPresets();
@@ -80,6 +79,7 @@ export function ModelLibraryPanel() {
     const hasVision = !!selectedModel.metadata?.hasVisionEncoder;
     const hasAudio = !!selectedModel.metadata?.hasAudioEncoder;
 
+    const messages = useAppStore.getState().messages;
     const visionMsgs = messages.filter((m) =>
       m.attachments?.some(
         (a) => a.mimeType.startsWith("image/") || a.mimeType.startsWith("video/"),

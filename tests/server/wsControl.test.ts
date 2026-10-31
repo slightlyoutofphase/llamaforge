@@ -14,6 +14,23 @@ describe("wsControl", () => {
     clearConnections();
   });
 
+  it("leaves generations running when another tab is still connected", async () => {
+    const abortSpy = spyOn(streamProxy, "abortAllGenerations").mockImplementation(() => {});
+    const first = { send: () => 0 } as unknown as ServerWebSocket<unknown>;
+    const second = { send: () => 0 } as unknown as ServerWebSocket<unknown>;
+    addConnection(first);
+    addConnection(second);
+
+    try {
+      await dispatchClientFrame(first, JSON.stringify({ type: "session_close" }));
+      expect(abortSpy).not.toHaveBeenCalled();
+    } finally {
+      abortSpy.mockRestore();
+      removeConnection(first);
+      removeConnection(second);
+    }
+  });
+
   it("aborts every generation when the client closes its session", async () => {
     const abortSpy = spyOn(streamProxy, "abortAllGenerations").mockImplementation(() => {});
     const ws = { send: () => 0 } as unknown as ServerWebSocket<unknown>;

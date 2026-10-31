@@ -545,16 +545,26 @@ export async function getChat(
         fileName: string;
         virBudget: number | null;
         createdAt: number;
+        textTruncated: number;
       },
       string[]
     >(
-      `SELECT id, message_id as messageId, mime_type as mimeType, file_path as filePath, file_name as fileName, vir_budget as virBudget, created_at as createdAt FROM attachments WHERE message_id IN (${placeholders})`,
+      `SELECT id, message_id as messageId, mime_type as mimeType, file_path as filePath, file_name as fileName, vir_budget as virBudget, created_at as createdAt, text_truncated as textTruncated FROM attachments WHERE message_id IN (${placeholders})`,
     );
     const allAttachments = attStmt.all(...messageIds);
     const attMap = new Map<string, Attachment[]>();
     for (const att of allAttachments) {
       const arr = attMap.get(att.messageId) || [];
-      arr.push({ ...att, virBudget: att.virBudget ?? undefined });
+      arr.push({
+        id: att.id,
+        messageId: att.messageId,
+        mimeType: att.mimeType,
+        filePath: att.filePath,
+        fileName: att.fileName,
+        virBudget: att.virBudget ?? undefined,
+        createdAt: att.createdAt,
+        ...(att.textTruncated ? { textTruncated: true } : {}),
+      });
       attMap.set(att.messageId, arr);
     }
     for (const msg of chat.messages) {
@@ -949,7 +959,7 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
   );
 
   const insertAttachment = db.prepare(
-    "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at, text_truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   );
 
   const fileOperations: BranchAttachmentCopy[] = [];
@@ -1020,6 +1030,7 @@ export async function createBranch(chatId: string, messageId: string): Promise<s
           att.fileName,
           att.virBudget || null,
           att.createdAt,
+          att.textTruncated ? 1 : 0,
         );
       }
     }
@@ -1093,6 +1104,7 @@ export async function exportChat(chatId: string, format: "json" | "markdown"): P
             file_name: string;
             vir_budget: number | null;
             created_at: number;
+            text_truncated: number;
           },
           [string]
         >("SELECT * FROM attachments WHERE message_id = ?")
@@ -1123,6 +1135,7 @@ export async function exportChat(chatId: string, format: "json" | "markdown"): P
               filePath: att.file_path,
               createdAt: att.created_at,
               virBudget: att.vir_budget ?? undefined,
+              ...(att.text_truncated ? { textTruncated: true } : {}),
               base64Data: b64,
             };
           }),
@@ -1152,7 +1165,7 @@ export async function exportChat(chatId: string, format: "json" | "markdown"): P
       }
 
       if (m.toolCallsJson) {
-        md += `*Tool Calls:* \`\`\`json\n${m.toolCallsJson}\n\`\`\`\n\n`;
+        md += `*Tool Calls:*\n\n\`\`\`json\n${m.toolCallsJson}\n\`\`\`\n\n`;
       }
 
       md += `---\n\n`;
@@ -1199,7 +1212,7 @@ export async function importChat(jsonContent: string): Promise<string> {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertAttachment = db.prepare(
-    "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    "INSERT INTO attachments (id, message_id, mime_type, file_path, file_name, vir_budget, created_at, text_truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
   );
 
   // M3 fix: track attachment metadata alongside file writes so we can skip
@@ -1213,6 +1226,7 @@ export async function importChat(jsonContent: string): Promise<string> {
     relPath: string;
     fileName: string;
     virBudget: number | null;
+    textTruncated: boolean;
   }[] = [];
 
   const runTransaction = db.transaction(() => {
@@ -1255,6 +1269,7 @@ export async function importChat(jsonContent: string): Promise<string> {
               fileName: att.fileName || "file",
               base64Data: att.base64Data as string,
               virBudget: att.virBudget,
+              textTruncated: att.textTruncated === true,
             }));
           const copiedNames = allocateCopiedAttachmentNames(importable);
           for (const att of importable) {
@@ -1282,6 +1297,7 @@ export async function importChat(jsonContent: string): Promise<string> {
               relPath,
               fileName: att.fileName,
               virBudget: att.virBudget || null,
+              textTruncated: att.textTruncated,
             });
           }
         }
@@ -1306,6 +1322,7 @@ export async function importChat(jsonContent: string): Promise<string> {
         fw.fileName,
         fw.virBudget,
         now,
+        fw.textTruncated ? 1 : 0,
       );
     } catch (err) {
       logWarn("[chatRepo] Failed to write imported attachment file, skipping DB record", {

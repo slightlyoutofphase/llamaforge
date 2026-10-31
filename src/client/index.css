@@ -96,6 +96,31 @@
 }
 
 /*
+ * Chat markdown follows the app palette in both themes. `prose-invert` always
+ * paints light text, which is unreadable on the light background. Code blocks
+ * keep a dark surface because highlight.js is loaded with the github-dark theme.
+ */
+.prose {
+  --tw-prose-body: var(--color-text-primary);
+  --tw-prose-headings: var(--color-text-primary);
+  --tw-prose-lead: var(--color-text-secondary);
+  --tw-prose-links: var(--color-accent);
+  --tw-prose-bold: var(--color-text-primary);
+  --tw-prose-counters: var(--color-text-secondary);
+  --tw-prose-bullets: var(--color-text-muted);
+  --tw-prose-hr: var(--color-border);
+  --tw-prose-quotes: var(--color-text-secondary);
+  --tw-prose-quote-borders: var(--color-border);
+  --tw-prose-captions: var(--color-text-muted);
+  --tw-prose-kbd: var(--color-text-primary);
+  --tw-prose-code: var(--color-text-primary);
+  --tw-prose-pre-code: #e5e7eb;
+  --tw-prose-pre-bg: #11111b;
+  --tw-prose-th-borders: var(--color-border);
+  --tw-prose-td-borders: var(--color-border);
+}
+
+/*
  * Thinking traces are markdown, but they must not inherit the large default
  * gaps from headings/paragraphs. `whitespace-pre-wrap` is intentionally
  * omitted: ReactMarkdown already emits block elements, and pre-wrap would

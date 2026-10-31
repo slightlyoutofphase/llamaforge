@@ -463,6 +463,9 @@ async function collectGpuProcessUsage(
 
 /** Cached RAM/VRAM sample reused while a generation is in flight. */
 let lastProcessUsage: AppProcessUsage | null = null;
+let processUsageInFlight: Promise<AppProcessUsage> | null = null;
+let processUsageCachedAt = 0;
+const PROCESS_USAGE_CACHE_MS = 5_000;
 
 /**
  * Returns whether live RAM/VRAM sampling should be skipped during generation.
@@ -487,9 +490,26 @@ export function shouldSkipLiveProcessSample(
  * @returns App-scoped process usage snapshot.
  */
 export async function getAppProcessUsage(): Promise<AppProcessUsage> {
-  if (shouldSkipLiveProcessSample(getActiveGenerations().size, lastProcessUsage !== null)) {
-    return lastProcessUsage ?? { ramBytes: 0, vramBytes: 0, llamaServerPid: null };
+  if (
+    lastProcessUsage &&
+    (Date.now() - processUsageCachedAt < PROCESS_USAGE_CACHE_MS ||
+      shouldSkipLiveProcessSample(getActiveGenerations().size, true))
+  ) {
+    return lastProcessUsage;
   }
+  if (processUsageInFlight) return processUsageInFlight;
+  processUsageInFlight = sampleAppProcessUsage().finally(() => {
+    processUsageInFlight = null;
+  });
+  return processUsageInFlight;
+}
+
+/**
+ * Collects a fresh process-usage sample and stores it for a few seconds.
+ *
+ * @returns App-scoped process usage snapshot.
+ */
+async function sampleAppProcessUsage(): Promise<AppProcessUsage> {
   const bunPid = process.pid;
   const llamaPid = getActiveServerPid();
   const namedLlama = await findLlamaServerProcessesByName();
@@ -500,6 +520,7 @@ export async function getAppProcessUsage(): Promise<AppProcessUsage> {
       vramBytes: 0,
       llamaServerPid: null,
     };
+    processUsageCachedAt = Date.now();
     return lastProcessUsage;
   }
 
@@ -539,6 +560,7 @@ export async function getAppProcessUsage(): Promise<AppProcessUsage> {
     vramBytes,
     llamaServerPid: llamaPid,
   };
+  processUsageCachedAt = Date.now();
   return lastProcessUsage;
 }
 
@@ -550,4 +572,6 @@ export async function getAppProcessUsage(): Promise<AppProcessUsage> {
  */
 export function __resetProcessUsageCache(): void {
   lastProcessUsage = null;
+  processUsageCachedAt = 0;
+  processUsageInFlight = null;
 }

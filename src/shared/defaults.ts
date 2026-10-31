@@ -154,6 +154,34 @@ export function createDefaultLoadConfig(modelPath: string = ""): ModelLoadConfig
 }
 
 /**
+ * Largest context window written into an auto-created load preset.
+ *
+ * A GGUF can advertise 128k to 1M tokens of native context. Seeding that value
+ * asks llama-server for a KV cache that often does not fit, and an explicit
+ * `--ctx-size` prevents `--fit` from shrinking it.
+ */
+export const SEEDED_LOAD_CONTEXT_CAP = 8192;
+
+/**
+ * Context size stored on a load preset created from a scanned model.
+ *
+ * Missing or non-positive native lengths fall back to 4096. Longer native
+ * windows are capped so the first load stays within a modest KV cache.
+ *
+ * @param nativeContextLength - `contextLength` from GGUF metadata, when known.
+ * @returns Context size in tokens for the seeded preset.
+ */
+export function seededLoadContextSize(nativeContextLength: number | undefined): number {
+  const native =
+    typeof nativeContextLength === "number" &&
+    Number.isFinite(nativeContextLength) &&
+    nativeContextLength > 0
+      ? Math.trunc(nativeContextLength)
+      : 4096;
+  return Math.min(native, SEEDED_LOAD_CONTEXT_CAP);
+}
+
+/**
  * Returns whether a speculative mode loads a sidecar draft GGUF.
  *
  * @param specType - Selected speculative decoding mode.

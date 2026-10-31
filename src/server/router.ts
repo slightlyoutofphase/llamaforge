@@ -55,7 +55,6 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: {
       "Content-Type": "application/json",
-      Connection: "close",
     },
   });
 }
@@ -68,6 +67,47 @@ function jsonResponse(body: unknown, status = 200): Response {
  */
 function badRequest(message: string): Response {
   return jsonResponse({ error: message }, 400);
+}
+
+/**
+ * Returns a 409 when no llama-server process is ready to generate.
+ *
+ * @returns A JSON error response, or `null` when generation can start.
+ */
+function modelServerUnavailableResponse(): Response | null {
+  const server = getServerStatus();
+  if (server.status === "running" && server.port) return null;
+  return jsonResponse({ error: "Llama-server is not running." }, 409);
+}
+
+/**
+ * Maps a thrown route error onto a JSON status the client can display.
+ *
+ * "Not running" is 409. A missing chat or message is 404. Other failures stay 500
+ * and include the underlying message instead of Bun's plain-text error page.
+ *
+ * @param err - Failure thrown by a route handler.
+ * @param fallback - Message used when `err` has no usable text.
+ * @returns JSON error response.
+ */
+function routeErrorResponse(err: unknown, fallback: string): Response {
+  const message = err instanceof Error && err.message.trim() ? err.message : fallback;
+  const status =
+    message === "Llama-server is not running." || message === "Generation cancelled."
+      ? 409
+      : message === "Chat not found" ||
+          message === "Message not found" ||
+          message === "Message not found in chat"
+        ? 404
+        : message.startsWith("Cannot continue")
+          ? 400
+          : 500;
+  if (status >= 500) {
+    logError(fallback, err);
+  } else {
+    logWarn(fallback, message);
+  }
+  return jsonResponse({ error: message }, status);
 }
 
 /**
@@ -344,11 +384,16 @@ export function createRouter() {
       return models;
     })();
 
-    modelsRefreshPromise = refreshPromise.finally(() => {
-      if (modelsRefreshPromise === refreshPromise) {
+    let tracked: Promise<ModelEntry[]>;
+    tracked = refreshPromise.finally(() => {
+      if (modelsRefreshPromise === tracked) {
         modelsRefreshPromise = null;
       }
     });
+    modelsRefreshPromise = tracked;
+    // Callers await `refreshPromise`. The derived promise still rejects on its
+    // own, and without this handler that rejection is unhandled.
+    void tracked.catch(() => {});
 
     return refreshPromise;
   };
@@ -569,12 +614,16 @@ export function createRouter() {
         const { getMetadataForPath } = await import("./persistence/chatRepo");
         const { optimizeLoadConfig } = await import("./optimizer");
 
-        const hw = await getHardwareInfo();
-        const metadata = await getMetadataForPath(modelPath);
-        if (!metadata) return new Response("Model metadata not found", { status: 404 });
+        try {
+          const hw = await getHardwareInfo();
+          const metadata = await getMetadataForPath(modelPath);
+          if (!metadata) return jsonResponse({ error: "Model metadata not found" }, 404);
 
-        const optimized = optimizeLoadConfig(hw, metadata);
-        return jsonResponse(optimized);
+          const optimized = optimizeLoadConfig(hw, metadata);
+          return jsonResponse(optimized);
+        } catch (err: unknown) {
+          return routeErrorResponse(err, "Failed to optimize hardware.");
+        }
       }
 
       if (req.method === "GET" && url.pathname === "/api/settings") {
@@ -776,11 +825,21 @@ export function createRouter() {
           if (req.method === "PUT") {
             const body = await readJsonObject(req);
             if (body instanceof Response) return body;
-            await chatRepo.updateChat(id, body);
-            return jsonResponse({ success: true });
+            try {
+              await chatRepo.updateChat(id, body);
+              return jsonResponse({ success: true });
+            } catch (err: unknown) {
+              return routeErrorResponse(err, "Failed to update chat.");
+            }
           }
           if (req.method === "DELETE") {
             try {
+              const { abortGeneration } = await import("./streamProxy");
+              abortGeneration(id, "cancelled");
+              const { cancelPendingApprovals } = await import("./tools");
+              cancelPendingApprovals(id, "cancelled");
+              // Let the aborted turn record its tool result before the chat row disappears.
+              await new Promise((resolve) => setTimeout(resolve, 0));
               await chatRepo.deleteChat(id);
               return jsonResponse({ success: true });
             } catch (err: unknown) {
@@ -835,52 +894,69 @@ export function createRouter() {
             });
           }
           if (action === "regenerate") {
+            const unavailable = modelServerUnavailableResponse();
+            if (unavailable) return unavailable;
             const chatForRegen = await chatRepo.getChat(id);
-            const msgs = chatForRegen?.messages || [];
+            if (!chatForRegen) return jsonResponse({ error: "Chat not found" }, 404);
+            const msgs = chatForRegen.messages || [];
 
-            if (msgs.length > 0) {
-              const lastMsg = msgs[msgs.length - 1];
-              if (lastMsg && (lastMsg.role === "assistant" || lastMsg.role === "tool")) {
-                // Find the last user message to keep
-                let lastUserIdx = msgs.length - 1;
-                while (lastUserIdx >= 0) {
-                  const currentMessage = msgs[lastUserIdx];
-                  if (!currentMessage || currentMessage.role === "user") break;
-                  lastUserIdx--;
+            try {
+              if (msgs.length > 0) {
+                const lastMsg = msgs[msgs.length - 1];
+                if (lastMsg && (lastMsg.role === "assistant" || lastMsg.role === "tool")) {
+                  // Find the last user message to keep
+                  let lastUserIdx = msgs.length - 1;
+                  while (lastUserIdx >= 0) {
+                    const currentMessage = msgs[lastUserIdx];
+                    if (!currentMessage || currentMessage.role === "user") break;
+                    lastUserIdx--;
+                  }
+                  const positionToKeep = lastUserIdx >= 0 ? (msgs[lastUserIdx]?.position ?? 0) : 0;
+                  await chatRepo.deleteMessagesAfter(id, positionToKeep);
                 }
-                const positionToKeep = lastUserIdx >= 0 ? (msgs[lastUserIdx]?.position ?? 0) : 0;
-                await chatRepo.deleteMessagesAfter(id, positionToKeep);
               }
-            }
 
-            const { proxyCompletion } = await import("./streamProxy");
-            const messageId = await proxyCompletion({
-              chatId: id,
-              content: "",
-              attachments: [],
-              isRegenerate: true,
-            });
-            return jsonResponse({ messageId });
+              const { proxyCompletion } = await import("./streamProxy");
+              const messageId = await proxyCompletion({
+                chatId: id,
+                content: "",
+                attachments: [],
+                isRegenerate: true,
+              });
+              return jsonResponse({ messageId });
+            } catch (err: unknown) {
+              return routeErrorResponse(err, "Failed to regenerate.");
+            }
           }
           if (action === "continue") {
-            const chatForContinue = await chatRepo.getChat(id);
-            if (!chatForContinue) {
-              return jsonResponse({ error: "Chat not found" }, 404);
+            try {
+              const chatForContinue = await chatRepo.getChat(id);
+              if (!chatForContinue) {
+                return jsonResponse({ error: "Chat not found" }, 404);
+              }
+              const lastMsg = chatForContinue.messages?.[chatForContinue.messages.length - 1];
+              if (lastMsg?.role !== "assistant") {
+                return badRequest(
+                  "Continue requires the last message to be an assistant response.",
+                );
+              }
+              const unavailable = modelServerUnavailableResponse();
+              if (unavailable) return unavailable;
+              const { proxyCompletion } = await import("./streamProxy");
+              const messageId = await proxyCompletion({
+                chatId: id,
+                content: "",
+                attachments: [],
+                isContinue: true,
+              });
+              return jsonResponse({ messageId });
+            } catch (err: unknown) {
+              return routeErrorResponse(err, "Failed to continue.");
             }
-            const lastMsg = chatForContinue.messages?.[chatForContinue.messages.length - 1];
-            if (lastMsg?.role !== "assistant") {
-              return badRequest("Continue requires the last message to be an assistant response.");
-            }
-            const { proxyCompletion } = await import("./streamProxy");
-            const messageId = await proxyCompletion({
-              chatId: id,
-              content: "",
-              attachments: [],
-              isContinue: true,
-            });
-            return jsonResponse({ messageId });
           }
           if (action === "branch-and-regenerate") {
+            const unavailable = modelServerUnavailableResponse();
+            if (unavailable) return unavailable;
             const body = await readJsonObject(req);
             if (body instanceof Response) return body;
             const requestedMessageId = getStringField(body, "messageId");
@@ -890,7 +966,8 @@ export function createRouter() {
 
             // We need to branch from the user message BEFORE the assistant message we are regenerating
             const chatForRegen = await chatRepo.getChat(id);
-            const msgs = chatForRegen?.messages || [];
+            if (!chatForRegen) return jsonResponse({ error: "Chat not found" }, 404);
+            const msgs = chatForRegen.messages || [];
             let branchPoint = requestedMessageId;
             const msgIdx = msgs.findIndex((m) => m.id === branchPoint);
 
@@ -909,16 +986,19 @@ export function createRouter() {
               if (branchMessage) branchPoint = branchMessage.id;
             }
 
-            const newId = await chatRepo.createBranch(id, branchPoint);
-            const { proxyCompletion } = await import("./streamProxy");
-            // Regenerate
-            const generatedMessageId = await proxyCompletion({
-              chatId: newId,
-              content: "",
-              attachments: [],
-              isRegenerate: true,
-            });
-            return jsonResponse({ id: newId, messageId: generatedMessageId });
+            try {
+              const newId = await chatRepo.createBranch(id, branchPoint);
+              const { proxyCompletion } = await import("./streamProxy");
+              const generatedMessageId = await proxyCompletion({
+                chatId: newId,
+                content: "",
+                attachments: [],
+                isRegenerate: true,
+              });
+              return jsonResponse({ id: newId, messageId: generatedMessageId });
+            } catch (err: unknown) {
+              return routeErrorResponse(err, "Failed to branch and regenerate.");
+            }
           }
           if (action === "branch-and-edit") {
             const body = await readJsonObject(req);
@@ -928,6 +1008,13 @@ export function createRouter() {
             if (!requestedMessageId || !newContent || newContent.length === 0) {
               return badRequest("branch-and-edit requires a valid messageId and newContent.");
             }
+            const chatForEdit = await chatRepo.getChat(id);
+            if (!chatForEdit) return jsonResponse({ error: "Chat not found" }, 404);
+            if (!chatForEdit.messages?.some((message) => message.id === requestedMessageId)) {
+              return jsonResponse({ error: "Message not found in chat" }, 404);
+            }
+            const unavailable = modelServerUnavailableResponse();
+            if (unavailable) return unavailable;
             try {
               const newId = await chatRepo.createBranch(id, requestedMessageId);
               const newChat = await chatRepo.getChat(newId);
@@ -951,11 +1038,17 @@ export function createRouter() {
               const message =
                 error instanceof Error ? error.message : "Failed to branch and edit chat.";
               const status =
-                message === "Chat not found" || message === "Message not found in chat" ? 404 : 500;
+                message === "Llama-server is not running." || message === "Generation cancelled."
+                  ? 409
+                  : message === "Chat not found" || message === "Message not found in chat"
+                    ? 404
+                    : 500;
               return jsonResponse({ error: message }, status);
             }
           }
           if (action === "branch-and-continue") {
+            const unavailable = modelServerUnavailableResponse();
+            if (unavailable) return unavailable;
             const body = await readJsonObject(req);
             if (body instanceof Response) return body;
             const requestedMessageId = getStringField(body, "messageId");
@@ -967,7 +1060,8 @@ export function createRouter() {
             // If we are branching from an assistant message, we must also include
             // any immediately following tool messages in the branch to maintain state integrity.
             const chatForBranch = await chatRepo.getChat(id);
-            const msgs = chatForBranch?.messages || [];
+            if (!chatForBranch) return jsonResponse({ error: "Chat not found" }, 404);
+            const msgs = chatForBranch.messages || [];
             let branchPoint = requestedMessageId;
             const msgIdx = msgs.findIndex((m) => m.id === branchPoint);
 
@@ -982,15 +1076,19 @@ export function createRouter() {
               }
             }
 
-            const newId = await chatRepo.createBranch(id, branchPoint);
-            const { proxyCompletion } = await import("./streamProxy");
-            const generatedMessageId = await proxyCompletion({
-              chatId: newId,
-              content: "",
-              attachments: [],
-              isContinue: true,
-            });
-            return jsonResponse({ id: newId, messageId: generatedMessageId });
+            try {
+              const newId = await chatRepo.createBranch(id, branchPoint);
+              const { proxyCompletion } = await import("./streamProxy");
+              const generatedMessageId = await proxyCompletion({
+                chatId: newId,
+                content: "",
+                attachments: [],
+                isContinue: true,
+              });
+              return jsonResponse({ id: newId, messageId: generatedMessageId });
+            } catch (err: unknown) {
+              return routeErrorResponse(err, "Failed to branch and continue.");
+            }
           }
         }
         if (parts.length === 6 && parts[4] === "messages") {
@@ -1148,9 +1246,13 @@ export function createRouter() {
         if (!chatId) {
           return badRequest("autoname requires a valid chatId.");
         }
-        const autoname = await import("./autoname");
-        await autoname.triggerAutoname(chatId);
-        return jsonResponse({ success: true });
+        try {
+          const autoname = await import("./autoname");
+          await autoname.triggerAutoname(chatId);
+          return jsonResponse({ success: true });
+        } catch (err: unknown) {
+          return routeErrorResponse(err, "Failed to name the chat.");
+        }
       }
 
       // Health check
@@ -1160,7 +1262,12 @@ export function createRouter() {
 
       // Serve attachments
       if (req.method === "GET" && url.pathname.startsWith("/api/attachments/")) {
-        const attachPath = decodeURIComponent(url.pathname.replace("/api/attachments/", ""));
+        let attachPath: string;
+        try {
+          attachPath = decodeURIComponent(url.pathname.replace("/api/attachments/", ""));
+        } catch {
+          return badRequest("Invalid attachment path.");
+        }
         const absPath = normalizeAttachmentPath(attachPath);
         if (!absPath) {
           return badRequest("Invalid attachment path.");

@@ -23,6 +23,41 @@ const NUMERIC_DEFAULTS: NumericDraftState = {
   serverPort: String(DEFAULT_APP_SETTINGS.serverPort),
 };
 
+/** Settings keys that autosave must not write back. */
+const OMITTED_FROM_AUTOSAVE = new Set<keyof AppSettings>([
+  "lastLoadConfig",
+  "lastLoadThinkingTagOverride",
+  "modelsPath",
+]);
+
+/**
+ * Builds the settings fields that changed, excluding values the server owns.
+ *
+ * `lastLoadConfig` is written by model load. Sending the panel's copy back
+ * overwrites a model that was loaded while settings were open. `modelsPath`
+ * is saved on blur or by Rescan so a half-typed directory is not scanned.
+ *
+ * @param previous - Last settings snapshot stored in the panel.
+ * @param next - Current editor state.
+ * @returns Only the keys that should be written by autosave.
+ */
+function changedAutosaveSettings(
+  previous: Partial<AppSettings>,
+  next: Partial<AppSettings>,
+): Partial<AppSettings> {
+  const updates: Partial<AppSettings> = {};
+  const keys = new Set<keyof AppSettings>([
+    ...(Object.keys(previous) as (keyof AppSettings)[]),
+    ...(Object.keys(next) as (keyof AppSettings)[]),
+  ]);
+  for (const key of keys) {
+    if (OMITTED_FROM_AUTOSAVE.has(key)) continue;
+    if (JSON.stringify(previous[key]) === JSON.stringify(next[key])) continue;
+    updates[key] = next[key] as never;
+  }
+  return updates;
+}
+
 /**
  * Builds the editable string drafts used by numeric settings inputs.
  *
@@ -106,7 +141,10 @@ export function SettingsPanel() {
   };
 
   /**
-   * Updates the request-timeout draft field and mirrors valid values into persisted settings state.
+   * Updates the inactivity-timeout draft and mirrors non-negative values into settings state.
+   *
+   * Zero is kept so the user can disable the timer. Incomplete text stays in the draft
+   * until it parses as a finite number greater than or equal to zero.
    *
    * @param rawValue - Raw string value from the timeout input.
    * @returns No return value.
@@ -119,7 +157,7 @@ export function SettingsPanel() {
     }
 
     const parsed = Number.parseFloat(trimmed);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
+    if (!Number.isFinite(parsed) || parsed < 0) {
       return;
     }
 
@@ -131,19 +169,18 @@ export function SettingsPanel() {
       return;
     }
 
-    if (JSON.stringify(localState) === JSON.stringify(lastPersistedStateRef.current)) {
-      return;
-    }
-
     const pendingState = localState;
     const previousState = lastPersistedStateRef.current;
+    const updates = changedAutosaveSettings(previousState, pendingState);
+    if (Object.keys(updates).length === 0) return;
+
     const timeoutId = window.setTimeout(() => {
-      persistSettingsRef.current(pendingState, {
+      persistSettingsRef.current(updates, {
         onSuccess: () => {
-          if (previousState?.modelsPath !== pendingState.modelsPath) {
-            void useAppStore.getState().fetchModels();
-          }
-          lastPersistedStateRef.current = pendingState;
+          lastPersistedStateRef.current = {
+            ...previousState,
+            ...updates,
+          };
         },
       });
     }, 250);
@@ -151,6 +188,30 @@ export function SettingsPanel() {
 
     return () => window.clearTimeout(timeoutId);
   }, [localState]);
+
+  /**
+   * Writes the models directory when it changed, then runs the follow-up scan.
+   *
+   * @param afterSave - Called after the path is stored, or immediately when it is unchanged.
+   * @returns No return value.
+   */
+  const saveModelsPath = (afterSave: () => void) => {
+    const modelsPath = localState.modelsPath ?? "";
+    const previous = lastPersistedStateRef.current;
+    if (!previous || previous.modelsPath === modelsPath) {
+      afterSave();
+      return;
+    }
+    persistSettingsRef.current(
+      { modelsPath },
+      {
+        onSuccess: () => {
+          lastPersistedStateRef.current = { ...previous, modelsPath };
+          afterSave();
+        },
+      },
+    );
+  };
 
   if (isLoading) {
     return (
@@ -203,6 +264,11 @@ export function SettingsPanel() {
               type="text"
               value={localState.modelsPath || ""}
               onChange={(e) => setLocalState((prev) => ({ ...prev, modelsPath: e.target.value }))}
+              onBlur={() => {
+                saveModelsPath(() => {
+                  void useAppStore.getState().fetchModels();
+                });
+              }}
               placeholder={settings?.modelsPath || "Models directory"}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm focus:border-[var(--color-accent)] outline-none"
             />
@@ -213,12 +279,8 @@ export function SettingsPanel() {
                   window.clearTimeout(saveTimeoutRef.current);
                   saveTimeoutRef.current = null;
                 }
-                const pendingState = localState;
-                updateMut.mutate(pendingState, {
-                  onSuccess: () => {
-                    lastPersistedStateRef.current = pendingState;
-                    void useAppStore.getState().rescanModels();
-                  },
+                saveModelsPath(() => {
+                  void useAppStore.getState().rescanModels();
                 });
               }}
               className="w-full mt-1 flex items-center justify-center gap-2 px-3 py-1.5 bg-[var(--color-surface-elevated)] border border-[var(--color-border)] rounded-md hover:bg-[var(--color-bg)] active:bg-[var(--color-border)] active:scale-[0.98] transition-colors text-xs font-medium">
@@ -557,15 +619,21 @@ export function SettingsPanel() {
           </div>
           <div className="space-y-2">
             <label htmlFor="timeout" className="text-sm font-medium">
-              Request Timeout (sec)
+              Generation inactivity timeout (sec)
             </label>
             <input
               id="timeout"
               type="number"
+              min={0}
+              step="any"
               value={numericDrafts.requestTimeoutSeconds}
               onChange={(e) => updateTimeoutDraft(e.target.value)}
               className="w-full bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md px-3 py-1.5 text-sm"
             />
+            <p className="text-[10px] text-[var(--color-text-muted)] leading-tight">
+              0 disables the timeout. It starts after the first token, so prompt evaluation is not
+              cut off.
+            </p>
           </div>
         </section>
 
@@ -594,7 +662,15 @@ export function SettingsPanel() {
 
       <div className="p-4 border-t border-[var(--color-border)] bg-[var(--color-surface-elevated)] text-xs text-[var(--color-text-muted)] flex items-center gap-2">
         {updateMut.isPending ? <Loader2 className="animate-spin" size={14} /> : null}
-        <span>{updateMut.isPending ? "Saving settings..." : "Changes save automatically."}</span>
+        <span>
+          {updateMut.isError
+            ? updateMut.error instanceof Error
+              ? updateMut.error.message
+              : "Failed to save settings."
+            : updateMut.isPending
+              ? "Saving settings..."
+              : "Changes save automatically."}
+        </span>
       </div>
     </div>
   );

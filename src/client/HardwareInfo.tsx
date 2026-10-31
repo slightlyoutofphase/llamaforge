@@ -53,9 +53,9 @@ export function HardwareInfo() {
               <span className="text-sm font-medium">Accelerators</span>
             </div>
             <div className="space-y-2">
-              {hardware.gpus.map((gpu) => (
+              {hardware.gpus.map((gpu, index) => (
                 <div
-                  key={gpu.name}
+                  key={`${gpu.backend}:${gpu.name}:${index}`}
                   className="bg-[var(--color-surface-elevated)] p-2 rounded-md border border-[var(--color-border)]">
                   <div className="text-xs font-medium truncate" title={gpu.name}>
                     {gpu.name}

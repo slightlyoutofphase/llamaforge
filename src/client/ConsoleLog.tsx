@@ -17,7 +17,21 @@ const LOG_OVERSCAN_ROWS = 12;
  * @returns The rendered React element, or null if not visible.
  */
 export function ConsoleLog() {
-  const { isConsoleVisible, toggleConsole } = useUiStore();
+  const isConsoleVisible = useUiStore((state) => state.isConsoleVisible);
+  if (!isConsoleVisible) return null;
+  return <ConsoleLogPanel />;
+}
+
+/**
+ * Log panel mounted only while the console is open.
+ *
+ * Keeping the log subscription here avoids filtering the buffer on every server
+ * line while the console is hidden.
+ *
+ * @returns The rendered console panel.
+ */
+function ConsoleLogPanel() {
+  const toggleConsole = useUiStore((state) => state.toggleConsole);
   const logs = useAppStore((state) => state.logs);
   const [filter, setFilter] = useState("ALL");
   const [search, setSearch] = useState("");
@@ -74,10 +88,8 @@ export function ConsoleLog() {
   const endIndex = Math.min(filteredLogs.length, startIndex + visibleRowCount);
   const visibleLogs = filteredLogs.slice(startIndex, endIndex);
 
-  if (!isConsoleVisible) return null;
-
   return (
-    <div className="absolute bottom-0 left-0 right-0 h-80 bg-[var(--color-bg)] border-t border-[var(--color-border)] shadow-[0_-10px_30px_rgba(0,0,0,0.5)] flex flex-col z-50">
+    <div className="h-80 shrink-0 bg-[var(--color-bg)] border-t border-[var(--color-border)] flex flex-col">
       <div className="flex items-center justify-between p-2 border-b border-[var(--color-border)] bg-[var(--color-surface)]">
         <div className="flex items-center space-x-4">
           <h3 className="font-semibold text-sm">System Stream</h3>

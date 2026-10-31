@@ -65,14 +65,15 @@ function trackLoadProgressFromLog(line: string): void {
   const lower = line.toLowerCase();
   let didChange = false;
 
+  let candidatePhase: typeof currentLoadPhase | null = null;
+  let candidateProgress = currentLoadProgress;
   if (
     lower.includes("load") &&
     (lower.includes("model") || lower.includes("tensor") || lower.includes("gguf"))
   ) {
-    currentLoadPhase = "loading_weights";
+    candidatePhase = "loading_weights";
     loadPhaseLogCounts["loading_weights"] = (loadPhaseLogCounts["loading_weights"] || 0) + 1;
-    currentLoadProgress = Math.min(15 + loadPhaseLogCounts["loading_weights"] * 3, 50);
-    didChange = true;
+    candidateProgress = Math.min(15 + loadPhaseLogCounts["loading_weights"] * 3, 50);
   } else if (
     lower.includes("offload") ||
     lower.includes("cuda") ||
@@ -80,10 +81,9 @@ function trackLoadProgressFromLog(line: string): void {
     lower.includes("vulkan") ||
     lower.includes("metal")
   ) {
-    currentLoadPhase = "offloading";
+    candidatePhase = "offloading";
     loadPhaseLogCounts["offloading"] = (loadPhaseLogCounts["offloading"] || 0) + 1;
-    currentLoadProgress = Math.min(50 + loadPhaseLogCounts["offloading"] * 3, 80);
-    didChange = true;
+    candidateProgress = Math.min(50 + loadPhaseLogCounts["offloading"] * 3, 80);
   } else if (
     lower.includes("srv") ||
     lower.includes("http") ||
@@ -91,10 +91,27 @@ function trackLoadProgressFromLog(line: string): void {
     lower.includes("listening") ||
     lower.includes("health")
   ) {
-    currentLoadPhase = "initializing";
+    candidatePhase = "initializing";
     loadPhaseLogCounts["initializing"] = (loadPhaseLogCounts["initializing"] || 0) + 1;
-    currentLoadProgress = Math.min(80 + loadPhaseLogCounts["initializing"] * 3, 98);
-    didChange = true;
+    candidateProgress = Math.min(80 + loadPhaseLogCounts["initializing"] * 3, 98);
+  }
+
+  if (candidatePhase) {
+    const phaseRank = {
+      spawning: 0,
+      loading_weights: 1,
+      offloading: 2,
+      initializing: 3,
+      ready: 4,
+    } as const;
+    const nextProgress = Math.max(currentLoadProgress, candidateProgress);
+    const nextPhase =
+      phaseRank[candidatePhase] >= phaseRank[currentLoadPhase] ? candidatePhase : currentLoadPhase;
+    if (nextProgress !== currentLoadProgress || nextPhase !== currentLoadPhase) {
+      currentLoadPhase = nextPhase;
+      currentLoadProgress = nextProgress;
+      didChange = true;
+    }
   }
 
   if (didChange) {
@@ -323,6 +340,21 @@ export function getActiveThinkingTagOverride(): ThinkingTagConfig | undefined {
 }
 
 /**
+ * Maps the load-preset GPU layer count onto llama-server's `--n-gpu-layers` value.
+ *
+ * The documented non-numeric values are the strings `auto` and `all`. A negative
+ * slider value means every layer, so it is sent as `all` rather than `-1`.
+ *
+ * @param gpuLayers - Layer count from the load preset. Negative means all layers.
+ * @returns The CLI argument text.
+ */
+function gpuLayersArgument(gpuLayers: number): string {
+  if (!Number.isFinite(gpuLayers)) return "0";
+  if (gpuLayers < 0) return "all";
+  return String(Math.trunc(gpuLayers));
+}
+
+/**
  * Builds the CLI argument array for llama-server from a ModelLoadConfig.
  * Flags are emitted from documented llama-server options.
  * `--image-min-tokens` is always emitted alongside `--image-max-tokens` (default 70).
@@ -369,7 +401,7 @@ export function buildArgs(
     String(config.contextSize),
     ...(config.contextShift ? ["--context-shift"] : ["--no-context-shift"]),
     "--n-gpu-layers",
-    String(config.gpuLayers),
+    gpuLayersArgument(config.gpuLayers),
     "--threads",
     String(config.threads),
     ...(config.threadsBatch !== undefined ? ["--threads-batch", String(config.threadsBatch)] : []),
@@ -557,7 +589,7 @@ async function validateBinary(absolutePath: string): Promise<void> {
  * @param thinkingTagOverride - Optional thinking-tag override associated with the selected load preset.
  * @returns The port number where the newly spawned server is listening.
  * @throws {Error} If the server binary cannot be validated, if the model fails to load,
- *         or if the server does not become ready within the configured timeout.
+ *         or if the process exits or stops making progress before it is healthy.
  */
 export async function loadModel(
   config: ModelLoadConfig,
@@ -632,6 +664,9 @@ export async function loadModel(
       stdin: "ignore",
     });
     const targetProc = proc;
+    void targetProc.exited.then((exitCode) => {
+      void handleUnexpectedServerExit(targetProc, exitCode);
+    });
     activeServerPid = targetProc.pid ?? null;
     if (activeServerPid !== null) {
       attachChildProcessToParentLifetime(activeServerPid);
@@ -694,15 +729,20 @@ async function waitForHealthCheck(
   target: Subprocess<"ignore", "pipe", "pipe">,
   port: number,
 ): Promise<boolean> {
-  // Aggressive early polling to detect readiness faster, then back off.
-  const FAST_ATTEMPTS = 50; // 5s at 100ms
-  const MID_ATTEMPTS = 80; // 20s at 250ms
-  const SLOW_ATTEMPTS = 70; // 35s at 500ms
+  // A large model on a slow disk can stay healthy-but-not-ready well past a minute.
+  // Keep polling while the process is alive and its log is still moving. A dead
+  // process fails immediately. A quiet process fails after a few minutes. The
+  // ceiling stops a load that logs forever without ever opening the port.
+  const READY_CEILING_MS = 10 * 60 * 1000;
+  const QUIET_FAIL_MS = 3 * 60 * 1000;
+  const startedAt = Date.now();
+  let lastLogCount = getBootLogs().length;
+  let lastProgressAt = startedAt;
   let attempt = 0;
 
-  while (attempt < FAST_ATTEMPTS + MID_ATTEMPTS + SLOW_ATTEMPTS) {
+  while (Date.now() - startedAt < READY_CEILING_MS) {
     if (proc !== target || target.exitCode !== null) {
-      return false; // Process died, no need to keep polling
+      return false;
     }
     try {
       if (await probeHealthEndpoint(port)) {
@@ -712,18 +752,84 @@ async function waitForHealthCheck(
       // Ignore network errors while booting
     }
 
-    let delay: number;
-    if (attempt < FAST_ATTEMPTS) {
-      delay = 100;
-    } else if (attempt < FAST_ATTEMPTS + MID_ATTEMPTS) {
-      delay = 250;
-    } else {
-      delay = 500;
+    const logCount = getBootLogs().length;
+    if (logCount !== lastLogCount) {
+      lastLogCount = logCount;
+      lastProgressAt = Date.now();
+    } else if (Date.now() - startedAt > 60_000 && Date.now() - lastProgressAt > QUIET_FAIL_MS) {
+      logWarn("llama-server stopped reporting load progress before it became ready", { port });
+      return false;
     }
-    await new Promise((r) => setTimeout(r, delay));
-    attempt++;
+
+    const delay = attempt < 50 ? 100 : attempt < 130 ? 250 : 500;
+    attempt += 1;
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
+
+  logWarn("llama-server was still loading when the readiness ceiling elapsed", { port });
   return false;
+}
+
+/**
+ * Reports whether an exited process is still the active llama-server.
+ *
+ * Unload and a newer spawn clear `proc` or return to `idle` before the old
+ * process's exit promise resolves. Those exits must not reset a live server.
+ *
+ * @param target - Process whose exit is being handled.
+ * @returns `true` when this exit still belongs to the loaded server.
+ */
+function unexpectedExitStillApplies(target: Subprocess<"ignore", "pipe", "pipe">): boolean {
+  return proc === target && currentStatus !== "idle";
+}
+
+/**
+ * Clears loaded-model state when llama-server exits on its own.
+ *
+ * Unload already nulls `proc` before the process dies, so this handler ignores
+ * that exit. A crash after `loading` or `running` aborts generations and
+ * broadcasts `idle`.
+ *
+ * @param target - Process that exited.
+ * @param exitCode - Exit code reported by Bun.
+ * @returns No return value.
+ */
+async function handleUnexpectedServerExit(
+  target: Subprocess<"ignore", "pipe", "pipe">,
+  exitCode: number,
+): Promise<void> {
+  if (!unexpectedExitStillApplies(target)) return;
+
+  const recentLogs = getBootLogs().slice(-10).join("\n");
+  logError("llama-server exited unexpectedly", { exitCode, recentLogs });
+
+  if (!unexpectedExitStillApplies(target)) return;
+
+  try {
+    const { abortAllGenerations } = await import("./streamProxy");
+    abortAllGenerations("unloaded");
+  } catch (err) {
+    logError("Failed to abort generations after llama-server exit:", err);
+  }
+  try {
+    const { cancelPendingApprovals } = await import("./tools");
+    cancelPendingApprovals(undefined, "unloaded");
+  } catch (err) {
+    logError("Failed to cancel tool approvals after llama-server exit:", err);
+  }
+
+  if (!unexpectedExitStillApplies(target)) return;
+
+  activeServerPid = null;
+  cancelActiveLogReaders();
+  const tempPath = activeTempJinjaPath;
+  activeTempJinjaPath = undefined;
+  resetLoadedModelState();
+  if (tempPath) {
+    Bun.file(tempPath)
+      .delete()
+      .catch(() => {});
+  }
 }
 
 /**

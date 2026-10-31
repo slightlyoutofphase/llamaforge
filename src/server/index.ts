@@ -99,6 +99,9 @@ export async function startServer(options: { scheduleRecurringCleanup?: boolean 
     server = serve({
       port,
       hostname,
+      // Bun's default 10s idle timeout closes a request that has not written
+      // bytes yet, including a model load that is still in progress.
+      idleTimeout: 0,
       fetch: router.fetch,
       websocket: router.websocket,
     });

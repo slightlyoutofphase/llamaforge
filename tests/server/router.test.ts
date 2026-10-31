@@ -7,7 +7,7 @@ import { beforeAll, describe, expect, it, spyOn } from "bun:test";
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as llamaServerModule from "../../src/server/llamaServer";
-import { addMessage, createChat } from "../../src/server/persistence/chatRepo";
+import { addMessage, createChat, getChat } from "../../src/server/persistence/chatRepo";
 import { getAppDataDir, initDb } from "../../src/server/persistence/db";
 import { createInferencePreset } from "../../src/server/persistence/presetRepo";
 import { saveSettings } from "../../src/server/persistence/settingsRepo";
@@ -140,7 +140,7 @@ describe("router", () => {
     expect(body.directories?.some((directory) => directory.endsWith("tools"))).toBe(true);
   });
 
-  it("JSON API responses close the connection for direct browser clients", async () => {
+  it("JSON API responses leave the connection reusable", async () => {
     const router = createRouter();
 
     const settingsRes = await router.fetch(
@@ -158,8 +158,8 @@ describe("router", () => {
 
     expect(settingsRes?.status).toBe(200);
     expect(chatRes?.status).toBe(200);
-    expect(settingsRes?.headers.get("connection")).toBe("close");
-    expect(chatRes?.headers.get("connection")).toBe("close");
+    expect(settingsRes?.headers.get("connection")).toBeNull();
+    expect(chatRes?.headers.get("connection")).toBeNull();
   });
 
   it("POST /api/chats/:id/branch-and-edit returns a JSON 404 for missing branch messages", async () => {
@@ -308,7 +308,10 @@ describe("router", () => {
       expect(scanSpy).toHaveBeenCalledTimes(1);
       expect(populateSpy).toHaveBeenCalledTimes(1);
       expect(presetSpy).toHaveBeenCalledTimes(1);
-      expect(broadcastSpy).toHaveBeenCalledTimes(1);
+      const presetUpdates = broadcastSpy.mock.calls.filter(
+        (call) => call[0]?.type === "presets_updated",
+      );
+      expect(presetUpdates).toHaveLength(1);
     } finally {
       scanSpy.mockRestore();
       metadataSpy.mockRestore();
@@ -1474,6 +1477,11 @@ describe("router", () => {
     });
 
     const streamProxyModule = await import("../../src/server/streamProxy.ts");
+    const statusSpy = spyOn(llamaServerModule, "getServerStatus").mockReturnValue({
+      status: "running",
+      port: 8080,
+      config: null,
+    });
     const proxyCompletionSpy = spyOn(streamProxyModule, "proxyCompletion").mockImplementation(
       async () => {
         const remaining = await import("../../src/server/persistence/chatRepo").then((repo) =>
@@ -1496,7 +1504,75 @@ describe("router", () => {
         expect.objectContaining({ chatId: chat.id, isRegenerate: true }),
       );
     } finally {
+      statusSpy.mockRestore();
       proxyCompletionSpy.mockRestore();
     }
+  });
+
+  it("POST /api/chats/:id/regenerate keeps history when llama-server is not running", async () => {
+    const chat = await createChat("Router Regenerate Idle");
+    const userId = Bun.randomUUIDv7();
+    const assistantId = Bun.randomUUIDv7();
+    await addMessage({
+      id: userId,
+      chatId: chat.id,
+      role: "user",
+      content: "hello",
+      rawContent: "hello",
+      position: 0,
+      createdAt: Date.now(),
+    });
+    await addMessage({
+      id: assistantId,
+      chatId: chat.id,
+      role: "assistant",
+      content: "old",
+      rawContent: "old",
+      position: 1,
+      createdAt: Date.now(),
+    });
+
+    const streamProxyModule = await import("../../src/server/streamProxy.ts");
+    const proxyCompletionSpy = spyOn(streamProxyModule, "proxyCompletion").mockResolvedValue(
+      "should-not-run",
+    );
+
+    try {
+      const router = createRouter();
+      const res = await router.fetch(
+        new Request(`http://localhost/api/chats/${chat.id}/regenerate`, { method: "POST" }),
+        noUpgradeServer,
+      );
+      expect(res?.status).toBe(409);
+      const body = (await res?.json()) as { error?: string };
+      expect(body.error).toBe("Llama-server is not running.");
+      expect(proxyCompletionSpy).not.toHaveBeenCalled();
+      const remaining = await getChat(chat.id);
+      expect(remaining?.messages?.map((message) => message.id)).toEqual([userId, assistantId]);
+    } finally {
+      proxyCompletionSpy.mockRestore();
+    }
+  });
+
+  it("POST /api/chats/:id/continue returns the server error instead of an opaque 500", async () => {
+    const chat = await createChat("Router Continue Idle");
+    await addMessage({
+      id: Bun.randomUUIDv7(),
+      chatId: chat.id,
+      role: "assistant",
+      content: "partial",
+      rawContent: "partial",
+      position: 0,
+      createdAt: Date.now(),
+    });
+
+    const router = createRouter();
+    const res = await router.fetch(
+      new Request(`http://localhost/api/chats/${chat.id}/continue`, { method: "POST" }),
+      noUpgradeServer,
+    );
+    expect(res?.status).toBe(409);
+    const body = (await res?.json()) as { error?: string };
+    expect(body.error).toBe("Llama-server is not running.");
   });
 });

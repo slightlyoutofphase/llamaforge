@@ -73,11 +73,13 @@ export async function listExistingVideoFrames(directory: string): Promise<string
 /**
  * Resolves an ffmpeg executable from settings, PATH, or the llama-server directory.
  *
+ * A missing executable is not cached, so installing ffmpeg is picked up on the next video.
+ *
  * @param settings - Application settings that may include a llama-server path.
  * @returns Absolute or PATH-resolved ffmpeg command, or `null` when unavailable.
  */
 export async function resolveFfmpegPath(settings: AppSettings): Promise<string | null> {
-  if (cachedFfmpegPath !== undefined) return cachedFfmpegPath;
+  if (cachedFfmpegPath) return cachedFfmpegPath;
 
   const exe = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
   const candidates: string[] = ["ffmpeg", exe];
@@ -92,7 +94,6 @@ export async function resolveFfmpegPath(settings: AppSettings): Promise<string |
     }
   }
 
-  cachedFfmpegPath = null;
   return null;
 }
 
