@@ -648,6 +648,17 @@ export function shouldSkipLiveProcessSample(
  * @returns App-scoped process usage snapshot.
  */
 export async function getAppProcessUsage(): Promise<AppProcessUsage> {
+  const { getServerStatus } = await import("./llamaServer");
+  const modelIsLoading = getServerStatus().status === "loading";
+  if (modelIsLoading) {
+    return (
+      lastProcessUsage ?? {
+        ramBytes: process.memoryUsage().rss,
+        vramBytes: 0,
+        llamaServerPid: null,
+      }
+    );
+  }
   if (
     lastProcessUsage &&
     (Date.now() - processUsageCachedAt < PROCESS_USAGE_CACHE_MS ||

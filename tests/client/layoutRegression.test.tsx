@@ -15,15 +15,37 @@ let ModelSelector: typeof import("../../src/client/ModelSelector").ModelSelector
 let ModelLibraryPanel: typeof import("../../src/client/components/sidebar/ModelLibraryPanel").ModelLibraryPanel;
 let originalFetch: typeof global.fetch;
 
-mock.module("@tanstack/react-router", () => ({
-  useLocation: () => ({ pathname: "/" }),
-  useParams: () => ({}),
-  Link: ({ children, className, to, ...props }: any) => (
+/**
+ * Router link stand-in for the layout regression tests.
+ *
+ * @param children - Link contents.
+ * @param className - Class forwarded onto the anchor.
+ * @param to - Destination href.
+ * @param props - Remaining anchor attributes.
+ * @returns An anchor the layout can render without a router.
+ */
+function LayoutLink({ children, className, to, ...props }: any) {
+  return (
     <a href={to} className={className} {...props}>
       {children}
     </a>
-  ),
-  Outlet: () => <div data-testid="registry-outlet">Registry content</div>,
+  );
+}
+
+/**
+ * Router outlet stand-in for the layout regression tests.
+ *
+ * @returns The placeholder the registry layout asserts is present.
+ */
+function LayoutOutlet() {
+  return <div data-testid="registry-outlet">Registry content</div>;
+}
+
+mock.module("@tanstack/react-router", () => ({
+  useLocation: () => ({ pathname: "/" }),
+  useParams: () => ({}),
+  Link: LayoutLink,
+  Outlet: LayoutOutlet,
   useNavigate: () => mock(),
 }));
 

@@ -322,8 +322,9 @@ describe("ModelSelector Component", () => {
 
     expect(screen.queryByText("Initializing Weights")).toBeNull();
     expect(await screen.findByText("Loading model")).toBeTruthy();
-    expect(screen.getByText("42%")).toBeTruthy();
-    expect(screen.getByText("Loading tensor blocks")).toBeTruthy();
+    expect(screen.getByText("Loading model")).toBeTruthy();
+    expect(screen.queryByText("42%")).toBeNull();
+    expect(screen.queryByText("Loading tensor blocks")).toBeNull();
   });
 
   it("hides draft models from the selectable library", async () => {

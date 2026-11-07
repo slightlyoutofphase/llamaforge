@@ -1332,11 +1332,19 @@ describe("router", () => {
     await addMessage({
       id: Bun.randomUUIDv7(),
       chatId: chat.id,
-      role: "user",
+      role: "assistant",
       content: "hello occupancy",
       rawContent: "hello occupancy",
       position: 0,
       createdAt: Date.now(),
+      metrics: {
+        predictedTokens: 4,
+        tokensPerSecond: 1,
+        promptTokens: 99,
+        promptTokensPerSecond: 1,
+        cachedPromptTokens: 0,
+        evaluatedPromptTokens: 20,
+      },
     });
     const router = createRouter();
     const res = await router.fetch(
@@ -1345,7 +1353,7 @@ describe("router", () => {
     );
     expect(res?.status).toBe(200);
     const body = (await res?.json()) as { usedTokens?: number; contextSize?: number | null };
-    expect(body.usedTokens).toBeGreaterThan(0);
+    expect(body.usedTokens).toBe(24);
     expect(body.contextSize).toBeNull();
   });
 

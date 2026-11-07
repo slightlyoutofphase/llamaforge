@@ -3,6 +3,10 @@
  * Setup helpers for Bun test and Happy DOM compatibility during client tests.
  */
 
+// `@huggingface/gguf` decides local-file access from `window.document` once, at
+// import time. This preload installs that document for client tests, so the
+// reader has to be imported first or later projector reads throw.
+import "@huggingface/gguf";
 import { afterEach, mock } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { notifyManager } from "@tanstack/react-query";

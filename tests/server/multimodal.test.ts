@@ -11,6 +11,7 @@ import {
   __setExtractVideoFrames,
   __setPreferNativeInputVideo,
   __setResolveVideoAudioSidecar,
+  attachPendingVideoSoundtracks,
   buildContentParts,
   processUpload,
 } from "../../src/server/multimodal";
@@ -506,7 +507,18 @@ describe("multimodal", () => {
     ];
     const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
 
-    const res = await buildContentParts("Watch this", attachments, metadata);
+    const holder = {
+      id: "m",
+      chatId: "c",
+      role: "user" as const,
+      content: "Watch this",
+      rawContent: "Watch this",
+      position: 0,
+      createdAt: 0,
+      attachments,
+    };
+    await attachPendingVideoSoundtracks([holder], true);
+    const res = await buildContentParts("Watch this", holder.attachments ?? [], metadata);
     expect(Array.isArray(res)).toBe(true);
     const parts = res as any[];
     expect(parts.map((part) => part.type)).toEqual(["input_audio", "input_video", "text"]);
@@ -543,7 +555,18 @@ describe("multimodal", () => {
     };
     const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
 
-    await buildContentParts("Watch this", [video as any], metadata);
+    const firstHolder = {
+      id: "msg-audio",
+      chatId: "chat-audio",
+      role: "user" as const,
+      content: "Watch this",
+      rawContent: "Watch this",
+      position: 0,
+      createdAt: 0,
+      attachments: [video as any],
+    };
+    await attachPendingVideoSoundtracks([firstHolder], true);
+    await buildContentParts("Watch this", firstHolder.attachments ?? [], metadata);
     expect(resolved).toBe(1);
     const stored = db
       .query<{ file_path: string; mime_type: string; file_name: string }, [string]>(
@@ -750,7 +773,18 @@ describe("multimodal", () => {
       },
     ] as any;
 
-    const parts = (await buildContentParts("two clips", attachments, {
+    const holder = {
+      id: "m1",
+      chatId: "c",
+      role: "user" as const,
+      content: "two clips",
+      rawContent: "two clips",
+      position: 0,
+      createdAt: 0,
+      attachments,
+    };
+    await attachPendingVideoSoundtracks([holder], true);
+    const parts = (await buildContentParts("two clips", holder.attachments ?? [], {
       hasVisionEncoder: true,
       hasAudioEncoder: true,
     } as any)) as any[];
@@ -804,7 +838,22 @@ describe("multimodal", () => {
     ] as any;
     const metadata = { hasVisionEncoder: true, hasAudioEncoder: true } as any;
 
-    const parts = (await buildContentParts("what is this", attachments, metadata)) as any[];
+    const holder = {
+      id: "2",
+      chatId: "c",
+      role: "user" as const,
+      content: "what is this",
+      rawContent: "what is this",
+      position: 0,
+      createdAt: 0,
+      attachments,
+    };
+    await attachPendingVideoSoundtracks([holder], true);
+    const parts = (await buildContentParts(
+      "what is this",
+      holder.attachments ?? [],
+      metadata,
+    )) as any[];
     expect(parts.map((part) => part.type)).toEqual([
       "input_audio",
       "input_audio",

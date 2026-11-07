@@ -11,6 +11,25 @@ import { DEFAULT_APP_SETTINGS } from "../../src/shared/defaults";
 import { asFetch } from "../fixtures";
 import type { ReactNode } from "react";
 
+/**
+ * Router link stand-in for the integration flow.
+ *
+ * @param children - Link contents.
+ * @returns An anchor the shell can render without a router.
+ */
+function IntegrationLink({ children }: { children?: ReactNode }) {
+  return <a href="#test">{children}</a>;
+}
+
+/**
+ * Router outlet stand-in for the integration flow.
+ *
+ * @returns A placeholder outlet.
+ */
+function IntegrationOutlet() {
+  return <div data-testid="outlet">Mock Outlet</div>;
+}
+
 let App: typeof import("../../src/client/App").default;
 let queryClient: QueryClient;
 const originalFetch = global.fetch;
@@ -53,8 +72,8 @@ describe("E2E Integration", () => {
     } as unknown as typeof WebSocket;
 
     await mock.module("@tanstack/react-router", () => ({
-      Link: ({ children }: { children?: ReactNode }) => <a href="#test">{children}</a>,
-      Outlet: () => <div data-testid="outlet">Mock Outlet</div>,
+      Link: IntegrationLink,
+      Outlet: IntegrationOutlet,
       useLocation: () => ({ pathname: "/" }),
       useNavigate: () => mock(),
       useParams: () => ({}),

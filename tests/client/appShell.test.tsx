@@ -10,6 +10,32 @@ import { useAppStore } from "../../src/client/store";
 import { useUiStore } from "../../src/client/uiStore";
 import { asFetch } from "../fixtures";
 
+/**
+ * Router link stand-in for the app shell tests.
+ *
+ * @param children - Link contents.
+ * @param className - Class forwarded onto the anchor.
+ * @param to - Destination href.
+ * @param props - Remaining anchor attributes.
+ * @returns An anchor the shell can render without a router.
+ */
+function AppShellLink({ children, className, to, ...props }: any) {
+  return (
+    <a href={to} className={className} {...props}>
+      {children}
+    </a>
+  );
+}
+
+/**
+ * Router outlet stand-in for the app shell tests.
+ *
+ * @returns A placeholder the shell renders as its route content.
+ */
+function AppShellOutlet() {
+  return <div data-testid="app-outlet">Outlet</div>;
+}
+
 let App: typeof import("../../src/client/App").default;
 let navigateSpy = mock();
 let queryClient: QueryClient;
@@ -96,12 +122,8 @@ describe("App shell settings", () => {
       useLocation: () => ({ pathname: "/" }),
       useNavigate: () => navigateSpy,
       useParams: () => ({}),
-      Link: ({ children, className, to, ...props }: any) => (
-        <a href={to} className={className} {...props}>
-          {children}
-        </a>
-      ),
-      Outlet: () => <div data-testid="app-outlet">Outlet</div>,
+      Link: AppShellLink,
+      Outlet: AppShellOutlet,
     }));
 
     useAppStore.setState(defaultAppState);
@@ -170,8 +192,8 @@ describe("App shell settings", () => {
     await renderApp();
 
     expect(screen.getByText("Loading model")).toBeTruthy();
-    expect(screen.getByText("42%")).toBeTruthy();
-    expect(screen.getByText("Loading tensor blocks")).toBeTruthy();
+    expect(screen.queryByText("42%")).toBeNull();
+    expect(screen.queryByText("Loading tensor blocks")).toBeNull();
     expect(screen.getByRole("alertdialog")).toBeTruthy();
   });
 

@@ -126,6 +126,17 @@ function isTokenizeRequest(input: RequestInfo): boolean {
 }
 
 /**
+ * Returns whether a mocked fetch target is llama-server's apply-template endpoint.
+ *
+ * @param input - Fetch URL or Request.
+ * @returns `true` when the prompt counter should receive a rendered prompt string.
+ */
+function isApplyTemplateRequest(input: RequestInfo): boolean {
+  const url = typeof input === "string" ? input : input.url;
+  return url.includes("/apply-template");
+}
+
+/**
  * Builds the JSON tokenize reply streamProxy uses to count prompt tokens.
  *
  * @returns A successful tokenize {@link Response}.
@@ -147,6 +158,12 @@ function llamaFetch(
   completions: (input: RequestInfo, init?: RequestInit) => Response | Promise<Response>,
 ): ReturnType<typeof mock> {
   return mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
+    if (isApplyTemplateRequest(input)) {
+      return new Response(JSON.stringify({ prompt: "rendered prompt" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     if (isTokenizeRequest(input)) {
       return tokenizeJsonResponse();
     }
@@ -1571,10 +1588,16 @@ describe("streamProxy", () => {
 
   it("builds image_url multimodal payloads for image attachments", async () => {
     const stream = buildSSEStream([chatDelta("I see an image"), chatStop()]);
+    const png = new Uint8Array(24);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    new DataView(png.buffer).setUint32(16, 8);
+    new DataView(png.buffer).setUint32(20, 8);
     spyOn(Bun, "file").mockImplementation(
       () =>
         ({
           exists: async () => true,
+          slice: () => ({ arrayBuffer: async () => png.buffer }),
+          arrayBuffer: async () => png.buffer,
         }) as any,
     );
 
@@ -1855,6 +1878,12 @@ describe("streamProxy", () => {
   it("stops cleanly when a tool approval is rejected", async () => {
     const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/apply-template")) {
+        return new Response(JSON.stringify({ prompt: "rendered prompt" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (url.endsWith("/tokenize")) {
         return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 });
       }
@@ -1963,6 +1992,12 @@ describe("streamProxy", () => {
     let completionCalls = 0;
     const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/apply-template")) {
+        return new Response(JSON.stringify({ prompt: "rendered prompt" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (url.endsWith("/tokenize")) {
         return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 });
       }
@@ -2038,6 +2073,12 @@ describe("streamProxy", () => {
     let chatCompletionFetchCount = 0;
     const fetchMock = mock().mockImplementation(async (input: RequestInfo) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/apply-template")) {
+        return new Response(JSON.stringify({ prompt: "rendered prompt" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (url.endsWith("/tokenize")) {
         return new Response(JSON.stringify({ tokens: [1, 2, 3] }), { status: 200 });
       }
@@ -2152,6 +2193,13 @@ describe("streamProxy", () => {
     const stream = buildSSEStream([chatDelta("trimmed"), chatStop()]);
     const fetchMock = mock().mockImplementation(async (input: RequestInfo, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.url;
+      if (url.includes("/apply-template")) {
+        const applied = JSON.parse(String(init?.body ?? "{}")) as unknown;
+        return new Response(JSON.stringify({ prompt: JSON.stringify(applied) }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (url.endsWith("/tokenize")) {
         tokenizeFetchCount += 1;
         const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };

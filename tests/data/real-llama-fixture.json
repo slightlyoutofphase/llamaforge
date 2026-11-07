@@ -1,7 +1,7 @@
 {
   "settings": {
     "modelsPath": "D:\\Programs\\lmstudiomodels",
-    "llamaServerPath": "D:\\BenDesktop\\Other Programs\\llama-b10099-bin-win-cuda-13.3-x64\\llama-server.exe"
+    "llamaServerPath": "D:\\BenDesktop\\Other Programs\\llama-b12024-bin-win-cuda-13.4-x64\\llama-server.exe"
   },
   "loadPreset": {
     "id": "019de18c-db82-7000-8192-f0047091bb59",

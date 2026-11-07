@@ -5,6 +5,7 @@
  */
 
 import { createDefaultInferenceSampling } from "../shared/defaults";
+import { isExtractedVideoAudioAttachment } from "../shared/extractedAudio";
 import { buildMessageMetrics, contextOccupancyTokens } from "../shared/generationMetrics";
 import { resolveInferencePreset } from "../shared/inferencePresetResolve";
 import type { ChatMessage, LlamaTimings } from "../shared/types";
@@ -29,11 +30,18 @@ import {
 } from "./llamaServer";
 import { logDebug, logError, logInfo, logVerbose, logWarn } from "./logger";
 import {
+  assignOutgoingVirBudgets,
+  budgetFactorsForLoadedModel,
+  sumMessageVirBudget,
+} from "./mediaBudget";
+import {
+  attachPendingVideoSoundtracks,
   mergeExtractedAttachmentText,
   type ProcessedAttachment,
   processUpload,
 } from "./multimodal";
-import { ContextOverflowError, getTokens, truncateMessages } from "./overflow";
+import { ContextOverflowError, truncateMessages } from "./overflow";
+import { recordChatOccupancy } from "./contextUsage";
 import {
   addMessage,
   getChatForPrompt,
@@ -50,7 +58,6 @@ import {
   buildRequestResponseFormat,
   buildRequestThinkingConfig,
   buildRequestTools,
-  serializePromptForTokens,
   withSystemPrompt,
 } from "./promptPayload";
 import { cancelPendingApprovals, executeTool, waitForToolApproval } from "./tools";
@@ -74,6 +81,27 @@ const EMPTY_TIMINGS: LlamaTimings = {
   tokens_cached: 0,
   tokens_evaluated: 0,
 };
+
+/**
+ * Reads the video-audio switch without applying the stored log level.
+ *
+ * `loadSettings` also resets the process log level, which would hide a verbose
+ * line that is emitted later in the same send.
+ *
+ * @returns `true` when extracted video soundtracks should be sent.
+ */
+async function readIncludeVideoAudio(): Promise<boolean> {
+  try {
+    const row = getDb()
+      .query<{ settings_json: string }, []>("SELECT settings_json FROM settings WHERE id = 1")
+      .get();
+    if (!row) return false;
+    const parsed = JSON.parse(row.settings_json) as { includeVideoAudio?: unknown };
+    return parsed.includeVideoAudio === true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Maps a generation abort onto the tool-approval cancellation vocabulary.
@@ -675,18 +703,11 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
       modelMeta,
     };
 
-    /**
-     * Serializes the exact inference payload used for token-budget estimation.
-     *
-     * @param messages - Chat history after overflow handling.
-     * @returns JSON text matching the request payload shape used for prompt tokenization.
-     */
-    const buildPromptText = async (messages: ChatMessage[]): Promise<string> =>
-      serializePromptForTokens(await buildApiMessages(messages, apiMessageContext), {
-        tools: requestTools,
-        responseFormat: requestResponseFormat,
-        thinking: requestThinkingConfig,
-      });
+    const tokenOptions = {
+      tools: requestTools,
+      responseFormat: requestResponseFormat,
+      chatTemplateKwargs: requestThinkingConfig.chat_template_kwargs,
+    };
 
     if (!reuseAssistantRow) {
       const assistantPlaceholder: ChatMessage = {
@@ -736,6 +757,31 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
      * @returns A promise that resolves once the stream has been started or failed.
      */
     const runInference = async (): Promise<void> => {
+      const architecture = modelMeta?.architecture;
+      const lfm3 = (architecture ?? "").toLowerCase() === "lfm3";
+      const sendExtractedAudio =
+        !lfm3 && (await readIncludeVideoAudio()) && modelMeta?.hasAudioEncoder !== false;
+      await attachPendingVideoSoundtracks(rawMessages, sendExtractedAudio);
+      if (lfm3) {
+        for (const message of rawMessages) {
+          if (!message.attachments?.length) continue;
+          message.attachments = message.attachments.filter(
+            (attachment) => !isExtractedVideoAudioAttachment(attachment),
+          );
+        }
+      }
+      const budgetFactors = await budgetFactorsForLoadedModel(server.config, architecture, {
+        ...(modelMeta?.hasVisionEncoder !== undefined
+          ? { hasVisionEncoder: modelMeta.hasVisionEncoder }
+          : {}),
+        ...(modelMeta?.hasAudioEncoder !== undefined
+          ? { hasAudioEncoder: modelMeta.hasAudioEncoder }
+          : {}),
+      });
+      await assignOutgoingVirBudgets(rawMessages, budgetFactors);
+      const builtMessages = await buildApiMessages(rawMessages, apiMessageContext);
+      const sourceIds = rawMessages.map((message) => message.id);
+      const mediaTokens = rawMessages.map((message) => sumMessageVirBudget(message));
       logDebug("Truncating message history", { ctxSize, overflowPolicy });
       rawMessages = await truncateMessages(
         rawMessages,
@@ -744,7 +790,11 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         safeInfPreset.maxTokens || 4096,
         server.port ?? undefined,
         true,
-        { buildPromptText },
+        {
+          ...tokenOptions,
+          apiMessages: builtMessages,
+          mediaTokens,
+        },
       );
       if (abortController.signal.aborted) {
         finishAbortedGeneration({
@@ -758,15 +808,29 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
         activeGenerations.delete(generationId);
         return;
       }
+      const keptIds = new Set(rawMessages.map((message) => message.id));
+      const apiMessages: ChatCompletionMessage[] = [];
+      const keptMedia: number[] = [];
+      for (let index = 0; index < builtMessages.length; index++) {
+        const source = sourceIds[index];
+        if (!source || !keptIds.has(source)) continue;
+        const built = builtMessages[index];
+        if (!built) continue;
+        apiMessages.push(built);
+        keptMedia.push(mediaTokens[index] ?? 0);
+      }
       logDebug("Calculating prompt token count");
-      const apiMessages = await buildApiMessages(rawMessages, apiMessageContext);
-      const promptTokensCount = await getTokens(rawMessages, server.port ?? undefined, {
-        buildPromptText: async () =>
-          serializePromptForTokens(apiMessages, {
-            tools: requestTools,
-            responseFormat: requestResponseFormat,
-            thinking: requestThinkingConfig,
-          }),
+      const { countTemplatedPromptTokens } = await import("./overflow");
+      if (!server.port) {
+        throw new Error("Cannot count prompt tokens without a loaded model.");
+      }
+      const promptTokensCount = await countTemplatedPromptTokens({
+        port: server.port,
+        messages: apiMessages,
+        tools: requestTools,
+        responseFormat: requestResponseFormat,
+        chatTemplateKwargs: requestThinkingConfig.chat_template_kwargs,
+        mediaTokens: keptMedia.reduce((sum, value) => sum + value, 0),
       });
       if (abortController.signal.aborted) {
         finishAbortedGeneration({
@@ -1419,6 +1483,7 @@ export async function proxyCompletion(params: ProxyCompletionParams): Promise<st
                     }
                   }
 
+                  recordChatOccupancy(chatId, contextOccupancyTokens(timings));
                   updatePromptCacheStats(chatId, timings);
                   if (thinkingStartedAt !== null && thinkingEndedAt === null) {
                     thinkingEndedAt = Date.now();

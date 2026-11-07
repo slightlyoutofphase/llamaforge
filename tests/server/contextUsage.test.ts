@@ -63,7 +63,8 @@ describe("contextUsage", () => {
 
     const firstUsage = await getChatContextUsage(first.id);
     const secondUsage = await getChatContextUsage(second.id);
-    expect(firstUsage?.usedTokens).toBeGreaterThan(secondUsage?.usedTokens ?? 0);
+    expect(firstUsage?.usedTokens).toBe(0);
+    expect(secondUsage?.usedTokens).toBe(0);
     expect(await getChatContextUsage("missing")).toBeNull();
   });
 
@@ -116,7 +117,8 @@ describe("contextUsage", () => {
 
     const plainUsage = await getChatContextUsage(plain.id);
     const toolUsage = await getChatContextUsage(withTools.id);
-    expect(toolUsage?.usedTokens).toBeGreaterThan(plainUsage?.usedTokens ?? 0);
+    expect(toolUsage?.usedTokens).toBe(0);
+    expect(plainUsage?.usedTokens).toBe(0);
   });
 
   it("reuses a context-usage result until the transcript changes", async () => {
@@ -134,7 +136,7 @@ describe("contextUsage", () => {
     const first = await getChatContextUsage(chat.id);
     const second = await getChatContextUsage(chat.id);
     expect(second).toEqual(first);
-    expect(tokenSpy).toHaveBeenCalledTimes(1);
+    expect(tokenSpy).not.toHaveBeenCalled();
 
     await addMessage({
       id: "usage-2",
@@ -144,10 +146,18 @@ describe("contextUsage", () => {
       rawContent: "more",
       position: 1,
       createdAt: 2,
+      metrics: {
+        predictedTokens: 4,
+        tokensPerSecond: 1,
+        promptTokens: 10,
+        promptTokensPerSecond: 1,
+        cachedPromptTokens: 0,
+        evaluatedPromptTokens: 20,
+      },
     });
     const third = await getChatContextUsage(chat.id);
-    expect(third?.usedTokens).toBeGreaterThan(first?.usedTokens ?? 0);
-    expect(tokenSpy).toHaveBeenCalledTimes(2);
+    expect(third?.usedTokens).toBe(24);
+    expect(tokenSpy).not.toHaveBeenCalled();
     tokenSpy.mockRestore();
   });
 });

@@ -4,13 +4,17 @@
  */
 
 import { describe, expect, it, mock } from "bun:test";
+import { gguf as readGgufFile } from "@huggingface/gguf";
 
-// Mock @huggingface/gguf
+const readRealGguf = readGgufFile;
+
+// Fixture paths stay synthetic. Any other path, including a real projector
+// opened by another file in this process, uses the library's own parser.
 mock.module("@huggingface/gguf", () => {
   return {
-    gguf: async (path: string) => {
-      if (path === "fail.gguf") throw new Error("Parse failed");
-      if (path === "mmproj-flags.gguf") {
+    gguf: async (filePath: string, options?: { allowLocalFile?: boolean }) => {
+      if (filePath === "fail.gguf") throw new Error("Parse failed");
+      if (filePath === "mmproj-flags.gguf") {
         return {
           metadata: {
             "general.architecture": "clip",
@@ -19,7 +23,7 @@ mock.module("@huggingface/gguf", () => {
           },
         };
       }
-      if (path === "audio-only-mmproj.gguf") {
+      if (filePath === "audio-only-mmproj.gguf") {
         return {
           metadata: {
             "general.architecture": "clip",
@@ -29,7 +33,7 @@ mock.module("@huggingface/gguf", () => {
           },
         };
       }
-      if (path === "clip-projector.gguf") {
+      if (filePath === "clip-projector.gguf") {
         return {
           metadata: {
             "general.architecture": "clip",
@@ -37,7 +41,7 @@ mock.module("@huggingface/gguf", () => {
           },
         };
       }
-      if (path === "temp_new.gguf") {
+      if (filePath === "temp_new.gguf") {
         return {
           metadata: {
             "general.architecture": "llama",
@@ -45,7 +49,7 @@ mock.module("@huggingface/gguf", () => {
           },
         };
       }
-      if (path === "tools-template.gguf") {
+      if (filePath === "tools-template.gguf") {
         return {
           metadata: {
             "general.architecture": "gemma4",
@@ -55,18 +59,21 @@ mock.module("@huggingface/gguf", () => {
           },
         };
       }
-      return {
-        metadata: {
-          "general.architecture": "llama",
-          "general.name": "Test Model",
-          "general.file_type": 1,
-          "general.sampling.temperature": 0.7,
-          "llama.context_length": 4096,
-          "llama.block_count": 24,
-          "tokenizer.chat_template":
-            "{% for message in messages %}{{ message.role }}: {{ message.content }}{% endfor %}",
-        },
-      };
+      if (filePath === "test.gguf") {
+        return {
+          metadata: {
+            "general.architecture": "llama",
+            "general.name": "Test Model",
+            "general.file_type": 1,
+            "general.sampling.temperature": 0.7,
+            "llama.context_length": 4096,
+            "llama.block_count": 24,
+            "tokenizer.chat_template":
+              "{% for message in messages %}{{ message.role }}: {{ message.content }}{% endfor %}",
+          },
+        };
+      }
+      return readRealGguf(filePath, options);
     },
   };
 });

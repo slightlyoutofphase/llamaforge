@@ -49,6 +49,7 @@ const TEST_DATA_DIR = path.dirname(
   fileURLToPath(new URL("../data/real-llama-fixture.json", import.meta.url)),
 );
 const TEST_APP_DATA_DIR = path.join(TEST_DATA_DIR, ".llamaforge");
+const AUTOLOAD_APP_DATA_DIR = path.join(TEST_APP_DATA_DIR, "autoload-child");
 const REAL_DB_PATH = path.join(TEST_APP_DATA_DIR, "real-llama-integration.db");
 const TEST_PORT_MIN = 12400;
 const TEST_PORT_MAX = 12410;
@@ -385,19 +386,19 @@ async function findDescendantLlamaServer(rootPid: number): Promise<number | null
 }
 
 /**
- * Writes the database file `startServer` opens under `LLAMAFORGE_APP_DATA_DIR`.
+ * Writes the database file `startServer` opens under its own app-data directory.
  *
- * The in-process suite uses `real-llama-integration.db`. A spawned `index.ts`
- * always opens `llamaforge.db`, so autoload settings have to live in that file.
+ * The spawned `index.ts` always opens `llamaforge.db`. That file lives beside
+ * the suite database, in a directory only this child uses, so preparing the
+ * autoload settings does not delete the database the other tests have open.
  *
  * @param settings - Settings the child server should load, including autoload.
  * @returns No return value.
  */
 async function writeSpawnedServerDatabase(settings: AppSettings): Promise<void> {
-  const dbPath = path.join(TEST_APP_DATA_DIR, "llamaforge.db");
-  await removeWhenReleased(dbPath);
-  await removeWhenReleased(`${dbPath}-wal`);
-  await removeWhenReleased(`${dbPath}-shm`);
+  await fs.rm(AUTOLOAD_APP_DATA_DIR, { recursive: true, force: true });
+  await fs.mkdir(AUTOLOAD_APP_DATA_DIR, { recursive: true });
+  const dbPath = path.join(AUTOLOAD_APP_DATA_DIR, "llamaforge.db");
   const db = new Database(dbPath);
   try {
     db.exec("PRAGMA journal_mode = WAL;");
@@ -1171,7 +1172,7 @@ describeReal("llamaServer real integration", () => {
       env: {
         ...process.env,
         NODE_ENV: "development",
-        LLAMAFORGE_APP_DATA_DIR: TEST_APP_DATA_DIR,
+        LLAMAFORGE_APP_DATA_DIR: AUTOLOAD_APP_DATA_DIR,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -1219,9 +1220,10 @@ describeReal("llamaServer real integration", () => {
         });
         await cleanup.exited;
       }
-      await removeWhenReleased(path.join(TEST_APP_DATA_DIR, "llamaforge.db"));
-      await removeWhenReleased(path.join(TEST_APP_DATA_DIR, "llamaforge.db-wal"));
-      await removeWhenReleased(path.join(TEST_APP_DATA_DIR, "llamaforge.db-shm"));
+      await removeWhenReleased(path.join(AUTOLOAD_APP_DATA_DIR, "llamaforge.db"));
+      await removeWhenReleased(path.join(AUTOLOAD_APP_DATA_DIR, "llamaforge.db-wal"));
+      await removeWhenReleased(path.join(AUTOLOAD_APP_DATA_DIR, "llamaforge.db-shm"));
+      await fs.rm(AUTOLOAD_APP_DATA_DIR, { recursive: true, force: true }).catch(() => undefined);
     }
   }, 180_000);
 });

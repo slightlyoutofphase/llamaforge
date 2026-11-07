@@ -17,6 +17,25 @@ import {
   resolvePresetEditorState,
 } from "../../src/client/components/DraftInputs";
 
+/**
+ * Holds draft state so a minus sign can be typed before the integer is complete.
+ *
+ * @returns The number field under test.
+ */
+function MinusSignHarness() {
+  const [value, setValue] = useState(-1);
+  return (
+    <NumberDraftInput
+      id="seed"
+      integer
+      value={value}
+      onCommit={(next) => {
+        if (typeof next === "number") setValue(next);
+      }}
+    />
+  );
+}
+
 describe("draft field parsers", () => {
   it("keeps a trailing comma out of the stored stop strings", () => {
     expect(parseStopStrings("a,")).toEqual(["a"]);
@@ -91,21 +110,7 @@ describe("NumberDraftInput", () => {
   });
 
   it("keeps a minus sign until a complete integer is entered", () => {
-    function Harness() {
-      const [value, setValue] = useState(-1);
-      return (
-        <NumberDraftInput
-          id="seed"
-          integer
-          value={value}
-          onCommit={(next) => {
-            if (typeof next === "number") setValue(next);
-          }}
-        />
-      );
-    }
-
-    render(<Harness />);
+    render(<MinusSignHarness />);
     const input = screen.getByRole("textbox") as HTMLInputElement;
     expect(input.value).toBe("-1");
     fireEvent.change(input, { target: { value: "-" } });

@@ -20,6 +20,8 @@ import type {
 } from "../shared/types";
 import { request } from "./http";
 import { logDebug, logError, logInfo, logWarn } from "./logger";
+import { queryClient } from "./queryClient";
+import { queryKeys } from "./queries";
 import { useUiStore } from "./uiStore";
 
 /**
@@ -145,6 +147,8 @@ interface AppState {
   addLog: (level: "info" | "warn" | "error" | "debug" | "server", body: string) => void;
   /** Establishes or re-establishes the WebSocket connection. */
   connectWs: (manual?: boolean) => void;
+  /** Reloads client state that comes from the bun process after the socket opens. */
+  reloadServerBackedClientState: () => Promise<void>;
   /** Disconnects the WebSocket and suppresses automatic reconnect attempts. */
   disconnectWs: () => void;
   /** Clears unread activity for a chat. */
@@ -834,6 +838,30 @@ export const useAppStore = create<AppState>((set, get) => ({
   clearUnreadChat: (chatId) =>
     set((state) => ({ unreadChatIds: state.unreadChatIds.filter((id) => id !== chatId) })),
 
+  reloadServerBackedClientState: async () => {
+    const chatId = get().currentChatId;
+    set({
+      isGenerating: false,
+      isWaitingForToolApproval: false,
+      currentGenerationId: null,
+      loadedModel: null,
+      loadedConfig: null,
+    });
+    void get().fetchModels();
+    void get().fetchServerStatus();
+    void get().fetchHardware();
+    void get().refreshProcessUsage();
+    void queryClient.invalidateQueries({ queryKey: queryKeys.presetsLoad() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.presetsInference() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.presetsSystem() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.tools() });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.settings() });
+    void queryClient.invalidateQueries({ queryKey: ["chats"] });
+    if (chatId) {
+      void get().loadChat(chatId);
+    }
+  },
+
   connectWs: (manual = true) => {
     if (!manual && !get().shouldReconnect) return;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
@@ -894,6 +922,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       }, WATCHDOG_POLL_MS);
       set({ isConnected: true, errorMessage: null, errorActionLabel: null, errorAction: null });
       logInfo("WS connected");
+      void get().reloadServerBackedClientState();
     };
 
     socket.onerror = () => {
@@ -1017,6 +1046,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
             const nextMessages = [...state.messages];
             const targetIndex = nextMessages.findIndex((m) => m.id === frame.messageId);
+            let removedEmptyAssistant = false;
             const messageMetrics = buildMessageMetrics(
               frame.timings,
               frame.promptTokens ?? state.generationStats?.promptTokens ?? 0,
@@ -1038,6 +1068,7 @@ export const useAppStore = create<AppState>((set, get) => ({
                 !existing.thinkingContent;
               if (removeEmptyCancel) {
                 nextMessages.splice(targetIndex, 1);
+                removedEmptyAssistant = true;
               } else if (existing) {
                 const nextMsg = { ...existing };
                 if (frame.fullContent !== undefined) nextMsg.content = frame.fullContent;
@@ -1075,6 +1106,9 @@ export const useAppStore = create<AppState>((set, get) => ({
                 ? (frame.generationId ?? state.currentGenerationId)
                 : null,
               messages: nextMessages,
+              totalMessages: removedEmptyAssistant
+                ? Math.max(nextMessages.length, state.totalMessages - 1)
+                : state.totalMessages,
               generationStats: {
                 tokensCached: cacheCounts.cachedPromptTokens,
                 totalPredicted: frame.timings.predicted_n,
@@ -1632,7 +1666,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const currentCount = state.messages.length;
     if (currentCount >= state.totalMessages) return;
     const oldestPosition = state.messages.reduce(
-      (min, message) => (message.position < min ? message.position : min),
+      (min, message) => Math.min(message.position, min),
       Number.POSITIVE_INFINITY,
     );
     if (!Number.isFinite(oldestPosition)) return;
@@ -1645,7 +1679,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (!res.ok) return;
       const chat = (await res.json()) as { messages?: ChatMessage[]; totalMessages?: number };
       const olderMessages = chat.messages ?? [];
-      if (olderMessages.length === 0) return;
+      if (olderMessages.length === 0) {
+        if (typeof chat.totalMessages === "number" && get().currentChatId === chatId) {
+          set({ totalMessages: chat.totalMessages });
+        }
+        return;
+      }
       if (requestId !== olderPageRequestId || get().currentChatId !== chatId) return;
       set((s) => {
         if (s.currentChatId !== chatId) return s;
@@ -1817,7 +1856,9 @@ export const useAppStore = create<AppState>((set, get) => ({
           };
         });
         void get().refreshContextUsage();
-        void get().refreshProcessUsage();
+        if (data.status !== "loading") {
+          void get().refreshProcessUsage();
+        }
       } else if (get().serverStatus !== "idle") {
         const errorBody = await res.text().catch(() => "");
         get().addNotification(

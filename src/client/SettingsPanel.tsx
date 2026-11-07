@@ -459,9 +459,10 @@ export function SettingsPanel() {
                 Include Audio From Videos
               </label>
               <p className="text-[10px] text-[var(--color-text-muted)] leading-snug mt-1">
-                When a video has a soundtrack, also send it as separate audio. llama-server cannot
-                read muxed video+audio as one file. Ignored unless the loaded model has an audio
-                encoder.
+                When a video has a soundtrack, also send it as separate audio. The switch is ignored
+                when general.architecture is lfm3 because that model receives the soundtrack from
+                the video file. The checkbox remains stored and remains effective for every other
+                architecture.
               </p>
             </div>
             <input

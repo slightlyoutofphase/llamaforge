@@ -41,19 +41,10 @@ export function resolveContextDisplay(
   loadedConfig: ModelLoadConfig | null,
   isGenerating: boolean,
 ): { used: number; total: number | null } {
-  const total =
-    (isGenerating ? generationStats?.contextSize : undefined) ||
-    loadedConfig?.contextSize ||
-    contextUsage?.contextSize ||
-    generationStats?.contextSize ||
-    null;
-  if (
-    isGenerating &&
-    generationStats &&
-    (generationStats.promptTokens !== undefined || generationStats.totalPredicted !== undefined)
-  ) {
+  const total = loadedConfig?.contextSize ?? null;
+  if (isGenerating) {
     return {
-      used: (generationStats.promptTokens ?? 0) + (generationStats.totalPredicted ?? 0),
+      used: generationStats?.totalPredicted ?? 0,
       total,
     };
   }

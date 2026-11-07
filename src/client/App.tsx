@@ -33,9 +33,6 @@ import { useUiStore } from "./uiStore";
 export default function App() {
   const connectWs = useAppStore((s) => s.connectWs);
   const disconnectWs = useAppStore((s) => s.disconnectWs);
-  const fetchHardware = useAppStore((s) => s.fetchHardware);
-  const fetchModels = useAppStore((s) => s.fetchModels);
-  const fetchServerStatus = useAppStore((s) => s.fetchServerStatus);
   const refreshProcessUsage = useAppStore((s) => s.refreshProcessUsage);
   const refreshContextUsage = useAppStore((s) => s.refreshContextUsage);
   const serverStatus = useAppStore((s) => s.serverStatus);
@@ -95,20 +92,17 @@ export default function App() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: Zustand methods are stable singletons
   useEffect(() => {
     connectWs();
-    fetchHardware();
-    fetchModels().then(() => fetchServerStatus());
-    void refreshProcessUsage();
     const usageTimer = window.setInterval(() => {
       if (document.hidden) return;
       if (isGeneratingRef.current) return;
       const status = useAppStore.getState().serverStatus;
-      if (status !== "running" && status !== "loading") return;
+      if (status !== "running") return;
       void refreshProcessUsage();
     }, 30_000);
     const refreshWhenVisible = () => {
       if (document.hidden) return;
       const status = useAppStore.getState().serverStatus;
-      if (status !== "running" && status !== "loading") return;
+      if (status !== "running") return;
       void refreshProcessUsage();
     };
     document.addEventListener("visibilitychange", refreshWhenVisible);

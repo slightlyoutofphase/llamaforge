@@ -13,6 +13,43 @@ let fetchChats: ReturnType<typeof mock>;
 let createChat: ReturnType<typeof mock>;
 let useInfiniteChats: any;
 let useCreateChat: any;
+const capturedCreate = {
+  mutate: undefined as ((variables: Partial<ChatSession>) => Promise<unknown>) | undefined,
+};
+
+/**
+ * Renders the infinite chat list for an empty search string.
+ *
+ * @returns The loading text or the first chat name.
+ */
+function ChatListProbe() {
+  const { data, isLoading } = useInfiniteChats("");
+  return <div>{isLoading ? "loading" : data?.pages?.[0]?.[0]?.name}</div>;
+}
+
+/**
+ * Captures `useCreateChat().mutateAsync` for the cache-invalidation test.
+ *
+ * @returns Nothing visible.
+ */
+function CreateChatProbe() {
+  const { mutateAsync } = useCreateChat();
+  capturedCreate.mutate = mutateAsync;
+  return null;
+}
+
+/**
+ * Reads the mutate function captured by {@link CreateChatProbe}.
+ *
+ * @returns The captured mutate function.
+ */
+function requireCapturedCreateMutate(): (variables: Partial<ChatSession>) => Promise<unknown> {
+  const mutate = capturedCreate.mutate;
+  if (typeof mutate !== "function") {
+    throw new Error("useCreateChat did not expose mutateAsync");
+  }
+  return mutate;
+}
 
 beforeEach(async () => {
   mock.restore();
@@ -51,15 +88,10 @@ describe("Chat query hooks", () => {
   it("normalizes empty search to undefined when fetching chat list", async () => {
     fetchChats.mockResolvedValue([{ id: "chat-1", name: "First Chat", createdAt: 1000 }]);
 
-    function TestComponent() {
-      const { data, isLoading } = useInfiniteChats("");
-      return <div>{isLoading ? "loading" : data?.pages?.[0]?.[0]?.name}</div>;
-    }
-
     await act(async () => {
       render(
         <QueryClientProvider client={queryClient}>
-          <TestComponent />
+          <ChatListProbe />
         </QueryClientProvider>,
       );
     });
@@ -81,27 +113,18 @@ describe("Chat query hooks", () => {
     const invalidateQueries = mock((...args: any[]) => originalInvalidate(...args));
     queryClient.invalidateQueries = invalidateQueries as any;
 
-    let mutateAsync: ((variables: Partial<ChatSession>) => Promise<unknown>) | undefined;
-
-    function TestComponent() {
-      const { mutateAsync: mutate } = useCreateChat();
-      mutateAsync = mutate;
-      return null;
-    }
+    capturedCreate.mutate = undefined;
 
     await act(async () => {
       render(
         <QueryClientProvider client={queryClient}>
-          <TestComponent />
+          <CreateChatProbe />
         </QueryClientProvider>,
       );
     });
 
-    await waitFor(() => expect(typeof mutateAsync).toBe("function"));
-    if (typeof mutateAsync !== "function") {
-      throw new Error("useCreateChat did not expose mutateAsync");
-    }
-    const createChatMutate = mutateAsync;
+    await waitFor(() => expect(typeof capturedCreate.mutate).toBe("function"));
+    const createChatMutate = requireCapturedCreateMutate();
     await act(async () => {
       await createChatMutate({ name: "Test Chat" });
     });

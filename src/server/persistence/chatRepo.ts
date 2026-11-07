@@ -578,8 +578,8 @@ export async function getChat(
 /**
  * Loads the chat fields the prompt builder reads.
  *
- * Message rows omit `metrics_json`. Attachment rows are loaded only for messages
- * that actually have attachments.
+ * Attachment rows are loaded only for messages that actually have attachments.
+ * Metrics stay on the row so context occupancy can be read without rebuilding a prompt.
  *
  * @param id - Chat session identifier.
  * @returns The chat and its prompt messages, or `null` when the chat does not exist.
@@ -599,7 +599,7 @@ export async function getChatForPrompt(id: string): Promise<ChatSession | null> 
   } as ChatSession;
   const messages = db
     .query<ChatMessageRow, [string]>(
-      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson FROM messages WHERE chat_id = ? ORDER BY position ASC",
+      "SELECT id, chat_id as chatId, role, content, raw_content as rawContent, thinking_content as thinkingContent, position, created_at as createdAt, tool_call_id as toolCallId, tool_calls_json as toolCallsJson, metrics_json as metricsJson FROM messages WHERE chat_id = ? ORDER BY position ASC",
     )
     .all(id)
     .map(hydrateChatMessage);

@@ -5,7 +5,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Attachment, GgufDisplayMetadata } from "../shared/types";
+import type { Attachment, ChatMessage, GgufDisplayMetadata } from "../shared/types";
 import { logInfo, logWarn } from "./logger";
 import { getAppDataDir, getDb, resolveAppDataPath } from "./persistence/db";
 import { loadSettings } from "./persistence/settingsRepo";
@@ -327,7 +327,7 @@ function normalizeStoredAttachmentPath(relativePath: string): string | null {
  * @param relativePath - Persisted attachment path relative to `.llamaforge`.
  * @returns The absolute attachment path, or `null` when the path escapes the app root.
  */
-function resolveStoredAttachmentPath(relativePath: string): string | null {
+export function resolveStoredAttachmentPath(relativePath: string): string | null {
   const normalized = normalizeStoredAttachmentPath(relativePath);
   if (!normalized) return null;
 
@@ -700,6 +700,41 @@ function persistVideoSoundtrackAttachment(video: Attachment, audioAbs: string): 
   return attachment;
 }
 
+/**
+ * Extracts a video soundtrack and appends it to the in-memory message before
+ * the single content-part build for this send.
+ *
+ * `buildContentParts` only reads attachments that are already present. This
+ * function is the only caller that probes and inserts the soundtrack row.
+ *
+ * @param messages - Transcript that will be serialized once.
+ * @param includeVideoAudio - Whether the loaded model should receive the wav.
+ * @returns No return value.
+ */
+export async function attachPendingVideoSoundtracks(
+  messages: readonly ChatMessage[],
+  includeVideoAudio: boolean,
+): Promise<void> {
+  if (!includeVideoAudio) return;
+  for (const message of messages) {
+    const attachments = message.attachments;
+    if (!attachments) continue;
+    for (const video of attachments) {
+      if (!video.mimeType.startsWith("video/")) continue;
+      if (findExistingSoundtrack(attachments, video)) continue;
+      const absolutePath = resolveStoredAttachmentPath(video.filePath);
+      if (!absolutePath) continue;
+      try {
+        const audioAbsolute = await resolveVideoAudioSidecarImpl(absolutePath);
+        if (!audioAbsolute) continue;
+        attachments.push(persistVideoSoundtrackAttachment(video, audioAbsolute));
+      } catch (err: unknown) {
+        logWarn(`Failed resolving extracted audio for video: ${video.filePath}`, err);
+      }
+    }
+  }
+}
+
 type ChatContentPart =
   | { type: "text"; text: string }
   | { type: "image_url"; image_url: { url: string } }
@@ -915,39 +950,18 @@ export async function buildContentParts(
             ? { type: "input_video", input_video: { url } }
             : { type: "image_url", image_url: { url } };
         if (mediaPart.type === "input_video" && (await shouldIncludeVideoAudio())) {
-          try {
-            const existing = findExistingSoundtrack(attachments, a);
-            if (existing) {
-              if (!emittedSoundtrackPaths.has(existing.filePath)) {
-                const audioUrl = toLocalMediaUrl(existing.filePath);
-                if (!audioUrl) {
-                  logWarn(`Invalid extracted video audio path: ${existing.filePath}`);
-                } else {
-                  logInfo(`Pushing extracted video audio URL path: ${audioUrl}`);
-                  pushExtractedAudio(
-                    { type: "input_audio", input_audio: { url: audioUrl } },
-                    existing.filePath,
-                  );
-                }
-              }
+          const existing = findExistingSoundtrack(attachments, a);
+          if (existing && !emittedSoundtrackPaths.has(existing.filePath)) {
+            const audioUrl = toLocalMediaUrl(existing.filePath);
+            if (!audioUrl) {
+              logWarn(`Invalid extracted video audio path: ${existing.filePath}`);
             } else {
-              const audioAbs = await resolveVideoAudioSidecarImpl(absPath);
-              if (audioAbs) {
-                const soundtrack = persistVideoSoundtrackAttachment(a, audioAbs);
-                const audioUrl = toLocalMediaUrl(soundtrack.filePath);
-                if (!audioUrl) {
-                  logWarn(`Invalid extracted video audio path: ${soundtrack.filePath}`);
-                } else {
-                  logInfo(`Pushing extracted video audio URL path: ${audioUrl}`);
-                  pushExtractedAudio(
-                    { type: "input_audio", input_audio: { url: audioUrl } },
-                    soundtrack.filePath,
-                  );
-                }
-              }
+              logInfo(`Pushing extracted video audio URL path: ${audioUrl}`);
+              pushExtractedAudio(
+                { type: "input_audio", input_audio: { url: audioUrl } },
+                existing.filePath,
+              );
             }
-          } catch (audioError) {
-            logWarn(`Failed resolving extracted audio for video: ${a.filePath}`, audioError);
           }
         }
         logInfo(`Pushing media URL path: ${url}`);

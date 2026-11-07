@@ -5,14 +5,17 @@
 
 import type { ChatMessage } from "../shared/types";
 import { parseToolCallsJson } from "../shared/toolCalls";
+import type {
+  ChatCompletionMessage,
+  PromptResponseFormat,
+  PromptThinkingConfig,
+  PromptTool,
+} from "./promptPayload";
+import { sumMessageVirBudget } from "./mediaBudget";
 
 const tokenCountCache = new Map<string, number>();
 /** Increments whenever the loaded tokenizer may have changed. */
 let tokenizerEpoch = 0;
-/** Characters per token observed from the latest exact `/tokenize` result. */
-let calibratedCharsPerToken = 3.5;
-/** Tokenizer epoch that {@link calibratedCharsPerToken} belongs to. */
-let calibratedCharsPerTokenEpoch = -1;
 
 /**
  * Returns the current tokenizer generation.
@@ -37,61 +40,21 @@ export function getTokenizerEpoch(): number {
 export function resetTokenCountCache(): void {
   tokenCountCache.clear();
   tokenizerEpoch += 1;
-  calibratedCharsPerToken = 3.5;
-  calibratedCharsPerTokenEpoch = tokenizerEpoch;
 }
 
 /**
- * Returns the characters-per-token ratio for the active tokenizer.
+ * Rough group size used only to choose a starting cut.
  *
- * The ratio starts at 3.5 and is replaced by `text.length / tokens` after each
- * exact `/tokenize` result. A model change resets it.
- *
- * @returns Characters represented by one token.
- */
-function currentCharsPerToken(): number {
-  if (calibratedCharsPerTokenEpoch !== tokenizerEpoch) {
-    calibratedCharsPerTokenEpoch = tokenizerEpoch;
-    calibratedCharsPerToken = 3.5;
-  }
-  return calibratedCharsPerToken;
-}
-
-/**
- * Records the characters-per-token ratio from an exact token count.
- *
- * @param text - Text that was tokenized.
- * @param tokens - Token count returned by `/tokenize`.
- * @returns No return value.
- */
-function observeExactTokenCount(text: string, tokens: number): void {
-  if (text.length === 0 || tokens <= 0) return;
-  calibratedCharsPerTokenEpoch = tokenizerEpoch;
-  calibratedCharsPerToken = text.length / tokens;
-}
-
-/**
- * Estimates tokens from text length using the calibrated ratio.
- *
- * @param text - Text to estimate.
- * @returns A non-negative token estimate.
- */
-function estimateTextTokens(text: string): number {
-  if (text.length === 0) return 0;
-  return Math.ceil(text.length / currentCharsPerToken());
-}
-
-/**
- * Estimates the tokens in one atomic message group from text length and media budgets.
+ * The number that decides whether the prompt fits is always
+ * {@link countTemplatedPromptTokens}. This hint is not returned to callers.
  *
  * @param group - Messages that must be kept or dropped together.
- * @returns Estimated tokens for the group.
+ * @returns A positive size hint.
  */
 function estimateGroupTokens(group: readonly ChatMessage[]): number {
-  let tokens = 0;
+  let tokens = 1;
   for (const message of group) {
-    tokens += estimateTextTokens(`${message.role}\n${message.content}`);
-    tokens += estimateAttachmentMediaTokens([message]);
+    tokens += message.content.length + sumMessageVirBudget(message);
   }
   return tokens;
 }
@@ -99,9 +62,33 @@ const DEFAULT_CTX_SIZE = 4096;
 const DEFAULT_RESERVED_TOKENS = 512;
 const MIN_RESERVED_TOKENS = 128;
 
+/**
+ * Already-built completion fields used to count tokens without rebuilding media.
+ */
 export interface TokenEstimationOptions {
-  /** Optional builder for a serialized prompt payload matching the real request shape. */
-  buildPromptText?: ((messages: ChatMessage[]) => Promise<string>) | undefined;
+  /** API messages aligned with the chat messages being counted. */
+  apiMessages?: readonly ChatCompletionMessage[] | undefined;
+  /** Encoder tokens aligned with `apiMessages`, one sum per message. */
+  mediaTokens?: readonly number[] | undefined;
+  /** Tool definitions included in the completion body. */
+  tools?: PromptTool[] | undefined;
+  /** Structured-output schema included in the completion body. */
+  responseFormat?: PromptResponseFormat | undefined;
+  /** Thinking kwargs included in the completion body. */
+  chatTemplateKwargs?: PromptThinkingConfig["chat_template_kwargs"] | undefined;
+}
+
+/**
+ * Thrown when `/apply-template` or `/tokenize` cannot produce a prompt count.
+ */
+export class PromptTokenCountError extends Error {
+  /**
+   * @param message - Why the count failed.
+   */
+  constructor(message: string) {
+    super(message);
+    this.name = "PromptTokenCountError";
+  }
 }
 
 /**
@@ -127,113 +114,113 @@ function normalizeMaxTokens(maxTokens: number): number {
 }
 
 /**
- * Builds a cache key for a single message tokenization input.
+ * Applies the chat template and tokenizes the returned prompt string.
  *
- * @param message - Chat message contributing to the prompt.
- * @returns A cache key that uniquely identifies the message content and attachment types.
- */
-function buildMessageKey(message: ChatMessage): string {
-  // M1 fix: include message ID to prevent key collisions across different message sets
-  const attachments = (message.attachments || []).map((a) => `${a.mimeType}`).join("|");
-  return `${message.id ?? "_"}:${message.role}:${message.content}:${attachments}`;
-}
-
-/**
- * Builds a cache key for an ordered message list.
+ * Media encoder tokens are added afterwards. A failed template or tokenize
+ * call throws. There is no character-length fallback.
  *
- * @param messages - Prompt messages whose token count should be cached.
- * @param port - Optional llama-server port used for tokenization.
- * @returns A cache key representing the full message array.
+ * @param args - Port, API messages, completion extras, and media token sum.
+ * @returns Text tokens plus media tokens.
  */
-function buildMessagesKey(messages: ChatMessage[], port?: number): string {
-  const material = `${messages.length}|${messages.map((message) => buildMessageKey(message)).join("||")}|port:${port ?? 0}`;
-  return `msgs:${String(Bun.hash(material))}`;
-}
-
-/**
- * Builds a cache key for a fully serialized prompt payload.
- *
- * @param serializedPrompt - Prompt body sent to the tokenizer.
- * @param port - Optional llama-server port used for tokenization.
- * @returns A cache key for prompt-level token counts.
- */
-function buildSerializedPromptKey(serializedPrompt: string, port?: number): string {
-  return `payload:${port ?? 0}:${String(Bun.hash(serializedPrompt))}`;
-}
-
-/**
- * Serializes a message list into a stable text payload for heuristic token counting.
- *
- * @param messages - Prompt messages to serialize.
- * @returns JSON text representing the message content relevant to prompt budgeting.
- */
-function serializeMessagesForPromptBudget(messages: ChatMessage[]): string {
-  return JSON.stringify(
-    messages.map((message) => ({
-      role: message.role,
-      content: message.content,
-      toolCallId: message.toolCallId,
-      toolCallsJson: message.toolCallsJson,
-    })),
-  );
-}
-
-/**
- * Estimates the fixed token overhead contributed by image and audio attachments.
- *
- * @param messages - Prompt messages whose attachments should be counted.
- * @returns Estimated attachment token overhead.
- */
-function estimateAttachmentMediaTokens(messages: ChatMessage[]): number {
-  let attachmentTokens = 0;
-  for (const message of messages) {
-    if (!message.attachments) continue;
-    for (const attachment of message.attachments) {
-      if (attachment.mimeType.startsWith("image/")) {
-        attachmentTokens += 560;
-      } else if (attachment.mimeType.startsWith("audio/")) {
-        attachmentTokens += 256;
-      } else if (attachment.mimeType.startsWith("video/")) {
-        attachmentTokens += 1024;
-      }
-    }
+export async function countTemplatedPromptTokens(args: {
+  port: number;
+  messages: readonly ChatCompletionMessage[];
+  tools?: PromptTool[] | undefined;
+  responseFormat?: PromptResponseFormat | undefined;
+  chatTemplateKwargs?: PromptThinkingConfig["chat_template_kwargs"] | undefined;
+  mediaTokens: number;
+}): Promise<number> {
+  if (!Number.isInteger(args.port) || args.port <= 0) {
+    throw new PromptTokenCountError("Cannot count prompt tokens without a loaded model.");
   }
-  return attachmentTokens;
-}
+  const applyBody = {
+    messages: args.messages,
+    ...(args.tools && args.tools.length > 0 ? { tools: args.tools } : {}),
+    ...(args.responseFormat ? { response_format: args.responseFormat } : {}),
+    ...(args.chatTemplateKwargs ? { chat_template_kwargs: args.chatTemplateKwargs } : {}),
+  };
+  const cacheMaterial = `${tokenizerEpoch}|${args.port}|${args.mediaTokens}|${JSON.stringify(applyBody)}`;
+  const cacheKey = `templated:${String(Bun.hash(cacheMaterial))}`;
+  const cached = tokenCountCache.get(cacheKey);
+  if (cached !== undefined) return cached;
 
-/**
- * Fetches an exact or heuristic token count for arbitrary prompt text.
- *
- * @param text - Serialized prompt text to tokenize.
- * @param port - Optional llama-server port exposing the `/tokenize` endpoint.
- * @returns Token count for the serialized prompt text.
- */
-async function fetchTokenCount(text: string, port?: number): Promise<number> {
-  if (!port) return Math.ceil(text.length / 3.5);
-
+  let prompt: string;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/tokenize`, {
+    const applied = await fetch(`http://127.0.0.1:${args.port}/apply-template`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      signal: AbortSignal.timeout(5000),
-      body: JSON.stringify({ content: text }),
+      signal: AbortSignal.timeout(15000),
+      body: JSON.stringify(applyBody),
     });
-    if (!res.ok) return Math.ceil(text.length / 3.5);
-    const data: unknown = await res.json();
-    if (
-      data &&
-      typeof data === "object" &&
-      "tokens" in data &&
-      Array.isArray((data as { tokens: unknown }).tokens)
-    ) {
-      const tokens = (data as { tokens: unknown[] }).tokens.length;
-      observeExactTokenCount(text, tokens);
-      return tokens;
+    if (!applied.ok) {
+      throw new PromptTokenCountError(`apply-template failed with HTTP ${applied.status}.`);
     }
-  } catch {
-    // Fallback to heuristic token count
+    const appliedBody: unknown = await applied.json();
+    if (
+      !appliedBody ||
+      typeof appliedBody !== "object" ||
+      typeof (appliedBody as { prompt?: unknown }).prompt !== "string"
+    ) {
+      throw new PromptTokenCountError("apply-template did not return a prompt string.");
+    }
+    prompt = (appliedBody as { prompt: string }).prompt;
+  } catch (err: unknown) {
+    if (err instanceof PromptTokenCountError) throw err;
+    throw new PromptTokenCountError(err instanceof Error ? err.message : "apply-template failed.");
   }
-  return Math.ceil(text.length / 3.5);
+
+  let textTokens: number;
+  try {
+    const tokenized = await fetch(`http://127.0.0.1:${args.port}/tokenize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(15000),
+      body: JSON.stringify({ content: prompt, add_special: false, parse_special: true }),
+    });
+    if (!tokenized.ok) {
+      throw new PromptTokenCountError(`tokenize failed with HTTP ${tokenized.status}.`);
+    }
+    const tokenBody: unknown = await tokenized.json();
+    if (
+      !tokenBody ||
+      typeof tokenBody !== "object" ||
+      !Array.isArray((tokenBody as { tokens?: unknown }).tokens)
+    ) {
+      throw new PromptTokenCountError("tokenize did not return a token array.");
+    }
+    textTokens = (tokenBody as { tokens: unknown[] }).tokens.length;
+  } catch (err: unknown) {
+    if (err instanceof PromptTokenCountError) throw err;
+    throw new PromptTokenCountError(err instanceof Error ? err.message : "tokenize failed.");
+  }
+
+  const total = textTokens + Math.max(0, args.mediaTokens);
+  tokenCountCache.set(cacheKey, total);
+  if (tokenCountCache.size > 500) {
+    const evictCount = Math.floor(tokenCountCache.size * 0.25);
+    let removed = 0;
+    for (const key of tokenCountCache.keys()) {
+      if (removed >= evictCount) break;
+      tokenCountCache.delete(key);
+      removed++;
+    }
+  }
+  return total;
+}
+
+/**
+ * Builds a minimal API message list from chat rows when the caller has not
+ * already rendered one. Production sends pass the rendered array instead.
+ *
+ * @param messages - Chat rows to mirror.
+ * @returns One API message per row, using the stored text content.
+ */
+function apiMessagesFromChat(messages: readonly ChatMessage[]): ChatCompletionMessage[] {
+  return messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+    ...(message.toolCallId ? { tool_call_id: message.toolCallId } : {}),
+  }));
 }
 
 /**
@@ -249,87 +236,68 @@ export async function getTokens(
   port?: number,
   options?: TokenEstimationOptions,
 ): Promise<number> {
-  if (options?.buildPromptText) {
-    return getPromptTokens(msgs, port, options);
+  if (!port) {
+    throw new PromptTokenCountError("Cannot count prompt tokens without a loaded model.");
   }
-
-  const cacheKey = buildMessagesKey(msgs, port);
-  const cached = tokenCountCache.get(cacheKey);
-  if (cached !== undefined) return cached;
-
-  const start = Date.now();
-  const serializedPrompt = serializeMessagesForPromptBudget(msgs);
-  const serializedCacheKey = buildSerializedPromptKey(serializedPrompt, port);
-  const serializedCached = tokenCountCache.get(serializedCacheKey);
-  const contentTokens =
-    serializedCached !== undefined
-      ? serializedCached
-      : await fetchTokenCount(serializedPrompt, port);
-
-  const duration = Date.now() - start;
-  if (duration > 100) {
-    const { logDebug } = await import("./logger");
-    logDebug("Tokenization completed", {
-      durationMs: duration,
-      messageCount: msgs.length,
-      totalTokens: contentTokens,
-    });
-  }
-
-  const attachmentTokens = estimateAttachmentMediaTokens(msgs);
-
-  const total = contentTokens + attachmentTokens;
-  tokenCountCache.set(serializedCacheKey, contentTokens);
-  tokenCountCache.set(cacheKey, total);
-  // S7 fix: evict oldest 25% instead of clearing everything to prevent thrashing
-  if (tokenCountCache.size > 500) {
-    const evictCount = Math.floor(tokenCountCache.size * 0.25);
-    let removed = 0;
-    for (const key of tokenCountCache.keys()) {
-      if (removed >= evictCount) break;
-      tokenCountCache.delete(key);
-      removed++;
-    }
-  }
-  return total;
+  const apiMessages =
+    options?.apiMessages && options.apiMessages.length === msgs.length
+      ? options.apiMessages
+      : apiMessagesFromChat(msgs);
+  const mediaTokens =
+    options?.mediaTokens && options.mediaTokens.length === msgs.length
+      ? options.mediaTokens.reduce((sum, value) => sum + value, 0)
+      : msgs.reduce((sum, message) => sum + sumMessageVirBudget(message), 0);
+  return countTemplatedPromptTokens({
+    port,
+    messages: apiMessages,
+    tools: options?.tools,
+    responseFormat: options?.responseFormat,
+    chatTemplateKwargs: options?.chatTemplateKwargs,
+    mediaTokens,
+  });
 }
 
 /**
- * Calculates token usage for a prompt using the exact serialized request payload when available.
+ * Counts one slice of an already-built API message list.
  *
- * @param messages - Prompt messages to estimate.
- * @param port - Optional llama-server port used for exact tokenization.
- * @param options - Token estimation options containing the prompt serializer.
- * @returns Total estimated prompt tokens including attachment overhead.
+ * @param messages - Chat rows in the slice. Used only for length checks.
+ * @param port - llama-server port.
+ * @param options - Prepared API messages and completion extras for the full list.
+ * @param indexes - Positions in the original prepared arrays.
+ * @returns Templated text tokens plus the slice's `virBudget` sum.
  */
 async function getPromptTokens(
   messages: ChatMessage[],
-  port?: number,
-  options?: TokenEstimationOptions,
+  port: number | undefined,
+  options: TokenEstimationOptions | undefined,
+  indexes?: readonly number[],
 ): Promise<number> {
-  if (!options?.buildPromptText) {
-    return getTokens(messages, port);
+  if (!port) {
+    throw new PromptTokenCountError("Cannot count prompt tokens without a loaded model.");
   }
-
-  const serializedPrompt = await options.buildPromptText(messages);
-  const serializedCacheKey = buildSerializedPromptKey(serializedPrompt, port);
-  const cached = tokenCountCache.get(serializedCacheKey);
-  const contentTokens =
-    cached !== undefined ? cached : await fetchTokenCount(serializedPrompt, port);
-  const total = contentTokens + estimateAttachmentMediaTokens(messages);
-
-  tokenCountCache.set(serializedCacheKey, contentTokens);
-  if (tokenCountCache.size > 500) {
-    const evictCount = Math.floor(tokenCountCache.size * 0.25);
-    let removed = 0;
-    for (const key of tokenCountCache.keys()) {
-      if (removed >= evictCount) break;
-      tokenCountCache.delete(key);
-      removed++;
-    }
+  if (
+    options?.apiMessages &&
+    options.mediaTokens &&
+    indexes &&
+    options.apiMessages.length === options.mediaTokens.length
+  ) {
+    const apiMessages = indexes
+      .map((index) => options.apiMessages?.[index])
+      .filter((message): message is ChatCompletionMessage => message !== undefined);
+    const mediaTokens = indexes.reduce(
+      (sum, index) => sum + (options.mediaTokens?.[index] ?? 0),
+      0,
+    );
+    return countTemplatedPromptTokens({
+      port,
+      messages: apiMessages,
+      tools: options.tools,
+      responseFormat: options.responseFormat,
+      chatTemplateKwargs: options.chatTemplateKwargs,
+      mediaTokens,
+    });
   }
-
-  return total;
+  return getTokens(messages, port, options);
 }
 
 /**
@@ -446,11 +414,22 @@ export async function truncateMessages(
   roleSystemPrompt: boolean = true,
   tokenOptions?: TokenEstimationOptions,
 ): Promise<ChatMessage[]> {
+  const indexById = new Map<string, number>();
+  rawMessages.forEach((message, index) => {
+    if (message.id) indexById.set(message.id, index);
+  });
+  const countSubset = (subset: readonly ChatMessage[]): Promise<number> => {
+    const indexes = subset
+      .map((message) => indexById.get(message.id))
+      .filter((index): index is number => index !== undefined);
+    return getPromptTokens([...subset], port, tokenOptions, indexes);
+  };
+
   if (overflowPolicy === "StopAtLimit") {
     const reservedTokens = getReservedTokens(maxTokens);
     const maxPromptTokens = normalizeCtxSize(ctxSize) - reservedTokens;
     if (maxPromptTokens > 0) {
-      const currentTokens = await getPromptTokens(rawMessages, port, tokenOptions);
+      const currentTokens = await countSubset(rawMessages);
       if (currentTokens > maxPromptTokens) {
         throw new ContextOverflowError();
       }
@@ -464,17 +443,12 @@ export async function truncateMessages(
   const maxPromptTokens = normalizedCtxSize - reservedTokens;
   if (maxPromptTokens <= 0) return messages;
 
-  let currentTokens = await getPromptTokens(messages, port, tokenOptions);
+  let currentTokens = await countSubset(messages);
   if (currentTokens <= maxPromptTokens) return messages;
 
   const protectedPrefix = getProtectedPrefixLength(messages, roleSystemPrompt);
   const keepLastCount = 1;
   const groups = groupMessagesAtomically(messages);
-
-  const overheadTokens = tokenOptions?.buildPromptText
-    ? estimateTextTokens(await tokenOptions.buildPromptText([]))
-    : 0;
-  const estimateScale = tokenOptions?.buildPromptText ? 1.25 : 1;
 
   /**
    * Estimates the token cost of the groups that would remain after a cut.
@@ -493,7 +467,7 @@ export async function truncateMessages(
     const afterIndex = Math.min(groups.length, startGroupIndex + removeCount);
     const keptBefore = prefix[startGroupIndex] ?? 0;
     const keptAfter = (prefix[groups.length] ?? 0) - (prefix[afterIndex] ?? 0);
-    return overheadTokens + Math.ceil((keptBefore + keptAfter) * estimateScale);
+    return keptBefore + keptAfter;
   };
 
   const removeGroupsUntilFit = async (
@@ -519,17 +493,15 @@ export async function truncateMessages(
     }
     groups.splice(startGroupIndex, removeCount);
 
-    let corrections = 0;
-    currentTokens = await getPromptTokens(groups.flat(), port, tokenOptions);
-    while (currentTokens > maxPromptTokens && corrections < 3) {
+    currentTokens = await countSubset(groups.flat());
+    while (currentTokens > maxPromptTokens) {
       const nextLastRemovable =
         keepLastCount > 0 ? Math.max(startGroupIndex, groups.length - 1) - 1 : groups.length - 1;
       const canDrop =
         startGroupIndex <= nextLastRemovable && groups.length - 1 >= minRemainingGroups;
       if (!canDrop || startGroupIndex >= groups.length) break;
       groups.splice(startGroupIndex, 1);
-      corrections += 1;
-      currentTokens = await getPromptTokens(groups.flat(), port, tokenOptions);
+      currentTokens = await countSubset(groups.flat());
     }
   };
 
@@ -554,18 +526,10 @@ export async function truncateMessages(
   messages.length = 0;
   messages.push(...groups.flat());
 
-  const lastMessage = messages.at(-1);
-  if (currentTokens > maxPromptTokens && lastMessage) {
-    const last = cloneMessage(lastMessage);
-    const lastTokens = await getPromptTokens([last], port, tokenOptions);
-    if (lastTokens > maxPromptTokens && last.content.length > 100) {
-      const keepCount = Math.max(
-        64,
-        Math.floor((last.content.length * maxPromptTokens) / lastTokens),
-      );
-      last.content = `[TRUNCATED]\n...\n${last.content.substring(last.content.length - keepCount)}`;
-      messages[messages.length - 1] = last;
-    }
+  if (currentTokens > maxPromptTokens) {
+    throw new ContextOverflowError(
+      `Conversation exceeds the context window (Stop At Limit). counted ${currentTokens} tokens against a ${maxPromptTokens} token prompt budget.`,
+    );
   }
 
   return messages;

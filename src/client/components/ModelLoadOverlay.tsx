@@ -8,34 +8,20 @@ import { useState } from "react";
 import { useAppStore } from "../store";
 
 /**
- * Renders a blocking load-progress dialog whenever the inference server status is `loading`.
+ * Renders a blocking spinner while the inference server status is `loading`.
+ *
+ * The overlay does not estimate a percentage. Cancel still stops the load.
  *
  * @returns The overlay, or `null` when no model load is in progress.
  */
 export function ModelLoadOverlay() {
   const serverStatus = useAppStore((s) => s.serverStatus);
-  const loadProgress = useAppStore((s) => s.loadProgress);
-  const loadProgressPhase = useAppStore((s) => s.loadProgressPhase);
-  const loadProgressDetail = useAppStore((s) => s.loadProgressDetail);
   const unloadModel = useAppStore((s) => s.unloadModel);
   const [cancelling, setCancelling] = useState(false);
 
   if (serverStatus !== "loading") {
     return null;
   }
-
-  const phaseLabel =
-    loadProgressPhase === "spawning"
-      ? "Spawning llama-server"
-      : loadProgressPhase === "loading_weights"
-        ? "Loading weights"
-        : loadProgressPhase === "offloading"
-          ? "Offloading to GPU"
-          : loadProgressPhase === "initializing"
-            ? "Initializing runtime"
-            : loadProgressPhase === "ready"
-              ? "Ready"
-              : "Loading";
 
   return (
     <div
@@ -44,49 +30,23 @@ export function ModelLoadOverlay() {
       aria-modal="true"
       aria-labelledby="model-load-overlay-title"
       aria-busy="true">
-      <div className="w-full max-w-2xl rounded-2xl border border-white/10 bg-[color:rgba(15,23,42,0.92)] p-6 shadow-2xl shadow-black/40">
-        <div className="flex items-start gap-4">
-          <Loader2 size={32} className="mt-1 text-[var(--color-accent)] animate-spin shrink-0" />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div id="model-load-overlay-title" className="text-lg font-semibold text-white">
-                  Loading model
-                </div>
-                <div className="text-xs uppercase tracking-[0.24em] text-gray-400 mt-1">
-                  {phaseLabel}
-                </div>
-              </div>
-              <div className="text-2xl font-bold text-white tabular-nums">{loadProgress}%</div>
-            </div>
-
-            <div className="mt-4 h-3 rounded-full bg-white/10 overflow-hidden">
-              <div
-                className="h-full rounded-full bg-[var(--color-accent)] transition-all duration-300 ease-out"
-                style={{ width: `${Math.max(0, Math.min(100, loadProgress))}%` }}
-              />
-            </div>
-
-            <div className="mt-4 flex items-center gap-3 text-sm text-gray-200">
-              <Loader2 size={16} className="text-[var(--color-accent)] animate-spin shrink-0" />
-              <span className="font-mono truncate">
-                {loadProgressDetail || "Starting model load sequence…"}
-              </span>
-            </div>
-            <div className="mt-4 flex justify-end">
-              <button
-                type="button"
-                data-testid="cancel-model-load"
-                disabled={cancelling}
-                onClick={() => {
-                  setCancelling(true);
-                  void unloadModel().finally(() => setCancelling(false));
-                }}
-                className="rounded-xl border border-white/20 px-3 py-1.5 text-sm text-white hover:bg-white/10 disabled:opacity-50">
-                {cancelling ? "Cancelling…" : "Cancel load"}
-              </button>
-            </div>
+      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[color:rgba(15,23,42,0.92)] px-8 py-10 shadow-2xl shadow-black/40">
+        <div className="flex flex-col items-center text-center">
+          <Loader2 size={48} className="text-[var(--color-accent)] animate-spin" />
+          <div id="model-load-overlay-title" className="mt-5 text-lg font-semibold text-white">
+            Loading model
           </div>
+          <button
+            type="button"
+            data-testid="cancel-model-load"
+            disabled={cancelling}
+            onClick={() => {
+              setCancelling(true);
+              void unloadModel().finally(() => setCancelling(false));
+            }}
+            className="mt-6 rounded-xl border border-white/20 px-3 py-1.5 text-sm text-white hover:bg-white/10 disabled:opacity-50">
+            {cancelling ? "Cancelling…" : "Cancel load"}
+          </button>
         </div>
       </div>
     </div>

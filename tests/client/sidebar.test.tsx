@@ -8,15 +8,37 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { ChatSidebar } from "../../src/client/components/sidebar/ChatSidebar";
 import { useAppStore } from "../../src/client/store";
 
+let sidebarLinkFallbackClick: ((event: unknown) => void) | undefined;
+
+/**
+ * Router link stand-in for the sidebar tests.
+ *
+ * @param children - Link contents.
+ * @param to - Destination href.
+ * @param onClick - Click handler from the row, when the row provides one.
+ * @returns An anchor with the same click behavior the tests assert.
+ */
+function SidebarLink({
+  children,
+  to,
+  onClick,
+}: {
+  children?: any;
+  to?: string;
+  onClick?: (event: unknown) => void;
+}) {
+  return (
+    <a href={to} onClick={onClick ?? sidebarLinkFallbackClick}>
+      {children}
+    </a>
+  );
+}
+
 // Mock the router hooks
 mock.module("@tanstack/react-router", () => ({
   useParams: () => ({ chatId: "chat-1" }),
   useNavigate: () => mock(),
-  Link: ({ children, to, onClick }: any) => (
-    <a href={to} onClick={onClick}>
-      {children}
-    </a>
-  ),
+  Link: SidebarLink,
   useRouter: () => ({ buildLocation: () => ({}) }),
 }));
 
@@ -27,14 +49,11 @@ const queryClient = new QueryClient();
 describe("ChatSidebar Component", () => {
   beforeEach(() => {
     mock.restore();
+    sidebarLinkFallbackClick = undefined;
     mock.module("@tanstack/react-router", () => ({
       useParams: () => ({ chatId: "chat-1" }),
       useNavigate: () => mock(),
-      Link: ({ children, to, onClick }: any) => (
-        <a href={to} onClick={onClick}>
-          {children}
-        </a>
-      ),
+      Link: SidebarLink,
       useRouter: () => ({ buildLocation: () => ({}) }),
     }));
     useAppStore.setState({ unreadChatIds: [] });
@@ -173,14 +192,11 @@ describe("ChatSidebar Component", () => {
 
   it("does not trigger navigation when renaming a chat row", () => {
     const linkClickSpy = mock();
+    sidebarLinkFallbackClick = linkClickSpy;
     mock.module("@tanstack/react-router", () => ({
       useParams: () => ({ chatId: "chat-1" }),
       useNavigate: () => mock(),
-      Link: ({ children, to, onClick }: any) => (
-        <a href={to} onClick={onClick ?? linkClickSpy}>
-          {children}
-        </a>
-      ),
+      Link: SidebarLink,
       useRouter: () => ({ buildLocation: () => ({}) }),
     }));
 
@@ -414,11 +430,7 @@ describe("ChatSidebar Component", () => {
     mock.module("@tanstack/react-router", () => ({
       useParams: () => ({ chatId: "chat-1" }),
       useNavigate: () => navigateSpy,
-      Link: ({ children, to, onClick }: any) => (
-        <a href={to} onClick={onClick}>
-          {children}
-        </a>
-      ),
+      Link: SidebarLink,
       useRouter: () => ({ buildLocation: () => ({}) }),
     }));
 
@@ -464,11 +476,7 @@ describe("ChatSidebar Component", () => {
     mock.module("@tanstack/react-router", () => ({
       useParams: () => ({ chatId: "chat-1" }),
       useNavigate: () => navigateSpy,
-      Link: ({ children, to, onClick }: any) => (
-        <a href={to} onClick={onClick}>
-          {children}
-        </a>
-      ),
+      Link: SidebarLink,
       useRouter: () => ({ buildLocation: () => ({}) }),
     }));
 
@@ -631,11 +639,7 @@ describe("ChatSidebar Component", () => {
     mock.module("@tanstack/react-router", () => ({
       useParams: () => ({ chatId: "chat-2" }),
       useNavigate: () => navigateSpy,
-      Link: ({ children, to, onClick }: any) => (
-        <a href={to} onClick={onClick}>
-          {children}
-        </a>
-      ),
+      Link: SidebarLink,
       useRouter: () => ({ buildLocation: () => ({}) }),
     }));
 

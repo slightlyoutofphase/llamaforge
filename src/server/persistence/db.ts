@@ -387,6 +387,7 @@ export function initDbSchema(db: Database): void {
       file_path   TEXT NOT NULL,
       file_name   TEXT NOT NULL,
       vir_budget  INTEGER,
+      vir_key     TEXT,
       created_at  INTEGER NOT NULL,
       text_truncated INTEGER NOT NULL DEFAULT 0
     );
@@ -457,6 +458,12 @@ export function initDbSchema(db: Database): void {
   db.run("CREATE INDEX IF NOT EXISTS idx_attachments_message_id ON attachments(message_id);");
   try {
     db.run("ALTER TABLE attachments ADD COLUMN text_truncated INTEGER NOT NULL DEFAULT 0");
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!message.toLowerCase().includes("duplicate column")) throw err;
+  }
+  try {
+    db.run("ALTER TABLE attachments ADD COLUMN vir_key TEXT");
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     if (!message.toLowerCase().includes("duplicate column")) throw err;

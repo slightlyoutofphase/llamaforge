@@ -11,6 +11,32 @@ import { useUiStore } from "../../src/client/uiStore";
 import { DEFAULT_APP_SETTINGS } from "../../src/shared/defaults";
 import { asFetch } from "../fixtures";
 
+/**
+ * Router link stand-in for the app shell end-to-end tests.
+ *
+ * @param children - Link contents.
+ * @param className - Class forwarded onto the anchor.
+ * @param to - Destination href.
+ * @param props - Remaining anchor attributes.
+ * @returns An anchor the shell can render without a router.
+ */
+function E2eLink({ children, className, to, ...props }: any) {
+  return (
+    <a href={to} className={className} {...props}>
+      {children}
+    </a>
+  );
+}
+
+/**
+ * Router outlet stand-in for the app shell end-to-end tests.
+ *
+ * @returns A placeholder the shell renders as its route content.
+ */
+function E2eOutlet() {
+  return <div data-testid="e2e-outlet">Outlet</div>;
+}
+
 let App: typeof import("../../src/client/App").default;
 let queryClient: QueryClient;
 let originalFetch: typeof global.fetch;
@@ -101,12 +127,8 @@ describe("E2E application shell", () => {
       useLocation: () => ({ pathname: "/" }),
       useNavigate: () => navigateSpy,
       useParams: () => ({}),
-      Link: ({ children, className, to, ...props }: any) => (
-        <a href={to} className={className} {...props}>
-          {children}
-        </a>
-      ),
-      Outlet: () => <div data-testid="e2e-outlet">Outlet</div>,
+      Link: E2eLink,
+      Outlet: E2eOutlet,
     }));
 
     const appModule = await import(`../../src/client/App.tsx?cachebust=${Date.now()}`);

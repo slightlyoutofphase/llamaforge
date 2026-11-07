@@ -2,7 +2,9 @@
  * @packageDocumentation
  * Probes video attachments for audio streams and extracts a cached WAV sidecar
  * so inference can send `input_video` and `input_audio` as separate parts.
- * llama-server cannot consume muxed video+audio as a single file.
+ * The switch is ignored when `general.architecture` is `lfm3` because that
+ * model receives the soundtrack from the video file. It stays effective for
+ * every other architecture.
  */
 
 import fs from "node:fs/promises";

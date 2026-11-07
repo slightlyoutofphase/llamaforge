@@ -12,6 +12,25 @@ import { InputBar } from "../../src/client/components/chat/InputBar";
 import { useAppStore } from "../../src/client/store";
 import { asFetch } from "../fixtures";
 
+/**
+ * Router link stand-in for the chat view tests.
+ *
+ * @param children - Link contents.
+ * @returns An anchor the chat view can render without a router.
+ */
+function ChatViewLink({ children }: { children?: ReactNode }) {
+  return <a href="#test">{children}</a>;
+}
+
+/**
+ * Router outlet stand-in for the chat view tests.
+ *
+ * @returns A placeholder outlet.
+ */
+function ChatViewOutlet() {
+  return <div data-testid="outlet">Mock Outlet</div>;
+}
+
 mock.module("react-dropzone", () => ({
   useDropzone: () => ({
     getRootProps: () => ({}),
@@ -25,8 +44,8 @@ mock.module("@tanstack/react-router", () => ({
   useParams: () => ({ chatId: "chat-loop-1" }),
   useNavigate: () => mock(),
   useLocation: () => ({ pathname: "/chat/chat-loop-1" }),
-  Link: ({ children }: { children?: ReactNode }) => <a href="#test">{children}</a>,
-  Outlet: () => <div data-testid="outlet">Mock Outlet</div>,
+  Link: ChatViewLink,
+  Outlet: ChatViewOutlet,
 }));
 
 const inferencePreset = {

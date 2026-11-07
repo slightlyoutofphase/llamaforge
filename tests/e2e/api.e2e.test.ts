@@ -60,6 +60,23 @@ describe("E2E API router", () => {
       position: 0,
       createdAt: Date.now(),
     });
+    await addMessage({
+      id: Bun.randomUUIDv7(),
+      chatId: chat.id,
+      role: "assistant",
+      content: "occupied",
+      rawContent: "occupied",
+      position: 1,
+      createdAt: Date.now(),
+      metrics: {
+        predictedTokens: 4,
+        tokensPerSecond: 1,
+        promptTokens: 99,
+        promptTokensPerSecond: 1,
+        cachedPromptTokens: 0,
+        evaluatedPromptTokens: 20,
+      },
+    });
     const empty = await createChat("E2E empty");
 
     const occupied = await router.fetch(
@@ -70,9 +87,17 @@ describe("E2E API router", () => {
       new Request(`http://localhost/api/chats/${empty.id}/context-usage`),
       noUpgradeServer,
     );
-    const occupiedBody = (await occupied?.json()) as { usedTokens?: number };
-    const vacantBody = (await vacant?.json()) as { usedTokens?: number };
-    expect(occupiedBody.usedTokens).toBeGreaterThan(vacantBody.usedTokens ?? 0);
+    const occupiedBody = (await occupied?.json()) as {
+      usedTokens?: number;
+      contextSize?: number | null;
+    };
+    const vacantBody = (await vacant?.json()) as {
+      usedTokens?: number;
+      contextSize?: number | null;
+    };
+    expect(occupiedBody.usedTokens).toBe(24);
     expect(vacantBody.usedTokens).toBe(0);
+    expect(occupiedBody.contextSize).toBeNull();
+    expect(vacantBody.contextSize).toBeNull();
   });
 });

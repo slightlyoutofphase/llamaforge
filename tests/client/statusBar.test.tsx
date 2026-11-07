@@ -29,7 +29,7 @@ describe("resolveContextDisplay", () => {
       loaded,
       true,
     );
-    expect(result.used).toBe(425);
+    expect(result.used).toBe(25);
     expect(result.total).toBe(8192);
   });
 

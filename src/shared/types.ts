@@ -984,9 +984,9 @@ export interface AppSettings {
   /**
    * When enabled, video attachments that contain an audio stream also send that
    * soundtrack as a separate `input_audio` part, placed before any image or
-   * video in the turn. Gemma 4 ignores audio that follows an image or video.
-   * llama-server cannot consume muxed video+audio as a single file. No-ops
-   * unless the loaded model has an audio encoder.
+   * video in the turn. The switch is ignored when `general.architecture` is
+   * `lfm3` because that model receives the soundtrack from the video file. The
+   * value remains stored and remains effective for every other architecture.
    */
   includeVideoAudio: boolean;
   /** Minimum allowed port for llama-server. */

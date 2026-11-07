@@ -18,7 +18,7 @@ import { resetTokenCountCache } from "./overflow";
 import { attachChildProcessToParentLifetime } from "./windowsLifetime";
 import { getAppDataDir } from "./persistence/db";
 import { findFreePort } from "./utils/network";
-import { broadcastLoadProgress, broadcastLog, broadcastStatus } from "./wsHub";
+import { broadcastLog, broadcastStatus } from "./wsHub";
 
 let proc: Subprocess<"ignore", "pipe", "pipe"> | null = null;
 /** PID of the spawned llama-server, kept until the process tree is confirmed dead. */
@@ -53,91 +53,6 @@ let bootLogWriteIndex = 0;
 let bootLogTotal = 0;
 /** A load is not treated as stalled until it has been running longer than this. */
 const LOAD_START_GRACE_MS = 60_000;
-
-// Load-progress tracking state
-let currentLoadPhase: "spawning" | "loading_weights" | "offloading" | "initializing" | "ready" =
-  "spawning";
-let currentLoadProgress = 0;
-const loadPhaseLogCounts: Record<string, number> = {};
-
-/**
- * Resets the load-progress tracker to its initial state.
- *
- * @returns No return value.
- */
-function resetLoadProgress(): void {
-  currentLoadPhase = "spawning";
-  currentLoadProgress = 0;
-  for (const key of Object.keys(loadPhaseLogCounts)) {
-    delete loadPhaseLogCounts[key];
-  }
-}
-
-/**
- * Derives a loading-phase update from a raw llama-server log line and broadcasts it.
- *
- * @param line - Log line emitted while llama-server is starting.
- * @returns No return value.
- */
-function trackLoadProgressFromLog(line: string): void {
-  if (currentStatus !== "loading") return;
-
-  const lower = line.toLowerCase();
-  let didChange = false;
-
-  let candidatePhase: typeof currentLoadPhase | null = null;
-  let candidateProgress = currentLoadProgress;
-  if (
-    lower.includes("load") &&
-    (lower.includes("model") || lower.includes("tensor") || lower.includes("gguf"))
-  ) {
-    candidatePhase = "loading_weights";
-    loadPhaseLogCounts["loading_weights"] = (loadPhaseLogCounts["loading_weights"] || 0) + 1;
-    candidateProgress = Math.min(15 + loadPhaseLogCounts["loading_weights"] * 3, 50);
-  } else if (
-    lower.includes("offload") ||
-    lower.includes("cuda") ||
-    lower.includes("gpu") ||
-    lower.includes("vulkan") ||
-    lower.includes("metal")
-  ) {
-    candidatePhase = "offloading";
-    loadPhaseLogCounts["offloading"] = (loadPhaseLogCounts["offloading"] || 0) + 1;
-    candidateProgress = Math.min(50 + loadPhaseLogCounts["offloading"] * 3, 80);
-  } else if (
-    lower.includes("srv") ||
-    lower.includes("http") ||
-    lower.includes("server") ||
-    lower.includes("listening") ||
-    lower.includes("health")
-  ) {
-    candidatePhase = "initializing";
-    loadPhaseLogCounts["initializing"] = (loadPhaseLogCounts["initializing"] || 0) + 1;
-    candidateProgress = Math.min(80 + loadPhaseLogCounts["initializing"] * 3, 98);
-  }
-
-  if (candidatePhase) {
-    const phaseRank = {
-      spawning: 0,
-      loading_weights: 1,
-      offloading: 2,
-      initializing: 3,
-      ready: 4,
-    } as const;
-    const nextProgress = Math.max(currentLoadProgress, candidateProgress);
-    const nextPhase =
-      phaseRank[candidatePhase] >= phaseRank[currentLoadPhase] ? candidatePhase : currentLoadPhase;
-    if (nextProgress !== currentLoadProgress || nextPhase !== currentLoadPhase) {
-      currentLoadPhase = nextPhase;
-      currentLoadProgress = nextProgress;
-      didChange = true;
-    }
-  }
-
-  if (didChange) {
-    broadcastLoadProgress(currentLoadPhase, currentLoadProgress, line.slice(0, 200));
-  }
-}
 
 /**
  * Inputs for {@link isLoadStalled}.
@@ -695,8 +610,6 @@ export async function loadModel(
   loadCancelRequested = false;
   loadingLock = true;
   clearBootLogs();
-  resetLoadProgress();
-  broadcastLoadProgress("spawning", 5, "Starting model load sequence…");
 
   let tempJinjaPath: string | undefined;
   try {
@@ -729,6 +642,10 @@ export async function loadModel(
     currentConfig = persistedConfig;
     currentThinkingTagOverride = thinkingTagOverride;
     const header = await readModelHeader(persistedConfig.modelPath);
+    if (persistedConfig.mmProjPath) {
+      const { readMmprojBudgetRates } = await import("./mediaBudget");
+      await readMmprojBudgetRates(persistedConfig.mmProjPath);
+    }
     const architecture = header?.architecture;
     const args = [...buildArgs(persistedConfig, port, architecture)];
     const templateToLoad = await resolveChatTemplateForSpawn(
@@ -768,7 +685,7 @@ export async function loadModel(
     consumeLogs(targetProc.stdout, "server");
 
     const isReady = await waitForHealthCheck(targetProc, port);
-    if (!isReady) {
+    if (!isReady || loadCancelRequested) {
       const lastError = getBootLogs().slice(-10).join("\n");
       const cancelled = loadCancelRequested;
       loadCancelRequested = false;
@@ -781,7 +698,6 @@ export async function loadModel(
     }
 
     resetTokenCountCache();
-    broadcastLoadProgress("ready", 100, "Model server ready");
     setStatus("running");
     logInfo("Model server running", { port, model: config.modelPath });
 
@@ -817,9 +733,12 @@ export async function loadModel(
 /**
  * Polls the llama-server health endpoint until the spawned process becomes ready.
  *
+ * A cancel requested while the status is still `loading` makes this return
+ * `false` so the load rejects instead of publishing a server that is about to stop.
+ *
  * @param target - Process instance that should still own the active server state.
  * @param port - Port exposed by the candidate llama-server instance.
- * @returns `true` when the health endpoint responds successfully before timeout.
+ * @returns `true` when the health endpoint responds successfully before timeout or cancel.
  */
 async function waitForHealthCheck(
   target: Subprocess<"ignore", "pipe", "pipe">,
@@ -837,12 +756,12 @@ async function waitForHealthCheck(
   let attempt = 0;
 
   while (Date.now() - startedAt < READY_CEILING_MS) {
-    if (proc !== target || target.exitCode !== null) {
+    if (loadCancelRequested || proc !== target || target.exitCode !== null) {
       return false;
     }
     try {
       if (await probeHealthEndpoint(port)) {
-        return true;
+        return !loadCancelRequested;
       }
     } catch {
       // Ignore network errors while booting
@@ -1037,7 +956,6 @@ function handleLogLine(line: string, defaultLevel: ServerLogLevel): void {
   if (!line.trim()) return;
 
   pushBootLog(line);
-  trackLoadProgressFromLog(line);
 
   if (line.startsWith("{") && line.endsWith("}")) {
     try {
